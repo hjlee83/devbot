@@ -1,10 +1,13 @@
 import os
 import signal
+import subprocess
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from devbot.github_client import GitHubIssue
 from devbot.lock import ProcessLock
 from devbot.main import main
 from devbot.models import DevBotConfig, RepositoryConfig
@@ -108,6 +111,63 @@ def test_shutdown_signal_stops_loop_gracefully() -> None:
 
     assert run_once_spy.call_count == 1
     assert sleep_calls == 1
+
+
+def _run_git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    _run_git("init", "-q", cwd=path)
+    _run_git("config", "user.email", "test@example.com", cwd=path)
+    _run_git("config", "user.name", "Test", cwd=path)
+    (path / "README.md").write_text("hello\n", encoding="utf-8")
+    _run_git("add", ".", cwd=path)
+    _run_git("commit", "-q", "-m", "initial", cwd=path)
+
+
+def test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero(
+    tmp_path: Path,
+) -> None:
+    """A real (non-dry-run) AgentRunner that exits non-zero must make
+    `main --once` exit non-zero too, not report success."""
+    workspace_root = tmp_path / "workspace"
+    repo_path = workspace_root / "myrepo"
+    _init_git_repo(repo_path)
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\n"
+        f"GITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n"
+        f"DRY_RUN=false\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        encoding="utf-8",
+    )
+
+    ready_issue = GitHubIssue(
+        repository="someone/myrepo",
+        number=1,
+        title="Broken issue",
+        body="",
+        state="open",
+        labels=("devbot:ready",),
+        created_at=datetime(2026, 1, 1),
+    )
+
+    with (
+        patch("devbot.github_client.GitHubClient.list_issues", return_value=[ready_issue]),
+        patch("devbot.agents.codex.subprocess.run") as mock_subprocess_run,
+    ):
+        mock_subprocess_run.return_value = MagicMock(returncode=1, stdout="", stderr="boom")
+        exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 1
 
 
 def test_main_loop_respects_process_lock(tmp_path: Path) -> None:

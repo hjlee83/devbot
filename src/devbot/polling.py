@@ -188,6 +188,20 @@ class PollingService:
             )
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=str(exc))
 
+        if agent_result.returncode not in (None, 0):
+            self.logger.error(
+                "AgentRunner 실행 실패 (%s #%d): 종료 코드 %s",
+                selected.repository,
+                selected.number,
+                agent_result.returncode,
+            )
+            return PollingResult(
+                status=PollingStatus.AGENT_FAILED,
+                task=selected,
+                message=agent_result.message
+                or f"AgentRunner exited with code {agent_result.returncode}",
+            )
+
         self.logger.info("실행 결과: %s", agent_result.message)
         return PollingResult(
             status=PollingStatus.AGENT_COMPLETED, task=selected, message=agent_result.message

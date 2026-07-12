@@ -247,6 +247,31 @@ def test_iteration_reports_agent_failure() -> None:
     assert result.task is not None
 
 
+def test_iteration_reports_nonzero_agent_returncode_as_failure() -> None:
+    """A subprocess that exits without raising (e.g. Codex CLI returning 1)
+    must still be treated as a failure, not silently reported as success."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 6, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="agent crashed midway", returncode=1
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_FAILED
+    assert result.task is not None
+    assert result.message
+
+
 def test_iteration_dry_run_has_no_external_side_effects() -> None:
     repo = _repo("myrepo")
     config = _config([repo], dry_run=True)

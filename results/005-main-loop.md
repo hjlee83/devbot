@@ -16,6 +16,7 @@
   - 선택된 Issue의 저장소에 `workspace.ensure_git_workspace_ready`(Task 004, 미변경)를 실행하고, `workspace.build_agent_prompt`(Task 004, 미변경)로 프롬프트를 만들어 `AgentRunner.run()`을 호출한다.
   - 결과를 `PollingStatus` Enum(`SKIPPED_ACTIVE_TASK`/`NO_READY_TASK`/`WORKSPACE_INVALID`/`AGENT_COMPLETED`/`AGENT_FAILED`/`ITERATION_ERROR`)과 `PollingResult`(status/task/message)로 구조화해 반환한다. 어떤 단계에서 예외가 나도 `run_once()` 자체는 예외를 던지지 않고 구조화된 실패 결과를 돌려준다.
   - GitHubClient, select_task, ensure_workspace_ready, build_prompt, agent_runner, logger 전부 생성자에서 교체 가능하다(의존성 주입).
+  - `AgentRunner.run()`이 예외 없이 반환하더라도 `AgentRunResult.returncode`가 0이 아니면(`None`은 dry-run이라 성공으로 취급) `AGENT_FAILED`로 처리한다. (최초 PR 리뷰에서 발견된 버그 수정 — 아래 "리뷰 반영" 참고.)
   - `run_forever()`가 `SIGINT`/`SIGTERM`을 받아 `run_once()` 사이사이 안전하게 종료하는 연속 루프를 구현한다. `sleep_fn`을 주입 가능해 테스트에서 실제 `time.sleep`을 쓰지 않는다.
 - **`src/devbot/main.py`(재작성)**: `argparse`로 `--once` 플래그를 받는다. 락 획득 후 `PollingService`를 구성해 `--once`면 `run_once()` 한 번, 아니면 `run_forever()`를 실행한다. `--once` 실패(`WORKSPACE_INVALID`/`AGENT_FAILED`/`ITERATION_ERROR`)는 종료 코드 1로 표현한다. 로그는 `logging` 모듈로 stdout에 한국어로 출력한다.
 - **`src/devbot/config.py`/`models.py`**: `GITHUB_TOKEN`을 `WORKSPACE_ROOT`와 동일하게 필수 값으로 추가했다(누락 시 명확한 `ConfigError`).
@@ -47,7 +48,7 @@
 | CP-005-8 | `--once`는 한 번만 실행 후 종료 | `test_run_once_exits_after_single_iteration` | PASS |
 | CP-005-9 | 연속 모드는 설정된 폴링 간격 사용 | `test_continuous_loop_uses_configured_poll_interval` | PASS |
 | CP-005-10 | SIGINT/SIGTERM 수신 시 안전 종료 | `test_shutdown_signal_stops_loop_gracefully` | PASS |
-| CP-005-11 | 오류가 구조화된 실패 결과와 로그로 남음 | `test_iteration_error_is_reported_without_state_corruption` | PASS |
+| CP-005-11 | 오류가 구조화된 실패 결과와 로그로 남음 | `test_iteration_error_is_reported_without_state_corruption` (+ `test_iteration_reports_nonzero_agent_returncode_as_failure`, `test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero`) | PASS |
 | CP-005-12 | 프로세스 락이 중복 실행을 막음 | `test_main_loop_respects_process_lock` | PASS |
 
 추가로 작성한 테스트(필수 아님, 경계/실패 경로 보강):
@@ -55,10 +56,12 @@
 `test_issue_without_devbot_label_is_ignored`,
 `test_iteration_reports_workspace_validation_failure`,
 `test_iteration_reports_agent_failure`,
+`test_iteration_reports_nonzero_agent_returncode_as_failure`,
 `test_iteration_picks_oldest_among_equal_priority_across_repos`,
-`test_missing_github_token_raises`.
+`test_missing_github_token_raises`,
+`test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero`.
 
-`tests/test_polling.py` 13개, `tests/test_main_loop.py` 4개 전부 PASS. 전체 스위트 58개 전부 PASS.
+`tests/test_polling.py` 14개, `tests/test_main_loop.py` 5개 전부 PASS. 전체 스위트 60개 전부 PASS.
 
 ## 검증 명령 결과
 
@@ -66,7 +69,7 @@
 |---|---|
 | `uv sync` | PASS |
 | `uv run ruff check .` | PASS (All checks passed!) |
-| `uv run pytest` | PASS (58 passed) |
+| `uv run pytest` | PASS (60 passed) |
 | `uv run devbot --once` | PASS (exit 0) |
 
 로컬 `.env`(untracked)에 `GITHUB_TOKEN` 플레이스홀더를 추가했다. 커밋된
@@ -113,6 +116,31 @@ GitHub API 호출 없이 `NO_READY_TASK`로 정상 종료한다. 수동으로
   체크포인트("설정 로드 → 정상 종료 → 락 해제")는 그대로 `--once`로
   검증하도록 유지했다. 자세한 내용은
   `results/005-main-loop-improvements.md` 참고.
+
+## 리뷰 반영
+
+1차 PR 리뷰에서 다음 blocker가 지적되어 수정했다:
+
+- **버그**: `CodexRunner.run()`(비-dry-run)이 `subprocess.run(..., check=False)`의
+  `returncode`를 `AgentRunResult.returncode`에 담아 반환하지만,
+  `PollingService.run_once()`는 예외가 없으면 이 값을 확인하지 않고
+  무조건 `AGENT_COMPLETED`로 처리하고 있었다. 즉 실제 Codex 프로세스가
+  `returncode=1`로 실패해도 `main --once`가 종료 코드 0을 반환할 수
+  있었다.
+- **수정**: `agent_result.returncode`가 `None`도 아니고 `0`도 아니면
+  `PollingStatus.AGENT_FAILED`로 처리하도록 `run_once()`에 분기를
+  추가했다(`src/devbot/polling.py`). `None`은 dry-run(`returncode`를
+  아예 채우지 않음)이라 그대로 성공 취급한다.
+- **추가한 테스트**:
+  - `test_iteration_reports_nonzero_agent_returncode_as_failure`
+    (`tests/test_polling.py`) — mock `AgentRunner`가
+    `returncode=1`인 `AgentRunResult`를 반환할 때 `run_once()`가
+    `AGENT_FAILED`를 리턴하는지 단위 테스트로 검증.
+  - `test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero`
+    (`tests/test_main_loop.py`) — `DRY_RUN=false`, 실제 임시 Git 저장소,
+    `GitHubClient.list_issues`와 `subprocess.run`만 mock한 상태로
+    `main(["--once"], ...)`를 끝까지 실행해 종료 코드가 1인지 CLI
+    레벨에서 검증.
 
 ## Improvement Suggestions
 
