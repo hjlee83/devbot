@@ -9,19 +9,24 @@ from devbot.main import main
 def test_main_starts_and_exits_successfully(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
-    monkeypatch.delenv("DEVBOT_LOCK_FILE", raising=False)
+    """CP-001-10: the CLI loads configuration and exits successfully.
 
+    Task 005 replaced the CLI's eager "validate every enabled repository"
+    startup step with a real polling iteration (see tests/test_polling.py
+    and tests/test_main_loop.py for that behavior in detail). This test
+    keeps validating the original checkpoint - config loads, the process
+    runs to completion, and the lock is released - using `--once` with no
+    enabled repositories so it stays fast and makes no network calls.
+    """
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    enabled_repo_path = workspace_root / "myrepo"
-    enabled_repo_path.mkdir()
-
     lock_file = tmp_path / "devbot.lock"
 
     env_path = tmp_path / ".env"
     env_path.write_text(
-        f"WORKSPACE_ROOT={workspace_root}\nDEVBOT_LOCK_FILE={lock_file}\n",
+        f"WORKSPACE_ROOT={workspace_root}\n"
+        f"GITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={lock_file}\n",
         encoding="utf-8",
     )
 
@@ -30,16 +35,13 @@ def test_main_starts_and_exits_successfully(
         "repositories:\n"
         "  - owner: someone\n"
         "    repo: myrepo\n"
-        "    enabled: true\n",
+        "    enabled: false\n",
         encoding="utf-8",
     )
 
-    exit_code = main(env_path=env_path, repositories_path=repositories_path)
+    exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 0
-    captured = capsys.readouterr()
-    assert "DevBot started" in captured.out
-    assert "someone/myrepo" in captured.out
 
     # The lock must have been released on normal exit: re-acquiring it
     # immediately after main() returns must succeed.

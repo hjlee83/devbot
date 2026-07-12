@@ -25,6 +25,7 @@ def _write_env(path: Path, workspace_root: Path | None, **extra: str) -> Path:
     lines = []
     if workspace_root is not None:
         lines.append(f"WORKSPACE_ROOT={workspace_root}")
+    lines.append("GITHUB_TOKEN=test-token")
     lines.append("POLL_INTERVAL_SECONDS=15")
     lines.append("DEFAULT_AGENT=codex")
     for key, value in extra.items():
@@ -57,6 +58,16 @@ def test_missing_required_config_raises(tmp_path: Path, monkeypatch: pytest.Monk
     repositories_path = _write_repositories_yaml(tmp_path)
 
     with pytest.raises(ConfigError, match="WORKSPACE_ROOT"):
+        load_config(env_path=env_path, repositories_path=repositories_path)
+
+
+def test_missing_github_token_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"WORKSPACE_ROOT={workspace_root}\n", encoding="utf-8")
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    with pytest.raises(ConfigError, match="GITHUB_TOKEN"):
         load_config(env_path=env_path, repositories_path=repositories_path)
 
 

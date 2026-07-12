@@ -128,6 +128,10 @@ def load_config(
         raise ConfigError("Missing required environment variable: WORKSPACE_ROOT")
     workspace_root = Path(workspace_root_raw).expanduser()
 
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        raise ConfigError("Missing required environment variable: GITHUB_TOKEN")
+
     poll_interval_seconds = _parse_int("POLL_INTERVAL_SECONDS", _get_env("POLL_INTERVAL_SECONDS"))
     max_concurrent_jobs = _parse_int("MAX_CONCURRENT_JOBS", _get_env("MAX_CONCURRENT_JOBS"))
     lock_file_raw = _require_nonempty("DEVBOT_LOCK_FILE", _get_env("DEVBOT_LOCK_FILE"))
@@ -147,5 +151,6 @@ def load_config(
         default_agent=default_agent,
         max_concurrent_jobs=max_concurrent_jobs,
         dry_run=dry_run,
+        github_token=github_token,
         repositories=repositories,
     )
