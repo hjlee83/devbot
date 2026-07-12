@@ -32,6 +32,7 @@ cleanly, releasing the lock.
 - `src/devbot/github_client.py` — `GitHubClient` skeleton (no network)
 - `src/devbot/workspace.py` — `validate_repository_paths`, `WorkspaceValidationError`
 - `src/devbot/main.py` — CLI entry point (`main`, `run`)
+- `tests/conftest.py` — autouse fixture resetting config env vars between tests
 - `tests/test_config.py`
 - `tests/test_lock.py`
 - `tests/test_queue.py`
@@ -88,8 +89,10 @@ Python 3.13 (via `astral-sh/setup-uv`) on every PR and on push to `main`.
 Since no `.env` is committed, `WORKSPACE_ROOT` is set to
 `${{ runner.temp }}` only for the `uv run devbot` step; `uv sync`, `ruff`,
 and `pytest` need no environment-specific configuration — this is the
-minimal CI-only configuration needed, no other behavior changed. Verified
-green: https://github.com/hjlee83/devbot/actions/runs/29200933608
+minimal CI-only configuration needed, no other behavior changed. Latest
+green run (current HEAD, after the CP-001-2 fixes and the
+`main`(AGENTS.md v1.0.0) sync merge):
+https://github.com/hjlee83/devbot/actions/runs/29201626776
 
 ## Remaining TODO
 - Task 002+ : real GitHub API read client, live queue population from
