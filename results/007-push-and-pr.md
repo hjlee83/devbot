@@ -112,7 +112,25 @@ PR 링크 댓글까지 이어지는 "delivery" 파이프라인을 구현했다. 
   포함시켜 디버깅 정보를 보존하기 위한 선택이다.
 - Task 006과 마찬가지로 로컬 샌드박스에 `uv`가 기본 설치돼 있지 않아
   `pip install --user uv`로 설치한 뒤 검증 명령을 실행했다.
-- 이 PR은 아직 병합되지 않은 Task 006 브랜치(`feature/task-006-issue-write-state`)
-  위에 쌓았다 — `delivery.py`가 Task 006에서 추가된
-  `GitHubWriteClient`/`RepositoryConfig` 변경을 그대로 사용하기 때문.
-  베이스 브랜치가 머지되면 이 PR의 베이스도 `main`으로 재설정해야 한다.
+
+## 리뷰 반영
+
+1차 PR 리뷰(REQUEST CHANGES)에서 다음 blocker가 지적되어 수정했다:
+
+- **문제**: PR #8을 처음 열 때 아직 병합되지 않은 Task 006 브랜치
+  (`feature/task-006-issue-write-state`, #7) 위에 쌓았는데, 리뷰 시점에는
+  #7이 이미 merge된 상태였다. PR #8의 base는 자동으로 재설정되지 않고
+  그대로 `feature/task-006-issue-write-state`에 남아 있어, 그 상태로
+  merge하면 `main`이 아니라 이미 병합된 feature 브랜치로 들어갈 수 있는
+  상황이었다.
+- **수정**: task-007 커밋(`5e10c72`) 하나만 `git rebase --onto origin/main
+  feature/task-006-issue-write-state feature/task-007-push-and-pr`로
+  최신 `origin/main`(squash-merge된 Task 006 포함) 위로 재배치하고,
+  `git push --force-with-lease`로 같은 브랜치를 갱신했다. 이후
+  `gh pr edit 8 --base main`으로 base를 `main`으로 변경했다 — PR #8의
+  커밋 수가 1개로 줄고 diff도 Task 007 변경분만 남는 것을 확인했다.
+  PR 본문의 "베이스 브랜치 안내" 문단(더 이상 사실이 아니게 된 내용)도
+  제거했다.
+- 리뷰 반영 후 재검증: `uv run ruff check .` PASS, `uv run pytest`
+  PASS(82 passed) — 리베이스로 코드 내용이 바뀌지 않았으므로 결과는
+  동일하다.
