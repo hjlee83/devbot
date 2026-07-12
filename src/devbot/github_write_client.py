@@ -107,6 +107,16 @@ class GitHubWriteClient:
             json={"body": body},
         )
 
+    def add_reaction_to_comment(
+        self, repository: RepositoryConfig, comment_id: int, *, content: str
+    ) -> None:
+        """React to an Issue/PR conversation comment (used by
+        `devbot.rework` to mark a `@devbot` comment processed)."""
+        self._post(
+            f"/repos/{repository.owner}/{repository.repo}/issues/comments/{comment_id}/reactions",
+            json={"content": content},
+        )
+
     def create_pull_request(
         self, repository: RepositoryConfig, *, title: str, body: str, head: str, base: str
     ) -> PullRequestInfo:
