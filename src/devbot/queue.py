@@ -1,10 +1,13 @@
-"""Global queue selection skeleton.
+"""Global queue selection.
 
 Models one global queue across every managed repository. No network access:
 callers are responsible for supplying the current `IssueTask` snapshot (from
-GitHub, in a later Task). This module only implements the selection rules:
+GitHub, in a later Task). This module implements the selection rules:
 
-- Refuse new work while any `working` or `review` task exists anywhere.
+- Disabled repositories are ignored entirely, including for the purpose of
+  the active-task block below.
+- Refuse new work while any `working` or `review` task exists in an enabled
+  repository.
 - Otherwise select the highest-priority, then oldest, `ready` task.
 """
 
@@ -12,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from devbot.models import IssueTask, Priority, TaskState
+from devbot.models import IssueTask, Priority, RepositoryConfig, TaskState
 
 _ACTIVE_STATES = (TaskState.WORKING, TaskState.REVIEW)
 
@@ -45,3 +48,18 @@ def select_ready_task(tasks: Iterable[IssueTask]) -> IssueTask | None:
         return None
 
     return min(ready_tasks, key=lambda task: (_PRIORITY_ORDER[task.priority], task.created_at))
+
+
+def select_global_ready_task(
+    tasks: Iterable[IssueTask],
+    repositories: Iterable[RepositoryConfig],
+) -> IssueTask | None:
+    """Select at most one eligible `ready` Issue across every enabled repository.
+
+    Tasks belonging to a disabled repository are ignored entirely, as if
+    they did not exist, before applying `select_ready_task`'s blocking and
+    priority/age ordering rules to what remains.
+    """
+    enabled_repository_names = {repo.full_name for repo in repositories if repo.enabled}
+    eligible_tasks = [task for task in tasks if task.repository in enabled_repository_names]
+    return select_ready_task(eligible_tasks)
