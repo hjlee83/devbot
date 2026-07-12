@@ -135,4 +135,18 @@ def test_transition_with_multiple_state_labels_is_rejected() -> None:
     with pytest.raises(InvalidStateTransitionError):
         writer.claim(repository, issue)
 
+
+def test_dry_run_transitions_can_be_chained_using_returned_issue() -> None:
+    writer, client = _writer(dry_run=True)
+    repository = _repository()
+    issue = _issue(9, labels=["devbot:review"])
+
+    working_issue = writer.request_changes(repository, issue)
+    assert working_issue.labels == ("devbot:working",)
+
+    reviewed_issue = writer.mark_for_review(repository, working_issue)
+    assert reviewed_issue.labels == ("devbot:review",)
+
+    client.set_labels.assert_not_called()
+
     client.set_labels.assert_not_called()

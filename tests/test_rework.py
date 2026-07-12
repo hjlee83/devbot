@@ -179,3 +179,25 @@ def test_successful_rework_returns_to_review() -> None:
     assert args[0] is repository
     assert args[1].labels == ("devbot:working",)
     assert result.message == "reworked"
+
+
+def test_rework_with_real_dry_run_state_writer_completes_full_cycle() -> None:
+    """Regression test: `IssueStateWriter`'s default `dry_run=True` must
+    still return a would-be-updated `GitHubIssue` from `request_changes()`,
+    or the chained `mark_for_review()` call below sees the stale `review`
+    label and rejects the transition."""
+    state_writer = IssueStateWriter(client=MagicMock(spec=GitHubWriteClient))
+    write_client = MagicMock(spec=GitHubWriteClient)
+    service = ReworkService(
+        state_writer=state_writer,
+        write_client=write_client,
+        apply_changes=MagicMock(),
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=MagicMock(),
+        push=MagicMock(),
+    )
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    assert result.message == "reworked"

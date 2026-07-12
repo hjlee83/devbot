@@ -83,12 +83,12 @@ class IssueStateWriter:
                 f"from {current} to {to_state.value}"
             )
 
-        if self.dry_run:
-            return issue
-
         new_labels = [label for label in issue.labels if label != _state_label(from_state)]
         new_labels.append(_state_label(to_state))
-        self.client.set_labels(repository, issue.number, new_labels)
+
+        if not self.dry_run:
+            self.client.set_labels(repository, issue.number, new_labels)
+
         return replace(issue, labels=tuple(new_labels))
 
     def claim(self, repository: RepositoryConfig, issue: GitHubIssue) -> GitHubIssue:
