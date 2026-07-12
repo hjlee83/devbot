@@ -22,8 +22,9 @@
   - `_ALLOWED_TRANSITIONS`가 `docs/02-workflow.md`의 상태 흐름
     (`ready→working`, `working→review`, `working→blocked`,
     `review→working`, `review→done`, `blocked→ready`)을 그대로 표현한다.
-  - `_current_state()`가 `GitHubIssue.labels`에서 현재 `devbot:*` 라벨을
-    읽어 전환 시작 상태를 결정한다(라벨이 없거나 허용되지 않는 전환이면
+  - `_matched_state_labels()`가 `GitHubIssue.labels`에서 `devbot:*`
+    라벨을 모두 수집하고, 정확히 하나일 때만 전환 시작 상태로 인정한다
+    (0개거나 2개 이상이거나 허용되지 않는 전환이면
     `InvalidStateTransitionError`를 발생시키며, 이 검증은 `dry_run`
     여부와 무관하게 항상 수행된다).
   - `claim()`/`block(reason)`/`mark_for_review()`/`request_changes()`
