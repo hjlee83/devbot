@@ -24,6 +24,7 @@ class AgentRunResult:
     executed: bool
     dry_run: bool
     message: str
+    returncode: int | None = None
 
 
 class AgentRunner(ABC):

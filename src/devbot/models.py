@@ -68,3 +68,12 @@ class IssueTask:
     state: TaskState
     priority: Priority
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IssueComment:
+    """A single comment on a GitHub Issue, already filtered to "unprocessed"
+    by the caller (this module does not decide what counts as processed)."""
+
+    author: str
+    body: str
