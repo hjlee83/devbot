@@ -25,10 +25,14 @@ jobs:
       - name: uv run pytest
         run: uv run pytest
 
-      - name: uv run devbot
-        run: uv run devbot
+      - name: uv run devbot --once
+        run: uv run devbot --once
         env:
-          # No .env is committed; devbot requires WORKSPACE_ROOT to start.
-          # config/repositories.yaml ships its sample repository disabled,
-          # so no repository path under this root needs to actually exist.
+          # No .env is committed; devbot requires WORKSPACE_ROOT and
+          # GITHUB_TOKEN to start. config/repositories.yaml ships its
+          # sample repository disabled, so no repository path needs to
+          # actually exist and no real GitHub API call is ever made.
+          # --once is required here: bare `uv run devbot` runs the
+          # continuous polling loop and would never return.
           WORKSPACE_ROOT: ${{ runner.temp }}
+          GITHUB_TOKEN: ci-placeholder-token

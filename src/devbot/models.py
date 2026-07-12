@@ -51,6 +51,7 @@ class DevBotConfig:
     default_agent: str
     max_concurrent_jobs: int
     dry_run: bool
+    github_token: str
     repositories: tuple[RepositoryConfig, ...]
 
     @property

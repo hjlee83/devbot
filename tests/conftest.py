@@ -6,6 +6,7 @@ import pytest
 # an invalid DRY_RUN) would leak into unrelated tests later in the session.
 _CONFIG_ENV_VARS = (
     "WORKSPACE_ROOT",
+    "GITHUB_TOKEN",
     "POLL_INTERVAL_SECONDS",
     "DEVBOT_LOCK_FILE",
     "DEFAULT_AGENT",
