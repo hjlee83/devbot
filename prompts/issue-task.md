@@ -19,6 +19,9 @@ repository's own `AGENTS.md`.
 ## Issue Body
 {{issue_body}}
 
+## Unprocessed Comments
+{{unprocessed_comments}}
+
 ## Instructions
 1. Read the target repository's root `AGENTS.md` and follow it exactly.
 2. Implement only the scope described in this Issue.

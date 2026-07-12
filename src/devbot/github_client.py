@@ -52,6 +52,7 @@ class GitHubIssue:
     repository: str
     number: int
     title: str
+    body: str
     state: str
     labels: tuple[str, ...]
     created_at: datetime
@@ -89,6 +90,7 @@ def _parse_issue(repository: str, raw: dict[str, Any]) -> GitHubIssue:
         repository=repository,
         number=raw["number"],
         title=raw["title"],
+        body=raw.get("body") or "",
         state=raw["state"],
         labels=labels,
         created_at=datetime.fromisoformat(raw["created_at"].replace("Z", "+00:00")),

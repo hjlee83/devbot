@@ -1,16 +1,14 @@
-"""Codex CLI agent runner.
-
-This Task ships a dry-run skeleton only: real Codex execution (spawning the
-`codex` CLI as a subprocess against a checked-out repository) is out of
-scope and is implemented in a later Task.
-"""
+"""Codex CLI agent runner."""
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 
 from devbot.agents.base import AgentRunner, AgentRunResult
 from devbot.models import RepositoryConfig
+
+CODEX_COMMAND = "codex"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,4 +25,16 @@ class CodexRunner(AgentRunner):
                 message=f"[dry-run] would run codex in {repository.local_path}",
             )
 
-        raise NotImplementedError("Real Codex execution is out of scope for Task 001")
+        completed = subprocess.run(
+            [CODEX_COMMAND, "exec", prompt],
+            cwd=str(repository.local_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return AgentRunResult(
+            executed=True,
+            dry_run=False,
+            message=completed.stdout or completed.stderr,
+            returncode=completed.returncode,
+        )
