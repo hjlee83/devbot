@@ -1,0 +1,100 @@
+"""GitHub REST API write client.
+
+Implements the literal writes DevBot needs to advance an Issue: replacing
+its full label set and posting a comment. This client performs no
+validation of *which* writes make sense; `devbot.issue_state` decides that
+and calls this client only once a transition has been validated.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
+import requests
+
+from devbot.github_client import (
+    GITHUB_API_BASE_URL,
+    GitHubAPIError,
+    GitHubAuthenticationError,
+    GitHubClientError,
+    GitHubNotFoundError,
+)
+from devbot.models import RepositoryConfig
+
+
+def _error_message(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text
+    if isinstance(payload, dict) and "message" in payload:
+        return str(payload["message"])
+    return response.text
+
+
+def _raise_for_status(response: requests.Response) -> None:
+    if response.ok:
+        return
+
+    message = _error_message(response)
+    status = response.status_code
+    if status == 401:
+        raise GitHubAuthenticationError(f"GitHub authentication failed: {message}")
+    if status == 404:
+        raise GitHubNotFoundError(f"GitHub resource not found: {message}")
+    raise GitHubAPIError(f"GitHub API error {status}: {message}")
+
+
+class GitHubWriteClient:
+    """Minimal authenticated GitHub REST API write client."""
+
+    def __init__(
+        self,
+        token: str,
+        *,
+        base_url: str = GITHUB_API_BASE_URL,
+        session: requests.Session | None = None,
+    ) -> None:
+        self.token = token
+        self.base_url = base_url.rstrip("/")
+        self._session = session or requests.Session()
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+    def _post(self, path: str, json: dict[str, Any]) -> requests.Response:
+        response = self._session.post(
+            f"{self.base_url}{path}", headers=self._headers(), json=json, timeout=30
+        )
+        _raise_for_status(response)
+        return response
+
+    def _put(self, path: str, json: dict[str, Any]) -> requests.Response:
+        response = self._session.put(
+            f"{self.base_url}{path}", headers=self._headers(), json=json, timeout=30
+        )
+        _raise_for_status(response)
+        return response
+
+    def set_labels(
+        self, repository: RepositoryConfig, issue_number: int, labels: Sequence[str]
+    ) -> None:
+        """Replace the full label set on an Issue."""
+        self._put(
+            f"/repos/{repository.owner}/{repository.repo}/issues/{issue_number}/labels",
+            json={"labels": list(labels)},
+        )
+
+    def create_comment(self, repository: RepositoryConfig, issue_number: int, body: str) -> None:
+        """Post a new comment on an Issue."""
+        self._post(
+            f"/repos/{repository.owner}/{repository.repo}/issues/{issue_number}/comments",
+            json={"body": body},
+        )
+
+
+__all__ = ["GitHubClientError", "GitHubWriteClient"]
