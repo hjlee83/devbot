@@ -14,11 +14,16 @@ The allowed transitions mirror `docs/02-workflow.md` and
 Every write is validated against the Issue's *current* label state before
 touching GitHub. `IssueStateWriter(dry_run=True)` (the default) still
 validates the transition but performs no label or comment write.
+
+Every method returns the `GitHubIssue` with its state label already
+updated to match what was (or, in dry-run, would be) written, so callers
+can chain multiple transitions (e.g. `devbot.rework`) without re-fetching
+from GitHub between steps.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from devbot.github_client import GitHubIssue
 from devbot.github_write_client import GitHubWriteClient
@@ -62,7 +67,7 @@ class IssueStateWriter:
 
     def _transition(
         self, repository: RepositoryConfig, issue: GitHubIssue, to_state: TaskState
-    ) -> None:
+    ) -> GitHubIssue:
         matched = _matched_state_labels(issue)
         from_state = matched[0] if len(matched) == 1 else None
         allowed = _ALLOWED_TRANSITIONS.get(from_state, ()) if from_state is not None else ()
@@ -79,28 +84,30 @@ class IssueStateWriter:
             )
 
         if self.dry_run:
-            return
+            return issue
 
         new_labels = [label for label in issue.labels if label != _state_label(from_state)]
         new_labels.append(_state_label(to_state))
         self.client.set_labels(repository, issue.number, new_labels)
+        return replace(issue, labels=tuple(new_labels))
 
-    def claim(self, repository: RepositoryConfig, issue: GitHubIssue) -> None:
+    def claim(self, repository: RepositoryConfig, issue: GitHubIssue) -> GitHubIssue:
         """Move a `ready` Issue to `working`, claiming it for this run."""
-        self._transition(repository, issue, TaskState.WORKING)
+        return self._transition(repository, issue, TaskState.WORKING)
 
-    def block(self, repository: RepositoryConfig, issue: GitHubIssue, reason: str) -> None:
+    def block(self, repository: RepositoryConfig, issue: GitHubIssue, reason: str) -> GitHubIssue:
         """Move a `working` Issue to `blocked`, recording `reason` as a
         comment explaining why."""
-        self._transition(repository, issue, TaskState.BLOCKED)
+        updated = self._transition(repository, issue, TaskState.BLOCKED)
         if not self.dry_run:
             self.client.create_comment(repository, issue.number, reason)
+        return updated
 
-    def mark_for_review(self, repository: RepositoryConfig, issue: GitHubIssue) -> None:
+    def mark_for_review(self, repository: RepositoryConfig, issue: GitHubIssue) -> GitHubIssue:
         """Move a `working` Issue to `review` after a successful
         implementation."""
-        self._transition(repository, issue, TaskState.REVIEW)
+        return self._transition(repository, issue, TaskState.REVIEW)
 
-    def request_changes(self, repository: RepositoryConfig, issue: GitHubIssue) -> None:
+    def request_changes(self, repository: RepositoryConfig, issue: GitHubIssue) -> GitHubIssue:
         """Move a `review` Issue back to `working` for requested changes."""
-        self._transition(repository, issue, TaskState.WORKING)
+        return self._transition(repository, issue, TaskState.WORKING)

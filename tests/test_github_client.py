@@ -43,6 +43,18 @@ def _issue(number: int, *, labels: list[str] | None = None, state: str = "open")
     }
 
 
+def _comment(
+    comment_id: int, *, body: str = "a comment", reactions: dict[str, int] | None = None
+) -> dict:
+    return {
+        "id": comment_id,
+        "user": {"login": "someone"},
+        "body": body,
+        "created_at": "2026-01-01T00:00:00Z",
+        "reactions": {"url": "https://...", "total_count": 0, **(reactions or {})},
+    }
+
+
 def test_get_authenticated_user() -> None:
     session = MagicMock()
     session.get.return_value = _mock_response(json_data={"login": "octocat", "id": 42})
@@ -88,6 +100,29 @@ def test_list_issues_applies_state_and_label_filters() -> None:
     assert kwargs["params"]["labels"] == "priority:high,devbot:ready"
 
 
+def test_list_issue_comments_follows_pagination_and_parses_reactions() -> None:
+    session = MagicMock()
+    page_1 = [
+        _comment(1, body="looks good"),
+        _comment(2, body="@devbot fix", reactions={"eyes": 1}),
+    ]
+    page_2 = [_comment(3, body="@devbot also this")]
+    session.get.side_effect = [
+        _mock_response(json_data=page_1),
+        _mock_response(json_data=page_2),
+    ]
+    client = GitHubClient("token123", session=session)
+
+    comments = client.list_issue_comments(_repository(), 42, per_page=2)
+
+    assert [comment.id for comment in comments] == [1, 2, 3]
+    assert comments[1].reactions == {"eyes": 1}
+    assert comments[2].reactions == {}
+    assert session.get.call_count == 2
+    first_call = session.get.call_args_list[0]
+    assert first_call.args[0].endswith("/repos/someone/myrepo/issues/42/comments")
+
+
 def test_github_error_is_translated() -> None:
     session = MagicMock()
     session.get.return_value = _mock_response(
@@ -120,7 +155,7 @@ def test_github_generic_error_is_translated() -> None:
 
 
 def test_client_exposes_read_operations_only() -> None:
-    allowed_public_methods = {"get_authenticated_user", "list_issues"}
+    allowed_public_methods = {"get_authenticated_user", "list_issues", "list_issue_comments"}
     forbidden_names = {
         "create_issue",
         "update_issue",

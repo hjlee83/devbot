@@ -52,6 +52,19 @@ def test_create_comment_sends_post_with_body() -> None:
     assert kwargs["json"] == {"body": "blocked: needs clarification"}
 
 
+def test_add_reaction_to_comment_sends_post_with_content() -> None:
+    session = MagicMock()
+    session.post.return_value = _mock_response(json_data={})
+    client = GitHubWriteClient("token123", session=session)
+
+    client.add_reaction_to_comment(_repository(), 7, content="eyes")
+
+    session.post.assert_called_once()
+    args, kwargs = session.post.call_args
+    assert args[0].endswith("/repos/someone/myrepo/issues/comments/7/reactions")
+    assert kwargs["json"] == {"content": "eyes"}
+
+
 def test_create_pull_request_sends_post_and_parses_response() -> None:
     session = MagicMock()
     session.post.return_value = _mock_response(

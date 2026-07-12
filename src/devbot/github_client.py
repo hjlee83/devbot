@@ -58,6 +58,22 @@ class GitHubIssue:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PullRequestComment:
+    """A single conversation comment on an Issue or PR, per
+    `GET /repos/{owner}/{repo}/issues/{number}/comments`.
+
+    `reactions` is the raw per-content reaction count map (e.g.
+    `{"eyes": 1}`); this module does not decide what any reaction means —
+    callers (e.g. `devbot.rework`) interpret that convention."""
+
+    id: int
+    author: str
+    body: str
+    created_at: datetime
+    reactions: dict[str, int]
+
+
 def _error_message(response: requests.Response) -> str:
     try:
         payload = response.json()
@@ -94,6 +110,22 @@ def _parse_issue(repository: str, raw: dict[str, Any]) -> GitHubIssue:
         state=raw["state"],
         labels=labels,
         created_at=datetime.fromisoformat(raw["created_at"].replace("Z", "+00:00")),
+    )
+
+
+def _parse_comment(raw: dict[str, Any]) -> PullRequestComment:
+    reactions_raw = raw.get("reactions") or {}
+    reactions = {
+        key: int(value)
+        for key, value in reactions_raw.items()
+        if key not in ("url", "total_count")
+    }
+    return PullRequestComment(
+        id=raw["id"],
+        author=raw["user"]["login"],
+        body=raw.get("body") or "",
+        created_at=datetime.fromisoformat(raw["created_at"].replace("Z", "+00:00")),
+        reactions=reactions,
     )
 
 
@@ -165,3 +197,28 @@ class GitHubClient:
             page += 1
 
         return issues
+
+    def list_issue_comments(
+        self,
+        repository: RepositoryConfig,
+        issue_number: int,
+        *,
+        per_page: int = DEFAULT_PER_PAGE,
+    ) -> list[PullRequestComment]:
+        """List every conversation comment on an Issue or PR, following
+        pagination to completion."""
+        comments: list[PullRequestComment] = []
+        page = 1
+        while True:
+            raw_page = self._get(
+                f"/repos/{repository.owner}/{repository.repo}/issues/{issue_number}/comments",
+                params={"page": page, "per_page": per_page},
+            ).json()
+
+            comments.extend(_parse_comment(raw_comment) for raw_comment in raw_page)
+
+            if len(raw_page) < per_page:
+                break
+            page += 1
+
+        return comments
