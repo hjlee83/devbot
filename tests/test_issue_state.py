@@ -125,3 +125,14 @@ def test_invalid_state_transition_with_no_state_label_is_rejected() -> None:
 
     with pytest.raises(InvalidStateTransitionError):
         writer.claim(repository, issue)
+
+
+def test_transition_with_multiple_state_labels_is_rejected() -> None:
+    writer, client = _writer()
+    repository = _repository()
+    issue = _issue(8, labels=["devbot:ready", "devbot:review"])
+
+    with pytest.raises(InvalidStateTransitionError):
+        writer.claim(repository, issue)
+
+    client.set_labels.assert_not_called()

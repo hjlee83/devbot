@@ -68,13 +68,15 @@ dry-run)를 제공하고, 실제 폴링 루프 연결은 PR 생성이 준비되�
 `test_blocked_transition_dry_run_skips_comment`,
 `test_invalid_state_transition_is_rejected_regardless_of_dry_run`,
 `test_invalid_state_transition_with_no_state_label_is_rejected`,
+`test_transition_with_multiple_state_labels_is_rejected`(리뷰 반영, 아래
+참고),
 `test_set_labels_sends_put_with_full_label_set`,
 `test_create_comment_sends_post_with_body`,
 `test_write_not_found_error_is_translated`,
 `test_write_authentication_error_is_translated`.
 
-`tests/test_issue_state.py` 9개, `tests/test_github_write_client.py` 4개
-전부 PASS. 전체 스위트 73개 전부 PASS.
+`tests/test_issue_state.py` 10개, `tests/test_github_write_client.py` 4개
+전부 PASS. 전체 스위트 74개 전부 PASS.
 
 ## 검증 명령 결과
 
@@ -82,7 +84,7 @@ dry-run)를 제공하고, 실제 폴링 루프 연결은 PR 생성이 준비되�
 |---|---|
 | `uv sync` | PASS |
 | `uv run ruff check .` | PASS (All checks passed!) |
-| `uv run pytest` | PASS (73 passed) |
+| `uv run pytest` | PASS (74 passed) |
 | `uv run devbot --once` | PASS (exit 0, `no_ready_task`) |
 
 ## 남은 TODO
@@ -106,3 +108,30 @@ dry-run)를 제공하고, 실제 폴링 루프 연결은 PR 생성이 준비되�
 - 로컬 샌드박스에 `uv`가 설치돼 있지 않아 `pip install --user uv`로
   설치한 뒤 검증 명령을 실행했다(`uv sync`/`ruff`/`pytest`/`devbot --once`
   모두 정상 동작 확인).
+
+## 리뷰 반영
+
+1차 PR 리뷰(REQUEST CHANGES)에서 다음 blocker가 지적되어 수정했다:
+
+- **버그**: `_current_state()`가 `devbot:*` 상태 라벨이 두 개 이상인
+  Issue를 오류로 취급하지 않고, `TaskState` enum 순서상 먼저 나오는
+  라벨을 현재 상태로 채택했다. 이후 `_transition()`은 그렇게 채택된
+  라벨 하나만 제거하고 새 상태 라벨을 추가하므로, 예를 들어
+  `["devbot:ready", "devbot:review"]` 상태에서 `claim()`을 호출하면
+  `["devbot:review", "devbot:working"]`처럼 충돌하는 상태 라벨이 남는
+  안전하지 않은 쓰기가 발생할 수 있었다.
+- **수정**: `_current_state()`를 제거하고 `_matched_state_labels()`가
+  Issue의 `devbot:*` 라벨을 전부 수집하도록 했다. `_transition()`은 이
+  목록의 길이가 정확히 1일 때만 `from_state`를 확정하고, 0개 또는 2개
+  이상이면 `InvalidStateTransitionError`로 거부한다(에러 메시지도
+  "라벨 없음"과 "충돌 라벨"을 구분해 표시).
+- **추가한 테스트**: `test_transition_with_multiple_state_labels_is_rejected`
+  (`tests/test_issue_state.py`, 리뷰 코멘트에서 제안한 이름 그대로) —
+  `["devbot:ready", "devbot:review"]` 라벨을 가진 Issue에 `claim()`을
+  호출하면 `InvalidStateTransitionError`가 발생하고 `set_labels`가 전혀
+  호출되지 않는지 검증.
+- 리뷰의 Warning(`block()`이 라벨 변경 후 댓글 작성에 실패하면 `blocked`
+  상태만 남고 설명 댓글이 없는 부분 성공이 될 수 있음)은 GitHub API
+  자체가 두 호출에 걸친 원자성을 보장하지 않아 이번 Task에서 구조적으로
+  해결하지 않았다 — "남은 TODO"에 남겨둔 항목과 별개로, 후속 Task에서
+  재시도/보정 로직이 필요하면 이 지점부터 시작하면 된다.

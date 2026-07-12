@@ -44,12 +44,12 @@ def _state_label(state: TaskState) -> str:
     return f"{_STATE_LABEL_PREFIX}{state.value}"
 
 
-def _current_state(issue: GitHubIssue) -> TaskState | None:
+def _matched_state_labels(issue: GitHubIssue) -> list[TaskState]:
+    """Return every `devbot:*` state label present on `issue`. Exactly one
+    is a well-formed Issue; zero or more than one is never a valid
+    transition source (ambiguous/conflicting state)."""
     label_set = set(issue.labels)
-    for state in TaskState:
-        if _state_label(state) in label_set:
-            return state
-    return None
+    return [state for state in TaskState if _state_label(state) in label_set]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +63,16 @@ class IssueStateWriter:
     def _transition(
         self, repository: RepositoryConfig, issue: GitHubIssue, to_state: TaskState
     ) -> None:
-        from_state = _current_state(issue)
+        matched = _matched_state_labels(issue)
+        from_state = matched[0] if len(matched) == 1 else None
         allowed = _ALLOWED_TRANSITIONS.get(from_state, ()) if from_state is not None else ()
         if to_state not in allowed:
-            current = from_state.value if from_state is not None else "none"
+            if not matched:
+                current = "no devbot:* label"
+            elif len(matched) > 1:
+                current = "conflicting labels (" + ", ".join(_state_label(s) for s in matched) + ")"
+            else:
+                current = from_state.value
             raise InvalidStateTransitionError(
                 f"Cannot transition Issue {repository.full_name}#{issue.number} "
                 f"from {current} to {to_state.value}"
