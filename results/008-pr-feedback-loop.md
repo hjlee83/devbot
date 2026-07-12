@@ -98,7 +98,9 @@
 `test_add_reaction_to_comment_sends_post_with_content`
 (`tests/test_github_write_client.py`).
 
-`tests/test_rework.py` 7개 전부 PASS. 전체 스위트 91개 전부 PASS.
+`tests/test_rework.py` 8개(리뷰 반영으로 회귀 테스트 1개 추가),
+`tests/test_issue_state.py` 회귀 테스트 1개 전부 PASS. 전체 스위트
+93개 전부 PASS.
 
 ## 검증 명령 결과
 
@@ -106,7 +108,7 @@
 |---|---|
 | `uv sync` | PASS |
 | `uv run ruff check .` | PASS (All checks passed!) |
-| `uv run pytest` | PASS (91 passed) |
+| `uv run pytest` | PASS (93 passed) |
 | `uv run devbot --once` | PASS (exit 0, `no_ready_task`) |
 
 ## 남은 TODO
@@ -134,9 +136,45 @@
   변경이라 판단해 포함시켰다.
 - Task 006/007과 마찬가지로 로컬 샌드박스에 `uv`가 기본 설치돼 있지
   않아 `pip install --user uv`로 설치한 뒤 검증 명령을 실행했다.
-- 이 PR은 아직 병합되지 않은 Task 007 브랜치(`feature/task-007-push-and-pr`,
-  #8, 리뷰 MERGE READY, base=`main`) 위에 쌓았다 — `rework.py`가 Task
-  007의 `delivery.py` 함수를 그대로 재사용하기 때문이다. #8이 머지되면
-  이 PR의 base도 재확인해서 필요하면 Task 007에서 했던 것과 같은 방식
-  (rebase + `push --force-with-lease` + `gh pr edit --base main`)으로
-  정리해야 한다.
+- 처음 PR을 열 때는 아직 병합되지 않은 Task 007 브랜치
+  (`feature/task-007-push-and-pr`, #8) 위에 쌓았다 — 아래 "리뷰 반영"에
+  기록된 대로 #8이 merge된 뒤 base를 `main`으로 정리했다.
+
+## 리뷰 반영
+
+1차 PR 리뷰(REQUEST CHANGES)에서 다음 두 가지 blocker가 지적되어
+수정했다:
+
+- **Blocker 1 (base 브랜치)**: PR #9를 열 때 아직 병합되지 않은 Task
+  007 브랜치(#8) 위에 쌓았는데, 리뷰 시점에는 #8이 이미 merge된
+  상태였다. Task 007(#8)에서 했던 것과 동일한 절차로 해결했다: 두
+  커밋(`a1b6821`, `b6cc4cd`)을 `git rebase --onto origin/main
+  feature/task-007-push-and-pr feature/task-008-pr-feedback-loop`로
+  최신 `origin/main`(Task 007 squash-merge 포함) 위로 재배치하고,
+  `git push --force-with-lease`로 갱신한 뒤 `gh pr edit 9 --base
+  main`으로 base를 변경했다. PR 커밋 수가 2개로 줄고 diff도 Task 008
+  변경분만 남는 것을 확인했다. PR 본문의 낡은 "베이스 브랜치 안내"
+  문단도 제거했다.
+- **Blocker 2 (dry-run 상태 체이닝 버그)**: `IssueStateWriter`의 기본값인
+  `dry_run=True`로 `ReworkService`를 구성하면, `_transition()`이
+  dry-run일 때 원본 `issue`를 그대로 반환해 `request_changes()`
+  이후에도 라벨이 여전히 `devbot:review`로 보였다. 그 반환값을 그대로
+  `mark_for_review()`에 넘기면 "review에서 review로" 전환처럼 검증돼
+  `InvalidStateTransitionError`가 발생했다 — `ReworkService`의 기본
+  사용 시나리오(주입 없이 실제 `IssueStateWriter` 기본값을 쓰는 경우)가
+  깨지는 버그였다. `src/devbot/issue_state.py`의 `_transition()`을
+  고쳐 dry-run 여부와 무관하게 새 라벨을 계산해서 반환하고,
+  `client.set_labels()` 호출만 dry-run이면 건너뛰도록 했다. 회귀
+  테스트 두 개를 추가했다:
+  - `test_dry_run_transitions_can_be_chained_using_returned_issue`
+    (`tests/test_issue_state.py`) — 실제 `IssueStateWriter(dry_run=True)`로
+    `request_changes()` → `mark_for_review()`를 연쇄 호출해도 라벨이
+    올바르게 이어지는지 검증.
+  - `test_rework_with_real_dry_run_state_writer_completes_full_cycle`
+    (`tests/test_rework.py`) — `MagicMock`이 아닌 실제
+    `IssueStateWriter(dry_run=True 기본값)`를 `ReworkService`에 연결해
+    전체 사이클(`request_changes` → `apply_changes` → 검증 →
+    `mark_for_review`)이 예외 없이 끝나는지 검증. 이 테스트는 수정 전
+    코드에서는 실패했다.
+- 리뷰 반영 후 재검증: `uv run ruff check .` PASS, `uv run pytest`
+  PASS(93 passed, 회귀 테스트 2개 추가로 91 → 93).
