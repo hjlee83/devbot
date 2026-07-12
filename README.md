@@ -54,7 +54,7 @@ src/devbot/
   lock.py           single-process file lock
   models.py         configuration and queue data structures
   queue.py          global queue selection rules (no network)
-  github_client.py  GitHub API client skeleton (no network yet)
+  github_client.py  authenticated GitHub REST API read client (users, Issues)
   workspace.py      local repository path validation
   agents/
     base.py         AgentRunner interface
