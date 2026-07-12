@@ -1,14 +1,17 @@
 """GitHub REST API write client.
 
-Implements the literal writes DevBot needs to advance an Issue: replacing
-its full label set and posting a comment. This client performs no
-validation of *which* writes make sense; `devbot.issue_state` decides that
-and calls this client only once a transition has been validated.
+Implements the literal writes DevBot needs to advance an Issue and deliver
+an implementation: replacing an Issue's full label set, posting a comment,
+and opening a pull request. This client performs no validation of *which*
+writes make sense; callers (`devbot.issue_state`, `devbot.delivery`)
+decide that and call this client only once a transition or delivery step
+has been validated.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import requests
@@ -44,6 +47,14 @@ def _raise_for_status(response: requests.Response) -> None:
     if status == 404:
         raise GitHubNotFoundError(f"GitHub resource not found: {message}")
     raise GitHubAPIError(f"GitHub API error {status}: {message}")
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestInfo:
+    """A created pull request, per `POST /repos/{owner}/{repo}/pulls`."""
+
+    number: int
+    html_url: str
 
 
 class GitHubWriteClient:
@@ -96,5 +107,15 @@ class GitHubWriteClient:
             json={"body": body},
         )
 
+    def create_pull_request(
+        self, repository: RepositoryConfig, *, title: str, body: str, head: str, base: str
+    ) -> PullRequestInfo:
+        """Open a pull request from `head` into `base`."""
+        payload = self._post(
+            f"/repos/{repository.owner}/{repository.repo}/pulls",
+            json={"title": title, "body": body, "head": head, "base": base},
+        ).json()
+        return PullRequestInfo(number=payload["number"], html_url=payload["html_url"])
 
-__all__ = ["GitHubClientError", "GitHubWriteClient"]
+
+__all__ = ["GitHubClientError", "GitHubWriteClient", "PullRequestInfo"]

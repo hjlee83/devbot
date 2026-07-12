@@ -52,6 +52,33 @@ def test_create_comment_sends_post_with_body() -> None:
     assert kwargs["json"] == {"body": "blocked: needs clarification"}
 
 
+def test_create_pull_request_sends_post_and_parses_response() -> None:
+    session = MagicMock()
+    session.post.return_value = _mock_response(
+        json_data={"number": 99, "html_url": "https://github.com/someone/myrepo/pull/99"}
+    )
+    client = GitHubWriteClient("token123", session=session)
+
+    pull_request = client.create_pull_request(
+        _repository(),
+        title="Add feature X (#42)",
+        body="Closes #42",
+        head="devbot/myrepo-42-add-feature-x",
+        base="main",
+    )
+
+    assert pull_request.number == 99
+    assert pull_request.html_url == "https://github.com/someone/myrepo/pull/99"
+    args, kwargs = session.post.call_args
+    assert args[0].endswith("/repos/someone/myrepo/pulls")
+    assert kwargs["json"] == {
+        "title": "Add feature X (#42)",
+        "body": "Closes #42",
+        "head": "devbot/myrepo-42-add-feature-x",
+        "base": "main",
+    }
+
+
 def test_write_not_found_error_is_translated() -> None:
     session = MagicMock()
     session.put.return_value = _mock_response(status_code=404, json_data={"message": "Not Found"})

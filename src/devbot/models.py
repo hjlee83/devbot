@@ -35,6 +35,7 @@ class RepositoryConfig:
     repo: str
     enabled: bool
     local_path: Path
+    default_branch: str = "main"
 
     @property
     def full_name(self) -> str:
