@@ -37,10 +37,17 @@
 
 - Lock 파일 부모 디렉터리가 없을 때의 동작(자동 생성)은 이번 구현에서
   다뤘지만 Task에는 명시되어 있지 않았다.
-- 두 번째 프로세스가 아니라 "같은 프로세스 내 두 번째 열린 파일
-  디스크립터"로 락 거부를 테스트했다. 실제 별도 OS 프로세스 간 동작은
-  `flock(2)` 의미론상 동일하게 보장되지만, 진짜 별도 프로세스를 spawn하는
-  통합 테스트는 없다.
+- (해결됨) 최초 구현에서는 "같은 프로세스 내 두 번째 열린 파일 디스크립터"로
+  락 거부를 테스트했었다. 리뷰 피드백을 반영해 `tests/test_lock.py`의
+  `test_lock_rejects_second_owner`를 `multiprocessing`으로 실제 자식 OS
+  프로세스를 spawn해 락 획득을 시도하는 방식으로 교체했다.
+- (해결됨) 최초 구현에서는 `config.py`의 `enabled: bool(entry.get(...))`가
+  YAML에 `enabled: "false"`(따옴표로 감싼 문자열)처럼 적혀 있어도 Python의
+  문자열 truthy 규칙 때문에 `True`로 잘못 해석되는 버그가 있었다. 리뷰
+  피드백을 반영해 `_parse_repository_enabled`로 교체하고
+  `enabled: "false"` 회귀 테스트를 추가했다. 같은 리뷰에서 DRY_RUN 등 다른
+  "invalid required value" 케이스(빈 문자열, 알 수 없는 boolean 문자열,
+  잘못된 YAML)에 대한 테스트도 CP-001-2 보강으로 추가했다.
 
 ## 다음 Task에 반영할 제안
 

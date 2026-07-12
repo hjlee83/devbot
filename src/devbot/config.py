@@ -26,6 +26,7 @@ _DEFAULTS: dict[str, str] = {
 }
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 class ConfigError(RuntimeError):
@@ -36,8 +37,19 @@ def _get_env(name: str) -> str:
     return os.environ.get(name, _DEFAULTS.get(name, ""))
 
 
-def _parse_bool(value: str) -> bool:
-    return value.strip().lower() in _TRUE_VALUES
+def _require_nonempty(name: str, value: str) -> str:
+    if not value.strip():
+        raise ConfigError(f"{name} must not be empty")
+    return value
+
+
+def _parse_bool(name: str, value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ConfigError(f"{name} must be a boolean-like value (true/false), got: {value!r}")
 
 
 def _parse_int(name: str, value: str) -> int:
@@ -47,6 +59,14 @@ def _parse_int(name: str, value: str) -> int:
         raise ConfigError(f"{name} must be an integer, got: {value!r}") from exc
 
 
+def _parse_repository_enabled(value: object, index: int) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in _TRUE_VALUES | _FALSE_VALUES:
+        return value.strip().lower() in _TRUE_VALUES
+    raise ConfigError(f"repositories[{index}].enabled must be a boolean, got: {value!r}")
+
+
 def _load_repositories(
     repositories_path: Path, workspace_root: Path
 ) -> tuple[RepositoryConfig, ...]:
@@ -54,7 +74,13 @@ def _load_repositories(
         raise ConfigError(f"Missing required repositories file: {repositories_path}")
 
     with repositories_path.open("r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
+        try:
+            raw = yaml.safe_load(handle) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"Invalid YAML in {repositories_path}: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{repositories_path} must contain a mapping at the top level")
 
     raw_repositories = raw.get("repositories")
     if not isinstance(raw_repositories, list) or not raw_repositories:
@@ -72,7 +98,7 @@ def _load_repositories(
         if not owner or not repo:
             raise ConfigError(f"repositories[{index}] requires non-empty 'owner' and 'repo'")
 
-        enabled = bool(entry.get("enabled", True))
+        enabled = _parse_repository_enabled(entry.get("enabled", True), index)
         repositories.append(
             RepositoryConfig(
                 owner=str(owner),
@@ -104,9 +130,10 @@ def load_config(
 
     poll_interval_seconds = _parse_int("POLL_INTERVAL_SECONDS", _get_env("POLL_INTERVAL_SECONDS"))
     max_concurrent_jobs = _parse_int("MAX_CONCURRENT_JOBS", _get_env("MAX_CONCURRENT_JOBS"))
-    lock_file = Path(_get_env("DEVBOT_LOCK_FILE")).expanduser()
-    default_agent = _get_env("DEFAULT_AGENT")
-    dry_run = _parse_bool(_get_env("DRY_RUN"))
+    lock_file_raw = _require_nonempty("DEVBOT_LOCK_FILE", _get_env("DEVBOT_LOCK_FILE"))
+    lock_file = Path(lock_file_raw).expanduser()
+    default_agent = _require_nonempty("DEFAULT_AGENT", _get_env("DEFAULT_AGENT"))
+    dry_run = _parse_bool("DRY_RUN", _get_env("DRY_RUN"))
 
     resolved_repositories_path = (
         Path(repositories_path) if repositories_path is not None else DEFAULT_REPOSITORIES_PATH

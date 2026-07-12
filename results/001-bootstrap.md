@@ -45,7 +45,7 @@ cleanly, releasing the lock.
 | Checkpoint | Test name(s) | Result |
 |---|---|---|
 | CP-001-1 | `test_load_valid_config` | PASS |
-| CP-001-2 | `test_missing_required_config_raises` | PASS |
+| CP-001-2 | `test_missing_required_config_raises`, plus invalid-value coverage: `test_invalid_dry_run_value_raises`, `test_empty_default_agent_raises`, `test_invalid_repository_enabled_value_raises`, `test_repository_enabled_quoted_false_string_is_parsed_as_disabled`, `test_malformed_repositories_yaml_raises` | PASS |
 | CP-001-3 | `test_repository_path_is_derived_from_workspace_root` | PASS |
 | CP-001-4 | `test_lock_acquire_and_release` | PASS |
 | CP-001-5 | `test_lock_rejects_second_owner` (spawns a real child OS process via `multiprocessing`) | PASS |
@@ -61,7 +61,7 @@ cleanly, releasing the lock.
 |---|---|
 | `uv sync` | PASS |
 | `uv run ruff check .` | PASS (All checks passed!) |
-| `uv run pytest` | PASS (10 passed) |
+| `uv run pytest` | PASS (15 passed) |
 | `uv run devbot` | PASS (exit 0, prints `Managed repositories:` / `(none enabled)` / `DevBot started`) |
 
 Notes on the local run: a local, untracked `.env` sets
@@ -72,14 +72,24 @@ requiring an actual repository checkout on disk. Enabling a repository
 requires it to actually exist at `WORKSPACE_ROOT / repo`, enforced by
 `workspace.validate_repository_paths`.
 
-## CI
+## CI (out-of-contract addition — explicitly authorized)
 
-`.github/workflows/ci.yml` runs the same four commands on `ubuntu-latest`
-with Python 3.13 (via `astral-sh/setup-uv`) on every PR and on push to
-`main`. Since no `.env` is committed, `WORKSPACE_ROOT` is set to
+`.github/workflows/ci.yml` is **not** part of `tasks/001-bootstrap.md`'s
+"In scope" / "Required structure" lists. It was added after the initial
+PR at the explicit, direct request of the user driving this session
+("현재 Task 001 PR에 GitHub Actions CI를 추가해"), as a follow-up to the
+already-approved-scope PR rather than as an autonomous scope expansion by
+the implementer. Recording that authorization here per
+`review/reviewer-checklist.md`'s scope-review rule, since a reviewer
+without the session transcript cannot otherwise see it.
+
+It runs the same four verification commands on `ubuntu-latest` with
+Python 3.13 (via `astral-sh/setup-uv`) on every PR and on push to `main`.
+Since no `.env` is committed, `WORKSPACE_ROOT` is set to
 `${{ runner.temp }}` only for the `uv run devbot` step; `uv sync`, `ruff`,
-and `pytest` need no environment-specific configuration. Verified green
-on this PR: https://github.com/hjlee83/devbot/actions/runs/29200933608
+and `pytest` need no environment-specific configuration — this is the
+minimal CI-only configuration needed, no other behavior changed. Verified
+green: https://github.com/hjlee83/devbot/actions/runs/29200933608
 
 ## Remaining TODO
 - Task 002+ : real GitHub API read client, live queue population from
