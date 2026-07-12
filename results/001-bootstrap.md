@@ -47,12 +47,12 @@ cleanly, releasing the lock.
 | CP-001-2 | `test_missing_required_config_raises` | PASS |
 | CP-001-3 | `test_repository_path_is_derived_from_workspace_root` | PASS |
 | CP-001-4 | `test_lock_acquire_and_release` | PASS |
-| CP-001-5 | `test_lock_rejects_second_owner` | PASS |
+| CP-001-5 | `test_lock_rejects_second_owner` (spawns a real child OS process via `multiprocessing`) | PASS |
 | CP-001-6 | `test_lock_released_after_exception` | PASS |
-| CP-001-7 | `test_active_task_blocks_ready_selection` | PASS |
-| CP-001-8 | `test_ready_selection_orders_by_priority_then_age` | PASS |
+| CP-001-7 | `test_active_task_blocks_ready_selection` (covers both `working` and `review`) | PASS |
+| CP-001-8 | `test_ready_selection_orders_by_priority_then_age` (covers high>medium, medium>low/none, low>none, and same-priority oldest-first) | PASS |
 | CP-001-9 | `test_codex_runner_dry_run_does_not_execute` | PASS |
-| CP-001-10 | `test_main_starts_and_exits_successfully` | PASS |
+| CP-001-10 | `test_main_starts_and_exits_successfully` (also verifies the lock is re-acquirable immediately after `main()` returns) | PASS |
 
 ## Verification
 

@@ -1,8 +1,21 @@
+import multiprocessing
 from pathlib import Path
 
 import pytest
 
-from devbot.lock import LockAcquisitionError, ProcessLock
+from devbot.lock import ProcessLock
+
+
+def _attempt_acquire_in_subprocess(lock_path: str, result_queue: multiprocessing.Queue) -> None:
+    """Run in a separate OS process: try to acquire `lock_path` and report the outcome."""
+    from devbot.lock import LockAcquisitionError, ProcessLock
+
+    try:
+        ProcessLock(lock_path).acquire()
+    except LockAcquisitionError:
+        result_queue.put("rejected")
+    else:
+        result_queue.put("acquired")
 
 
 def test_lock_acquire_and_release(tmp_path: Path) -> None:
@@ -24,10 +37,18 @@ def test_lock_rejects_second_owner(tmp_path: Path) -> None:
     first = ProcessLock(lock_path)
     first.acquire()
 
-    second = ProcessLock(lock_path)
     try:
-        with pytest.raises(LockAcquisitionError):
-            second.acquire()
+        ctx = multiprocessing.get_context("spawn")
+        result_queue: multiprocessing.Queue = ctx.Queue()
+        process = ctx.Process(
+            target=_attempt_acquire_in_subprocess,
+            args=(str(lock_path), result_queue),
+        )
+        process.start()
+        process.join(timeout=10)
+
+        assert process.exitcode == 0
+        assert result_queue.get(timeout=5) == "rejected"
     finally:
         first.release()
 
