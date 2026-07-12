@@ -99,12 +99,14 @@ def _load_repositories(
             raise ConfigError(f"repositories[{index}] requires non-empty 'owner' and 'repo'")
 
         enabled = _parse_repository_enabled(entry.get("enabled", True), index)
+        default_branch = str(entry.get("default_branch") or "main")
         repositories.append(
             RepositoryConfig(
                 owner=str(owner),
                 repo=str(repo),
                 enabled=enabled,
                 local_path=workspace_root / str(repo),
+                default_branch=default_branch,
             )
         )
 
