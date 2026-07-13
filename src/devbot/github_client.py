@@ -74,6 +74,16 @@ class PullRequestComment:
     reactions: dict[str, int]
 
 
+@dataclass(frozen=True, slots=True)
+class PullRequest:
+    """A GitHub Pull Request, per `GET /repos/{owner}/{repo}/pulls`."""
+
+    number: int
+    head_ref: str
+    body: str
+    html_url: str
+
+
 def _error_message(response: requests.Response) -> str:
     try:
         payload = response.json()
@@ -126,6 +136,15 @@ def _parse_comment(raw: dict[str, Any]) -> PullRequestComment:
         body=raw.get("body") or "",
         created_at=datetime.fromisoformat(raw["created_at"].replace("Z", "+00:00")),
         reactions=reactions,
+    )
+
+
+def _parse_pull_request(raw: dict[str, Any]) -> PullRequest:
+    return PullRequest(
+        number=raw["number"],
+        head_ref=raw["head"]["ref"],
+        body=raw.get("body") or "",
+        html_url=raw["html_url"],
     )
 
 
@@ -222,3 +241,28 @@ class GitHubClient:
             page += 1
 
         return comments
+
+    def list_pull_requests(
+        self,
+        repository: RepositoryConfig,
+        *,
+        state: str = "open",
+        per_page: int = DEFAULT_PER_PAGE,
+    ) -> list[PullRequest]:
+        """List Pull Requests for `repository`, following pagination to
+        completion."""
+        pull_requests: list[PullRequest] = []
+        page = 1
+        while True:
+            raw_page = self._get(
+                f"/repos/{repository.owner}/{repository.repo}/pulls",
+                params={"state": state, "page": page, "per_page": per_page},
+            ).json()
+
+            pull_requests.extend(_parse_pull_request(raw_pr) for raw_pr in raw_page)
+
+            if len(raw_page) < per_page:
+                break
+            page += 1
+
+        return pull_requests

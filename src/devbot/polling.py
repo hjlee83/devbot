@@ -17,6 +17,7 @@ caller that doesn't need the write path working unchanged.
 from __future__ import annotations
 
 import logging
+import re
 import signal
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -25,7 +26,7 @@ from enum import Enum
 
 from devbot.agents.base import AgentRunner
 from devbot.delivery import DeliveryService
-from devbot.github_client import GitHubClient, GitHubIssue
+from devbot.github_client import GitHubClient, GitHubIssue, PullRequest
 from devbot.issue_state import IssueStateWriter
 from devbot.models import (
     DevBotConfig,
@@ -36,7 +37,7 @@ from devbot.models import (
     TaskState,
 )
 from devbot.queue import has_active_task, select_global_ready_task
-from devbot.rework import ReworkService
+from devbot.rework import ReworkService, find_unprocessed_devbot_comments
 from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
@@ -103,6 +104,29 @@ def issue_to_task(issue: GitHubIssue) -> IssueTask | None:
         priority=_priority_from_labels(issue.labels),
         created_at=issue.created_at,
     )
+
+
+_CLOSING_KEYWORD_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)\b", re.IGNORECASE
+)
+
+
+def find_linked_pull_request(
+    issue: GitHubIssue, pull_requests: Iterable[PullRequest]
+) -> PullRequest | None:
+    """Return the open PR that closes `issue`, identified the same way
+    GitHub's own "Development" linking does: a closing keyword (`Closes
+    #N`, `Fixes #N`, `Resolves #N`, ...) referencing the Issue's number in
+    the PR body. `delivery.build_pr_body()` always writes `Closes #N`, so
+    every PR DevBot itself opens is found this way; this also finds a
+    manually-opened PR that uses the same convention."""
+    for pull_request in pull_requests:
+        referenced_numbers = {
+            int(match) for match in _CLOSING_KEYWORD_RE.findall(pull_request.body)
+        }
+        if issue.number in referenced_numbers:
+            return pull_request
+    return None
 
 
 SelectTaskFn = Callable[[Iterable[IssueTask], Iterable[RepositoryConfig]], IssueTask | None]
@@ -355,10 +379,40 @@ class PollingService:
                 status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
             )
 
-        branch = generate_branch_name(repository, issue.number, issue.title)
+        if not find_unprocessed_devbot_comments(comments):
+            self.logger.info("처리할 @devbot review 댓글이 없습니다.")
+            return PollingResult(
+                status=PollingStatus.SKIPPED_ACTIVE_TASK,
+                task=selected,
+                message="no unprocessed @devbot comments",
+            )
+
+        try:
+            pull_requests = self.github_client.list_pull_requests(repository)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "PR 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        linked_pull_request = find_linked_pull_request(issue, pull_requests)
+        if linked_pull_request is None:
+            self.logger.error(
+                "review Issue에 연결된 PR을 찾지 못했습니다 (%s #%d)",
+                selected.repository,
+                selected.number,
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR,
+                task=selected,
+                message=f"No linked pull request found for Issue #{issue.number}",
+            )
+
         try:
             rework_result = self.rework_service.process(  # type: ignore[union-attr]
-                repository, issue, branch, comments
+                repository, issue, linked_pull_request.head_ref, comments
             )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(

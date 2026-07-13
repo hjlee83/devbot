@@ -55,7 +55,14 @@
 - `src/devbot/delivery.py` — `current_git_branch()`, `CurrentBranchFn` 추가.
 - `src/devbot/rework.py` — 브랜치 검증, 예외 처리, `ReworkResult` 구조화.
 - `src/devbot/polling.py` — ready-task Agent 실행에 `KeyboardInterrupt` 포함,
-  rework blocked 판정을 `issue_state` 기반으로 교체.
+  rework blocked 판정을 `issue_state` 기반으로 교체. **1차 리뷰 반영**:
+  `find_linked_pull_request()`(신규) 추가, `_process_review_task()`가
+  `generate_branch_name()` 재계산 대신 `list_pull_requests()` +
+  `find_linked_pull_request()`로 실제 연결된 PR을 조회하도록 교체(연결된
+  PR이 없으면 `ITERATION_ERROR`), "미처리 댓글 없음" 조기 반환을 PR 조회
+  전으로 이동(불필요한 API 호출 방지).
+- `src/devbot/github_client.py` — **1차 리뷰 반영**: `PullRequest`,
+  `list_pull_requests()`(신규, 읽기 전용) 추가.
 - `tests/test_rework.py` — 브랜치 불일치, Agent 예외/`KeyboardInterrupt`,
   구조화된 필드에 대한 신규/보강 테스트.
 - `tests/test_polling.py` — `issue_state` 기반 blocked 판정 테스트, ready-task
@@ -108,7 +115,7 @@ review보다 항상 우선 — 동시 활성 작업 1개 규칙),
 |---|---|
 | `uv sync` | PASS |
 | `uv run ruff check .` | PASS |
-| `uv run pytest` | PASS, 120 passed |
+| `uv run pytest` | PASS, 122 passed |
 | `DEVBOT_LOCK_FILE=<격리된 경로> uv run devbot --once --dry-run` | PASS, exit 0 (`config/repositories.yaml`에 활성화된 저장소가 없어 GitHub 네트워크 호출 자체가 발생하지 않음) |
 
 참고: `/tmp/devbot.lock`을 실제로 실행 중인 다른 DevBot 프로세스가 쥐고
@@ -119,17 +126,34 @@ review보다 항상 우선 — 동시 활성 작업 1개 규칙),
 
 ## 기존 브랜치·PR 재사용 검증
 
-- `PollingService._process_review_task()`는 `generate_branch_name(repository,
-  issue.number, issue.title)`로 기존 Task 브랜치명을 결정론적으로 다시
-  계산해 `ReworkService.process()`에 전달한다.
-- `ReworkService.process()`는 이제 그 브랜치명과 로컬 워크스페이스의 실제
-  체크아웃 브랜치(`current_git_branch()`)가 일치하는지 먼저 확인한다.
-  불일치하면 Agent조차 실행하지 않고 blocked 처리한다(`test_rework_blocks_
-  when_local_branch_does_not_match_existing_pr_head`).
+**1차 리뷰 반영 (2026-07-14)**: 원래 `PollingService._process_review_task()`는
+`generate_branch_name(repository, issue.number, issue.title)`로 브랜치명을
+"재계산"만 했을 뿐, Issue에 실제로 연결된 PR을 조회하지 않았다. 리뷰에서
+이것이 계약서의 "Issue와 연결된 기존 Pull Request 식별" 요구사항과
+CP-010-3("기존 브랜치와 기존 PR만 재사용한다")을 충분히 만족하지 못한다는
+blocker로 지적됐다 — 브랜치 네이밍 규칙이 바뀌거나 기존 PR의 실제 head가
+다르면 이 재계산 값이 조용히 틀린 브랜치를 가리킬 수 있었다.
+
+수정: `GitHubClient.list_pull_requests()`(신규, 읽기 전용)로 저장소의
+열린 PR을 조회하고, `polling.find_linked_pull_request()`(신규 순수
+함수)가 PR 본문에서 GitHub의 실제 closing-keyword 규약(`Closes #N`,
+`Fixes #N`, `Resolves #N`, 대소문자 무관)으로 Issue를 참조하는 PR을
+찾는다 — `delivery.build_pr_body()`가 항상 `Closes #{issue.number}`로
+PR을 열기 때문에 DevBot이 만든 모든 PR이 이 방식으로 정확히 식별된다.
+연결된 PR을 찾으면 그 PR의 실제 `head.ref`를 `ReworkService.process()`에
+전달하고, 찾지 못하면(review Issue인데 연결된 PR이 없는 이상 상태)
+브랜치를 추측하지 않고 `ITERATION_ERROR`로 실패를 구조화해서 반환한다
+(`test_review_issue_without_linked_pull_request_is_reported_as_error`).
+
+- `ReworkService.process()`는 여전히 전달받은 브랜치명(이제는 실제 PR
+  head)과 로컬 워크스페이스의 실제 체크아웃 브랜치(`current_git_branch()`)가
+  일치하는지 확인한다. 불일치하면 Agent조차 실행하지 않고 blocked
+  처리한다(`test_rework_blocks_when_local_branch_does_not_match_existing_pr_head`).
 - 성공 rework는 여전히 `push(repository, branch)`만 호출하고
   `create_pull_request()`를 호출하지 않는다
-  (`test_rework_reuses_existing_branch_and_pr`,
-  `test_reuse_existing_pr`).
+  (`test_rework_reuses_existing_branch_and_pull_request` — 이제 실제 PR의
+  head가 `generate_branch_name()`이 만들었을 이름과 *다른* 값으로
+  검증해, 재계산이 아니라 진짜 조회 결과가 쓰이는지 증명한다).
 
 ## 위험 요소
 
