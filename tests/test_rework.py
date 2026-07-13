@@ -6,7 +6,7 @@ from devbot.delivery import VerificationResult
 from devbot.github_client import GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
-from devbot.models import RepositoryConfig
+from devbot.models import RepositoryConfig, TaskState
 from devbot.rework import ReworkService
 
 BRANCH = "devbot/myrepo-42-existing-branch"
@@ -50,6 +50,7 @@ def _service(
     run_verification=None,
     commit: MagicMock | None = None,
     push: MagicMock | None = None,
+    current_branch=None,
 ) -> tuple[ReworkService, MagicMock, MagicMock]:
     state_writer = state_writer or MagicMock(spec=IssueStateWriter)
     state_writer.request_changes.return_value = _issue(labels=("devbot:working",))
@@ -61,6 +62,7 @@ def _service(
         run_verification=run_verification or (lambda repository: VerificationResult(passed=True)),
         commit=commit or MagicMock(),
         push=push or MagicMock(),
+        current_branch=current_branch or (lambda repository: BRANCH),
     )
     return service, state_writer, write_client
 
@@ -92,6 +94,8 @@ def test_no_unprocessed_devbot_comments_does_not_trigger_rework() -> None:
 
     assert result.triggered is False
     assert result.comment is None
+    assert result.pr_reused is False
+    assert result.issue_state == TaskState.REVIEW
     state_writer.request_changes.assert_not_called()
     write_client.add_reaction_to_comment.assert_not_called()
 
@@ -132,6 +136,29 @@ def test_rework_reuses_existing_branch_and_pr() -> None:
     write_client.create_pull_request.assert_not_called()
 
 
+def test_rework_dry_run_does_not_push_or_mark_processed() -> None:
+    commit = MagicMock()
+    push = MagicMock()
+    service, state_writer, write_client = _service(commit=commit, push=push)
+    service.dry_run = True
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    write_client.add_reaction_to_comment.assert_not_called()
+    state_writer.mark_for_review.assert_not_called()
+    assert result.triggered is True
+    assert result.message.startswith("[dry-run]")
+    assert result.code_changed is True
+    assert result.verification_passed is True
+    assert result.committed is False
+    assert result.pushed is False
+    assert result.pr_reused is True
+    assert result.issue_state == TaskState.WORKING
+
+
 def test_successful_rework_marks_comment_processed() -> None:
     service, _, write_client = _service()
     repository = _repo()
@@ -166,6 +193,12 @@ def test_failed_rework_moves_to_blocked() -> None:
     state_writer.mark_for_review.assert_not_called()
     assert result.message == "blocked"
     assert result.verification is failing_verification
+    assert result.code_changed is True
+    assert result.verification_passed is False
+    assert result.committed is False
+    assert result.pushed is False
+    assert result.pr_reused is True
+    assert result.issue_state == TaskState.BLOCKED
 
 
 def test_successful_rework_returns_to_review() -> None:
@@ -179,6 +212,108 @@ def test_successful_rework_returns_to_review() -> None:
     assert args[0] is repository
     assert args[1].labels == ("devbot:working",)
     assert result.message == "reworked"
+    assert result.code_changed is True
+    assert result.verification_passed is True
+    assert result.committed is True
+    assert result.pushed is True
+    assert result.pr_reused is True
+    assert result.issue_state == TaskState.REVIEW
+
+
+def test_rework_blocks_when_local_branch_does_not_match_existing_pr_head() -> None:
+    """CP-010-branch-guard: if the workspace isn't actually checked out on
+    the branch the existing PR uses, rework must not run the Agent, commit,
+    or push - it must block instead of silently acting on the wrong branch."""
+    apply_changes = MagicMock()
+    commit = MagicMock()
+    push = MagicMock()
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.request_changes.return_value = _issue(labels=("devbot:working",))
+    service, _, write_client = _service(
+        state_writer=state_writer,
+        apply_changes=apply_changes,
+        commit=commit,
+        push=push,
+        current_branch=lambda repository: "some-other-local-branch",
+    )
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    apply_changes.assert_not_called()
+    commit.assert_not_called()
+    push.assert_not_called()
+    write_client.add_reaction_to_comment.assert_not_called()
+    state_writer.mark_for_review.assert_not_called()
+    state_writer.block.assert_called_once()
+    args, _ = state_writer.block.call_args
+    assert args[0] is repository
+    assert args[1].labels == ("devbot:working",)
+    assert BRANCH in args[2]
+    assert "some-other-local-branch" in args[2]
+    assert result.triggered is True
+    assert result.message == "blocked: branch mismatch"
+    assert result.code_changed is False
+    assert result.verification_passed is False
+    assert result.committed is False
+    assert result.pushed is False
+    assert result.pr_reused is False
+    assert result.issue_state == TaskState.BLOCKED
+
+
+def test_rework_blocks_when_agent_raises_exception() -> None:
+    """CP-010-agent-guard: an Agent exception during rework must not
+    crash the polling loop - it must be recorded as a blocked reason."""
+
+    def _raise(repository, issue, comment) -> None:
+        raise RuntimeError("agent process crashed")
+
+    commit = MagicMock()
+    push = MagicMock()
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.request_changes.return_value = _issue(labels=("devbot:working",))
+    service, _, write_client = _service(
+        state_writer=state_writer, apply_changes=_raise, commit=commit, push=push
+    )
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    write_client.add_reaction_to_comment.assert_not_called()
+    state_writer.mark_for_review.assert_not_called()
+    state_writer.block.assert_called_once()
+    args, _ = state_writer.block.call_args
+    assert args[0] is repository
+    assert args[1].labels == ("devbot:working",)
+    assert "agent process crashed" in args[2]
+    assert result.triggered is True
+    assert result.message == "blocked: agent execution failed"
+    assert result.code_changed is False
+    assert result.verification_passed is False
+    assert result.pr_reused is True
+    assert result.issue_state == TaskState.BLOCKED
+
+
+def test_rework_blocks_when_agent_raises_keyboard_interrupt() -> None:
+    """CP-010-agent-guard: a KeyboardInterrupt during Agent execution is
+    treated the same as any other Agent failure - blocked, with the reason
+    recorded - rather than crashing the whole polling process."""
+
+    def _interrupt(repository, issue, comment) -> None:
+        raise KeyboardInterrupt()
+
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.request_changes.return_value = _issue(labels=("devbot:working",))
+    service, _, _ = _service(state_writer=state_writer, apply_changes=_interrupt)
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    state_writer.block.assert_called_once()
+    assert result.message == "blocked: agent execution failed"
+    assert result.issue_state == TaskState.BLOCKED
 
 
 def test_rework_with_real_dry_run_state_writer_completes_full_cycle() -> None:
@@ -195,6 +330,7 @@ def test_rework_with_real_dry_run_state_writer_completes_full_cycle() -> None:
         run_verification=lambda repository: VerificationResult(passed=True),
         commit=MagicMock(),
         push=MagicMock(),
+        current_branch=lambda repository: BRANCH,
     )
     repository = _repo()
 
