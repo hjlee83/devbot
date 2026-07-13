@@ -1,0 +1,518 @@
+openapi: 3.1.0
+
+info:
+  title: DevBot GitHub API
+  version: 1.0.0
+  description: DevBot GPT용 GitHub API
+
+servers:
+  - url: https://api.github.com
+
+paths:
+  /user:
+    get:
+      operationId: getAuthenticatedUser
+      summary: 인증된 GitHub 사용자 조회
+      responses:
+        "200":
+          description: 인증된 사용자 조회 성공
+  /user/repos:
+    get:
+      operationId: getRepositories
+      summary: 인증된 사용자의 저장소 목록 조회
+      parameters:
+        - name: visibility
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: affiliation
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: per_page
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: 저장소 목록 조회 성공
+
+  /repos/{owner}/{repo}:
+    get:
+      operationId: getRepository
+      summary: GitHub 저장소 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 저장소 조회 성공
+
+  /repos/{owner}/{repo}/contents/{path}:
+    get:
+      operationId: getRepositoryContent
+      summary: 저장소 파일 또는 디렉터리 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: ref
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 조회 성공
+
+    put:
+      operationId: putFileContent
+      summary: 저장소 파일 생성 또는 수정
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - message
+                - content
+                - branch
+              properties:
+                message:
+                  type: string
+                content:
+                  type: string
+                branch:
+                  type: string
+                sha:
+                  type: string
+      responses:
+        "200":
+          description: 수정 성공
+        "201":
+          description: 생성 성공
+
+  /repos/{owner}/{repo}/git/ref/heads/{branch}:
+    get:
+      operationId: getGitBranchRef
+      summary: 브랜치 SHA 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: branch
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 조회 성공
+
+  /repos/{owner}/{repo}/git/refs:
+    post:
+      operationId: createGitRef
+      summary: Git 브랜치 생성
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - ref
+                - sha
+              properties:
+                ref:
+                  type: string
+                sha:
+                  type: string
+      responses:
+        "201":
+          description: 생성 성공
+  /repos/{owner}/{repo}/issues:
+    get:
+      operationId: getIssues
+      summary: 저장소 Issue 목록 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: labels
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Issue 목록 조회 성공
+
+    post:
+      operationId: createIssue
+      summary: GitHub Issue 생성
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+              properties:
+                title:
+                  type: string
+                body:
+                  type: string
+                labels:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Issue 생성 성공
+
+  /repos/{owner}/{repo}/issues/{issue_number}/comments:
+    post:
+      operationId: createIssueComment
+      summary: Issue 또는 Pull Request 댓글 생성
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: issue_number
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - body
+              properties:
+                body:
+                  type: string
+      responses:
+        "201":
+          description: 댓글 생성 성공
+
+  /repos/{owner}/{repo}/pulls:
+    get:
+      operationId: getPullRequests
+      summary: Pull Request 목록 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pull Request 목록 조회 성공
+
+    post:
+      operationId: createPullRequest
+      summary: Pull Request 생성
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - title
+                - head
+                - base
+              properties:
+                title:
+                  type: string
+                body:
+                  type: string
+                head:
+                  type: string
+                base:
+                  type: string
+                draft:
+                  type: boolean
+      responses:
+        "201":
+          description: Pull Request 생성 성공
+
+  /repos/{owner}/{repo}/pulls/{pull_number}:
+    get:
+      operationId: getPullRequest
+      summary: Pull Request 상세 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: pull_number
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Pull Request 조회 성공
+
+    put:
+      operationId: mergePullRequest
+      summary: Pull Request Merge
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: pull_number
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                commit_title:
+                  type: string
+                commit_message:
+                  type: string
+                sha:
+                  type: string
+                merge_method:
+                  type: string
+      responses:
+        "200":
+          description: Merge 성공
+
+  /repos/{owner}/{repo}/actions/runs:
+    get:
+      operationId: getWorkflowRuns
+      summary: Workflow Run 목록 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: branch
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Workflow Run 조회 성공
+
+  /repos/{owner}/{repo}/actions/runs/{run_id}:
+    get:
+      operationId: getWorkflowRun
+      summary: Workflow Run 상세 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Workflow Run 상세 조회 성공
+  /repos/{owner}/{repo}/actions/runs/{run_id}/jobs:
+    get:
+      operationId: getWorkflowRunJobs
+      summary: Workflow Run Job 목록 조회
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Workflow Job 목록 조회 성공
+
+  /repos/{owner}/{repo}/actions/runs/{run_id}/rerun:
+    post:
+      operationId: rerunWorkflow
+      summary: Workflow Run 재실행
+      parameters:
+        - name: owner
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: repo
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "201":
+          description: Workflow 재실행 요청 성공
