@@ -235,7 +235,7 @@ class PollingService:
 
         try:
             agent_result = self.agent_runner.run(repository, prompt)
-        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+        except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): %s", selected.repository, selected.number, exc
             )
@@ -376,8 +376,8 @@ class PollingService:
                 message=rework_result.message,
             )
 
-        if rework_result.message == "blocked":
-            self.logger.error("Rework 검증 실패로 blocked 처리: %s", rework_result.message)
+        if rework_result.issue_state is TaskState.BLOCKED:
+            self.logger.error("Rework 실패로 blocked 처리: %s", rework_result.message)
             return PollingResult(
                 status=PollingStatus.BLOCKED, task=selected, message=rework_result.message
             )

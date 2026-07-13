@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 from devbot.agents.base import AgentRunResult
 from devbot.agents.codex import CodexRunner
 from devbot.github_client import GitHubIssue, PullRequestComment
-from devbot.models import DevBotConfig, RepositoryConfig
+from devbot.models import DevBotConfig, RepositoryConfig, TaskState
 from devbot.polling import PollingService, PollingStatus
 from devbot.rework import ReworkService
 from devbot.workspace import WorkspaceValidationError
@@ -161,7 +161,9 @@ def test_review_comment_triggers_rework() -> None:
         comments_by_issue={(repo.full_name, 7): [comment]},
     )
     rework_service = MagicMock(spec=ReworkService)
-    rework_service.process.return_value = MagicMock(triggered=True, message="reworked")
+    rework_service.process.return_value = MagicMock(
+        triggered=True, issue_state=TaskState.REVIEW, message="reworked"
+    )
     service = PollingService(
         config=config,
         github_client=github_client,
@@ -184,6 +186,37 @@ def test_review_comment_triggers_rework() -> None:
     assert called_issue == review_issue
     assert called_branch == "devbot/myrepo-7-fix-bug"
     assert called_comments == [comment]
+
+
+def test_rework_blocked_issue_state_moves_polling_to_blocked() -> None:
+    """The polling layer must key off the structured `issue_state` field,
+    not a magic `message == "blocked"` string - so a rework blocked for any
+    reason (branch mismatch, Agent failure, verification failure, ...)
+    reports `PollingStatus.BLOCKED`."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 9, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=5)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 9): [comment]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    rework_service.process.return_value = MagicMock(
+        triggered=True, issue_state=TaskState.BLOCKED, message="blocked: branch mismatch"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    assert result.message == "blocked: branch mismatch"
 
 
 def test_working_issue_blocks_rework_even_when_review_exists() -> None:
@@ -338,6 +371,30 @@ def test_iteration_reports_agent_failure() -> None:
     github_client = FakeGitHubClient({repo.full_name: [issue]})
     agent_runner = MagicMock()
     agent_runner.run.side_effect = RuntimeError("agent crashed")
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_FAILED
+    assert result.task is not None
+
+
+def test_iteration_reports_agent_keyboard_interrupt_as_failure() -> None:
+    """A `KeyboardInterrupt` raised while the Agent is running must be
+    treated the same as any other Agent failure - reported and (when the
+    write path is wired up) blocked - never left to crash the polling
+    loop uncaught."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 5, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    agent_runner = MagicMock()
+    agent_runner.run.side_effect = KeyboardInterrupt()
     service = PollingService(
         config=config,
         github_client=github_client,
