@@ -69,6 +69,39 @@ def test_run_once_exits_after_single_iteration(tmp_path: Path) -> None:
     mock_run_once.assert_called_once()
 
 
+def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\n"
+        f"GITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n"
+        f"DRY_RUN=false\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    with patch("devbot.main.PollingService") as mock_service_cls:
+        mock_service_cls.return_value.run_once.return_value = PollingResult(
+            status=PollingStatus.NO_READY_TASK
+        )
+        exit_code = main(
+            ["--once", "--dry-run"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    _, kwargs = mock_service_cls.call_args
+    assert kwargs["config"].dry_run is True
+    assert kwargs["agent_runner"].dry_run is True
+    assert kwargs["state_writer"].dry_run is True
+    assert kwargs["delivery"].dry_run is True
+
+
 def test_continuous_loop_uses_configured_poll_interval() -> None:
     config = _config([_repo("myrepo")])
     service = PollingService(
@@ -131,7 +164,14 @@ def test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero(
     tmp_path: Path,
 ) -> None:
     """A real (non-dry-run) AgentRunner that exits non-zero must make
-    `main --once` exit non-zero too, not report success."""
+    `main --once` exit non-zero too, not report success.
+
+    DRY_RUN=false also activates the real (non-dry-run) `IssueStateWriter`
+    wired in by `main.py` (Task 009), so `GitHubWriteClient`'s HTTP calls
+    (`claim()` before the agent runs, `block()` after it fails) must be
+    mocked here too - otherwise this test would silently make real network
+    requests to api.github.com instead of exercising the AGENT_FAILED path.
+    """
     workspace_root = tmp_path / "workspace"
     repo_path = workspace_root / "myrepo"
     _init_git_repo(repo_path)
@@ -162,12 +202,20 @@ def test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero(
 
     with (
         patch("devbot.github_client.GitHubClient.list_issues", return_value=[ready_issue]),
+        patch("devbot.github_write_client.GitHubWriteClient.set_labels") as mock_set_labels,
+        patch("devbot.github_write_client.GitHubWriteClient.create_comment") as mock_create_comment,
         patch("devbot.agents.codex.subprocess.run") as mock_subprocess_run,
     ):
         mock_subprocess_run.return_value = MagicMock(returncode=1, stdout="", stderr="boom")
         exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 1
+    # Claimed (ready -> working) before the agent ran, then blocked
+    # (working -> blocked) after it failed - not a network-error short
+    # circuit into ITERATION_ERROR, which would also exit 1 but for the
+    # wrong reason.
+    assert mock_set_labels.call_count == 2
+    mock_create_comment.assert_called_once()
 
 
 def test_main_loop_respects_process_lock(tmp_path: Path) -> None:
