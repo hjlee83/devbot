@@ -1,14 +1,45 @@
 # Beta Runbook
 
 Task 009 wires Task 001-008's pieces into one flow inside
-`PollingService.run_once()` (see `src/devbot/polling.py`). This is a
-manual walkthrough for confirming that flow against a real target
-repository, plus the operational checklist for running DevBot beyond a
-single smoke test.
+`PollingService.run_once()` (see `src/devbot/polling.py`). Task 010 adds
+the `review`-state branch of that same flow: polled `@devbot` PR feedback
+now reworks the existing branch/PR automatically instead of waiting for a
+human to trigger it. This is a manual walkthrough for confirming both
+flows against a real target repository, plus the operational checklist
+for running DevBot beyond a single smoke test.
 
 ## Full flow
 
 ```text
+Any devbot:working Issue? --yes--> skip this iteration
+
+no
+ |
+ v
+Any devbot:review Issue with an unprocessed @devbot comment?
+ |
+ +--yes--> ReworkService.process() (Task 010)
+ |          reuses the EXISTING branch/PR (never creates a new one)
+ |             |
+ |             v
+ |         request_changes (review -> working) -> AgentRunner
+ |             |
+ |             v
+ |         run_verification_commands
+ |             |
+ |     passed? +----- failed?
+ |        |               |
+ |        v               v
+ |  commit -> push   block (+ reason comment)
+ |  -> react "eyes"
+ |  on the comment
+ |        |
+ |        v
+ |  mark_for_review (-> review)
+ |
+ no unprocessed comment / no review Issue
+ |
+ v
 ready --(claim)--> working --(AgentRunner)--> [agent output]
                                     |
                                     v
@@ -25,11 +56,16 @@ ready --(claim)--> working --(AgentRunner)--> [agent output]
                   mark_for_review (-> review)
 ```
 
-`state_writer` and `delivery` are optional constructor arguments on
-`PollingService`. When both are supplied (as `devbot.main` always does),
-the full flow above runs. When either is omitted, `run_once()` falls back
-to Task 005's original behavior (select + run the agent only) — this is
-what every pre-Task-009 test still exercises, unchanged.
+`state_writer`, `delivery`, and `rework_service` are optional constructor
+arguments on `PollingService`. When `state_writer`/`delivery` are both
+supplied (as `devbot.main` always does), the `ready` flow above runs.
+When `rework_service` is also supplied (also always true in
+`devbot.main`), a `review` Issue with an unprocessed `@devbot` comment is
+reworked before any `ready` Issue is even considered - rework always takes
+priority over starting new `ready` work. Any of the three being omitted
+falls back to progressively earlier Task behavior (down to Task 005's
+select + run the agent only) - this is what every earlier Task's tests
+still exercise, unchanged.
 
 ## Manual dry-run walkthrough
 
@@ -102,6 +138,8 @@ repo's Git history.
 - [ ] Start with `DRY_RUN=true` (or `--dry-run`) in any new environment
       and confirm the full flow's log output looks right before flipping
       to `DRY_RUN=false`.
-- [ ] Nothing yet polls `review`-state Issues for `@devbot` PR comments
-      (`ReworkService`, Task 008, is not wired into `PollingService`) —
-      rework must be triggered manually until that wiring exists.
+- [ ] `review`-state Issues are polled for unprocessed `@devbot` PR
+      comments every iteration (Task 010) and reworked automatically on
+      the existing branch/PR — no manual trigger needed. Only the first
+      review Issue found in collection order is reworked per iteration;
+      others wait for the next poll.

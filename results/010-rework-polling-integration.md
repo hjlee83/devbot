@@ -2,17 +2,17 @@
 
 ## Status
 
-- DONE (unit-level): `ReworkService`는 이제 (1) 기존 PR head 브랜치와 로컬
-  브랜치 불일치, (2) Agent 실행 중 예외/`KeyboardInterrupt`를 모두 rework
-  시작 전/중에 감지해 `devbot:blocked`로 전환하고 원인을 기록한다. 검증
-  실패 시 commit/push/PR 갱신을 건너뛰는 기존 게이트는 그대로 유지되며,
-  `ReworkResult`가 `code_changed`, `verification_passed`, `committed`,
-  `pushed`, `pr_reused`, `issue_state`를 구조화된 필드로 반환하도록
-  확장했다.
-- 이번 세션은 기존 `feature/task-010-rework-polling-integration` 브랜치를
-  그대로 재사용했고, 새 브랜치나 새 PR을 만들지 않았다. 이 브랜치에 대해
-  이미 열려 있는 구현 PR은 없다(Task 010의 계약서만 다루는 PR #14는
-  merge되어 종료됨). 실제 push와 PR 생성/갱신은 사용자 확인 후 진행한다.
+- COMPLETE. `ReworkService`가 `PollingService.run_once()`에 연결되어,
+  `devbot:review` 상태 Issue의 처리되지 않은 `@devbot` PR 댓글을 감지하면
+  새 브랜치/PR 없이 기존 것을 재사용해 rework를 수행하고, 성공하면
+  `review`로 복귀, 실패하면 원인과 함께 `blocked`로 전환한다.
+- 이 결과 문서는 두 번의 작업 흐름이 합쳐진 것이다: 먼저 초기 계약서
+  기준으로 폴링 연결 + 안전장치(브랜치 불일치 감지, Agent 예외 처리,
+  구조화된 `ReworkResult`)를 구현했고, 이후 계약서가 v1.1.0으로 갱신되며
+  체크포인트 이름이 `CP-010-1`~`CP-010-8`로 확정되어 그에 맞춰
+  `tests/test_polling.py`의 테스트 이름을 정리/보강했다(아래 "체크포인트
+  이름 정리" 참고). 구현 자체(코드)는 바뀌지 않았고, 테스트만 계약서
+  이름에 맞춰 정리·추가했다.
 
 ## 이번 세션에서 추가한 내용
 
@@ -59,42 +59,63 @@
 - `tests/test_rework.py` — 브랜치 불일치, Agent 예외/`KeyboardInterrupt`,
   구조화된 필드에 대한 신규/보강 테스트.
 - `tests/test_polling.py` — `issue_state` 기반 blocked 판정 테스트, ready-task
-  `KeyboardInterrupt` 테스트.
+  `KeyboardInterrupt` 테스트, CP-010-1~8 이름에 맞춘 rework-polling
+  테스트 8개(리네임 3개 + 신규 5개).
 - `tests/test_beta_smoke.py` — 신규 `current_branch` 주입 지점 반영(기존
   end-to-end rework 시나리오 유지).
+- `src/devbot/main.py` — `ReworkService` 구성 및 `PollingService`에 주입
+  (`_apply_rework_changes`로 `AgentRunner`와 연결).
+- `docs/00-roadmap.md` — Phase 1/2 체크 상태를 실제 구현에 맞게 갱신,
+  Task 009/010 항목 추가.
+- `README.md` — Run 절에 review/rework 우선순위 흐름 반영.
+- `docs/08-beta-runbook.md` — 전체 흐름 다이어그램에 rework 분기 추가,
+  "ReworkService 미연결" 운영 체크리스트 항목을 실제 상태로 갱신.
 - `results/010-rework-polling-integration.md`(본 파일).
 
-## Checkpoint별 테스트
+## Checkpoint별 테스트 (v1.1.0 계약서 기준)
 
-| Checkpoint | 테스트 이름 | 결과 |
-|---|---|---|
-| CP-010-1 | `test_review_issue_without_unprocessed_comment_waits` | PASS |
-| CP-010-2 | `test_review_comment_triggers_rework` | PASS |
-| CP-010-3 (working 우선) | `test_working_issue_blocks_rework_even_when_review_exists` | PASS |
-| CP-010-3 (브랜치 재사용) | `test_rework_reuses_existing_branch_and_pr` | PASS |
-| CP-010-4 (중복 방지) | `test_successful_rework_marks_comment_processed` | PASS |
-| CP-010-5 (성공 시 review 복귀) | `test_successful_rework_returns_to_review` | PASS |
-| CP-010-6 (검증 실패 → blocked) | `test_failed_rework_moves_to_blocked` | PASS |
-| CP-010-8 (dry-run 무부작용) | `test_rework_dry_run_does_not_push_or_mark_processed` | PASS |
-| 신규: 브랜치 불일치 → blocked | `test_rework_blocks_when_local_branch_does_not_match_existing_pr_head` | PASS |
-| 신규: Agent 예외 → blocked | `test_rework_blocks_when_agent_raises_exception` | PASS |
-| 신규: Agent KeyboardInterrupt → blocked | `test_rework_blocks_when_agent_raises_keyboard_interrupt` | PASS |
-| 신규: 구조화된 blocked 판정 | `test_rework_blocked_issue_state_moves_polling_to_blocked` | PASS |
-| 신규: ready-task KeyboardInterrupt | `test_iteration_reports_agent_keyboard_interrupt_as_failure` | PASS |
+계약서가 v1.1.0으로 갱신되며 `CP-010-1`~`CP-010-8`의 필수 테스트 이름이
+확정됐다. 구현 코드는 그대로 두고, `tests/test_polling.py`의 테스트
+이름을 계약서와 정확히 맞췄다(의미가 그대로인 것은 이름만 변경, 계약서가
+명시적으로 요구하지만 기존 테스트가 다른 각도에서만 다루던 체크포인트는
+새 테스트를 추가).
+
+| Checkpoint | 필수 동작 | 테스트 이름 | 결과 |
+|---|---|---|---|
+| CP-010-1 | review Issue의 미처리 `@devbot` 댓글을 감지한다 | `test_polling_detects_unprocessed_devbot_review_comment` | PASS |
+| CP-010-2 | rework가 ready 작업보다 우선 처리된다 | `test_rework_is_prioritized_over_ready_task` | PASS |
+| CP-010-3 | 기존 브랜치와 기존 PR만 재사용한다 | `test_rework_reuses_existing_branch_and_pull_request` | PASS |
+| CP-010-4 | 처리된 댓글은 다시 실행하지 않는다 | `test_processed_review_comment_is_not_reworked_again` | PASS |
+| CP-010-5 | rework 성공 후 review 상태로 복귀한다 | `test_successful_polled_rework_returns_to_review` | PASS |
+| CP-010-6 | rework 실패 시 blocked 상태와 원인을 기록한다 | `test_failed_polled_rework_moves_to_blocked_with_reason` | PASS |
+| CP-010-7 | rework 대상이 없으면 기존 ready 폴링이 유지된다 | `test_ready_polling_still_runs_when_no_rework_exists` | PASS |
+| CP-010-8 | dry-run에서는 GitHub와 Git에 쓰기 부작용이 없다 | `test_rework_polling_dry_run_has_no_side_effects` | PASS |
+
+추가로 유지한 안전장치 테스트(체크포인트 필수 목록에는 없지만 "Risk"
+절의 위험을 직접 방어함, 전부 `tests/test_rework.py`/`tests/test_polling.py`):
+`test_working_issue_blocks_rework_even_when_review_exists`(working이
+review보다 항상 우선 — 동시 활성 작업 1개 규칙),
+`test_rework_blocks_when_local_branch_does_not_match_existing_pr_head`
+(로컬 체크아웃이 기대 브랜치와 다르면 Agent 실행 전에 즉시 blocked),
+`test_rework_blocks_when_agent_raises_exception`,
+`test_rework_blocks_when_agent_raises_keyboard_interrupt`,
+`test_iteration_reports_agent_keyboard_interrupt_as_failure`(ready-task
+경로도 동일하게 보호).
 
 ## 검증 결과
 
 | Command | Result |
 |---|---|
-| `UV_CACHE_DIR=/Users/luna/workspace/devbot/.uv-cache uv sync` | PASS |
-| `UV_CACHE_DIR=/Users/luna/workspace/devbot/.uv-cache uv run ruff check .` | PASS |
-| `UV_CACHE_DIR=/Users/luna/workspace/devbot/.uv-cache uv run pytest` | PASS, 115 passed |
-| `UV_CACHE_DIR=/Users/luna/workspace/devbot/.uv-cache DEVBOT_LOCK_FILE=/Users/luna/workspace/devbot/.devbot-verify.lock uv run devbot --once --dry-run` | PASS, exit 0 (`config/repositories.yaml`에 활성화된 저장소가 없어 GitHub 네트워크 호출 자체가 발생하지 않음) |
+| `uv sync` | PASS |
+| `uv run ruff check .` | PASS |
+| `uv run pytest` | PASS, 120 passed |
+| `DEVBOT_LOCK_FILE=<격리된 경로> uv run devbot --once --dry-run` | PASS, exit 0 (`config/repositories.yaml`에 활성화된 저장소가 없어 GitHub 네트워크 호출 자체가 발생하지 않음) |
 
-참고: 기본 `uv` 캐시 경로(`/Users/luna/.cache/uv`)가 샌드박스 권한에 막혀,
-검증 명령은 저장소 내부 `.uv-cache`를 지정해 실행했다. `--once --dry-run`은
-관리 저장소가 0개인 로컬 설정으로 실행되어 GitHub API를 호출하지 않고
-종료했다 — 실제 저장소가 활성화된 환경에서의 재검증은 TODO로 남긴다.
+참고: `/tmp/devbot.lock`을 실제로 실행 중인 다른 DevBot 프로세스가 쥐고
+있어(`lsof`로 확인), 검증 시 `DEVBOT_LOCK_FILE`을 격리된 경로로 지정해
+그 프로세스와 충돌하지 않도록 했다. `--once --dry-run`은 관리 저장소가
+0개인 로컬 설정으로 실행되어 GitHub API를 호출하지 않고 종료했다 —
+실제 저장소가 활성화된 환경에서의 재검증은 TODO로 남긴다.
 
 ## 기존 브랜치·PR 재사용 검증
 
@@ -129,8 +150,9 @@
 - 실제로 GitHub 저장소가 `config/repositories.yaml`에 활성화된 환경에서
   `uv run devbot --once --dry-run`과 실사용 rework 시나리오(실제 PR
   댓글 → rework → push)를 재검증한다.
-- 사용자 확인 후, 이 브랜치의 커밋을 push하고 (기존 PR이 없으므로) 구현
-  PR을 새로 연다. Issue #15(`devbot:working`)를 이 PR과 연결한다.
+- `PollingService`가 `review` Issue를 고를 때 여러 개 중 하나만(수집
+  순서상 첫 번째) 처리한다 — 우선순위 규칙(예: `priority:*` 라벨)을
+  적용할지는 이후 Task로 남긴다.
 
 ## Improvement Suggestions
 
