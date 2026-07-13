@@ -296,6 +296,109 @@ def test_stop_delivery_when_failed() -> None:
     assert result.status is PollingStatus.BLOCKED
 
 
+def test_block_failure_after_agent_exception_is_reported_without_crashing() -> None:
+    """Regression: if `state_writer.block()` itself raises (network error,
+    GitHub API error, ...) while recording an agent failure, `run_once()`
+    must still return a structured `PollingResult`, not propagate."""
+    repo = _repo()
+    config = _config([repo], dry_run=False)
+    issue = _issue(repo.full_name, 5, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    working_issue = _issue(repo.full_name, 5, labels=["devbot:working"])
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.claim.return_value = working_issue
+    state_writer.block.side_effect = RuntimeError("GitHub API 오류")
+    agent_runner = MagicMock()
+    agent_runner.run.side_effect = RuntimeError("agent crashed")
+    delivery = MagicMock(spec=DeliveryService)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.ITERATION_ERROR
+    assert result.task is not None
+    delivery.deliver.assert_not_called()
+
+
+def test_block_failure_after_verification_failure_is_reported_without_crashing() -> None:
+    """Regression: same as above, but for the `block()` call after a
+    verification failure (not an agent exception)."""
+    repo = _repo()
+    config = _config([repo], dry_run=False)
+    issue = _issue(repo.full_name, 6, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    working_issue = _issue(repo.full_name, 6, labels=["devbot:working"])
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.claim.return_value = working_issue
+    state_writer.block.side_effect = RuntimeError("GitHub API 오류")
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock(spec=DeliveryService)
+    failing_verification = VerificationResult(
+        passed=False, failed_command=("uv", "run", "pytest"), output="1 failed"
+    )
+    delivery.deliver.return_value = DeliveryResult(
+        verification=failing_verification,
+        committed=False,
+        pushed=False,
+        pull_request=None,
+        dry_run=False,
+        message="Verification failed: uv run pytest",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.ITERATION_ERROR
+    assert result.task is not None
+
+
+def test_mark_for_review_failure_is_reported_without_crashing() -> None:
+    """Regression: if `state_writer.mark_for_review()` itself raises after
+    a successful delivery, `run_once()` must still return a structured
+    `PollingResult`, not propagate."""
+    repo = _repo()
+    config = _config([repo], dry_run=False)
+    issue = _issue(repo.full_name, 7, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    working_issue = _issue(repo.full_name, 7, labels=["devbot:working"])
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.claim.return_value = working_issue
+    state_writer.mark_for_review.side_effect = RuntimeError("GitHub API 오류")
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock(spec=DeliveryService)
+    pull_request = PullRequestInfo(number=1, html_url="https://github.com/someone/myrepo/pull/1")
+    delivery.deliver.return_value = _delivered(pull_request)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.ITERATION_ERROR
+    assert result.task is not None
+
+
 def test_move_to_review() -> None:
     repo = _repo()
     config = _config([repo], dry_run=False)

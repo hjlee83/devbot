@@ -86,10 +86,15 @@ workspace 검증 -> AgentRunner 실행"에서 멈추던 흐름을, 성공 시
 - `test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero`
   (`tests/test_main_loop.py`, Task 005부터 존재, 이번에 수정) — 아래
   "발견된 문제" 참고.
+- `test_block_failure_after_agent_exception_is_reported_without_crashing`,
+  `test_block_failure_after_verification_failure_is_reported_without_crashing`,
+  `test_mark_for_review_failure_is_reported_without_crashing`
+  (`tests/test_beta_smoke.py`, 리뷰 반영, 아래 "리뷰 반영" 참고).
 
-`tests/test_beta_smoke.py` 8개 전부 PASS. 전체 스위트 102개 전부 PASS.
-기존 93개 테스트(Task 001~008)는 단 하나도 수정 없이 그대로 통과했다
-(위 한 개 예외 제외, "발견된 문제" 참고).
+`tests/test_beta_smoke.py` 11개(체크포인트 8개 + 리뷰 반영 회귀 테스트
+3개) 전부 PASS. 전체 스위트 105개 전부 PASS. 기존 93개 테스트(Task
+001~008)는 단 하나도 수정 없이 그대로 통과했다(위 한 개 예외 제외,
+"발견된 문제" 참고).
 
 ## 발견된 문제
 
@@ -201,7 +206,7 @@ workspace 검증 -> AgentRunner 실행"에서 멈추던 흐름을, 성공 시
 |---|---|
 | `uv sync` | PASS |
 | `uv run ruff check .` | PASS (All checks passed!) |
-| `uv run pytest` | PASS (102 passed) |
+| `uv run pytest` | PASS (105 passed) |
 | `uv run devbot --once --dry-run` | PASS (exit 0, `no_ready_task`) |
 
 추가로 로컬에 실제 Git 저장소 + 최소 `uv` 프로젝트(`pyproject.toml` +
@@ -214,6 +219,44 @@ workspace 검증 -> AgentRunner 실행"에서 멈추던 흐름을, 성공 시
 `Delivery 결과: [dry-run] verification passed; no commit, push, or PR`
 순서로 찍히고 종료 코드 0으로 끝나는 것을 확인했다(자세한 재현 절차는
 `docs/08-beta-runbook.md` 참고).
+
+## 리뷰 반영
+
+1차 PR 리뷰(REQUEST CHANGES)에서 다음 blocker가 지적되어 수정했다:
+
+- **버그**: `run_once()`의 핵심 계약(Task 005부터 유지: "예외를 던지지
+  않고 항상 구조화된 `PollingResult`를 반환한다")을 `claim()`/`delivery.deliver()`
+  호출에는 지켰지만, 실패를 기록하는 `state_writer.block()`과 성공 후
+  전환하는 `state_writer.mark_for_review()` 네 곳(AgentRunner 예외 후,
+  AgentRunner non-zero 종료 후, 검증 실패 후, delivery 성공 후)은
+  `try/except`로 감싸지 않았다. GitHub 쓰기 실패(네트워크 오류, 권한
+  부족, 404, rate limit 등)가 실제 운영에서 이 지점들에 충분히
+  발생할 수 있는데, 그러면 예외가 `run_once()` 밖으로 그대로
+  전파됐다.
+- **수정**: `PollingService._block()` 헬퍼를 추가해 `state_writer.block()`
+  호출을 감싸고, 실패하면 `PollingResult(ITERATION_ERROR)`를 반환하도록
+  했다(성공하면 `None`을 반환해 호출부가 원래 의도한 상태
+  — `AGENT_FAILED` 또는 `BLOCKED` —를 그대로 반환한다). AgentRunner
+  예외/non-zero 종료/검증 실패, 세 호출부 모두 이 헬퍼를 쓰도록
+  바꿨다. `mark_for_review()` 호출도 동일하게 `try/except`로 감싸
+  실패 시 `ITERATION_ERROR`를 반환하도록 했다.
+- **추가한 테스트** (`tests/test_beta_smoke.py`):
+  - `test_block_failure_after_agent_exception_is_reported_without_crashing`
+    — AgentRunner가 예외를 던지고 그 뒤 `state_writer.block()`도
+    실패하는 경우 `run_once()`가 예외를 전파하지 않고
+    `ITERATION_ERROR`를 반환하는지 검증.
+  - `test_block_failure_after_verification_failure_is_reported_without_crashing`
+    — 검증 실패 후 `state_writer.block()`이 실패하는 경우도 동일하게
+    검증.
+  - `test_mark_for_review_failure_is_reported_without_crashing` —
+    delivery 성공 후 `state_writer.mark_for_review()`가 실패하는 경우
+    검증.
+  - 세 테스트 모두 수정 전 코드에서는 `RuntimeError`가 그대로
+    전파되어 실패했을 것이다(각 사이트가 무방비 상태였으므로).
+- 리뷰의 Warning(`tasks/009-beta-smoke-test.md` 첫 줄 오타)도 함께
+  `# Task 009: Beta Smoke Test`로 정리했다.
+- 리뷰 반영 후 재검증: `uv run ruff check .` PASS, `uv run pytest`
+  PASS(105 passed, 회귀 테스트 3개 추가로 102 → 105).
 
 ## 위험 요소
 

@@ -130,6 +130,24 @@ class PollingService:
     delivery: DeliveryService | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
+    def _block(
+        self, repository: RepositoryConfig, issue: GitHubIssue, reason: str, selected: IssueTask
+    ) -> PollingResult | None:
+        """Attempt to move `issue` to `blocked`. Returns a `PollingResult`
+        if the state write itself fails (so `run_once` can return that
+        instead of letting the exception propagate); returns None on
+        success so the caller keeps returning its own failure status."""
+        try:
+            self.state_writer.block(repository, issue, reason)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "Blocked 처리 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+        return None
+
     def _collect(
         self, repositories: Sequence[RepositoryConfig]
     ) -> tuple[list[IssueTask], dict[tuple[str, int], GitHubIssue]]:
@@ -214,7 +232,11 @@ class PollingService:
                 "AgentRunner 실행 실패 (%s #%d): %s", selected.repository, selected.number, exc
             )
             if full_flow:
-                self.state_writer.block(repository, issue, f"AgentRunner 실행 실패: {exc}")
+                block_failure = self._block(
+                    repository, issue, f"AgentRunner 실행 실패: {exc}", selected
+                )
+                if block_failure is not None:
+                    return block_failure
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=str(exc))
 
         if agent_result.returncode not in (None, 0):
@@ -229,7 +251,11 @@ class PollingService:
                 agent_result.returncode,
             )
             if full_flow:
-                self.state_writer.block(repository, issue, f"AgentRunner 실행 실패: {message}")
+                block_failure = self._block(
+                    repository, issue, f"AgentRunner 실행 실패: {message}", selected
+                )
+                if block_failure is not None:
+                    return block_failure
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=message)
 
         self.logger.info("실행 결과: %s", agent_result.message)
@@ -259,7 +285,11 @@ class PollingService:
                 selected.number,
                 delivery_result.message,
             )
-            self.state_writer.block(repository, issue, f"검증 실패: {delivery_result.message}")
+            block_failure = self._block(
+                repository, issue, f"검증 실패: {delivery_result.message}", selected
+            )
+            if block_failure is not None:
+                return block_failure
             return PollingResult(
                 status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
             )
@@ -270,7 +300,16 @@ class PollingService:
                 status=PollingStatus.AGENT_COMPLETED, task=selected, message=delivery_result.message
             )
 
-        self.state_writer.mark_for_review(repository, issue)
+        try:
+            self.state_writer.mark_for_review(repository, issue)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "Review 전환 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
         self.logger.info("Delivery 완료, review로 전환: %s", delivery_result.message)
         return PollingResult(
             status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message

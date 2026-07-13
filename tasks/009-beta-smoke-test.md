@@ -1,4 +1,4 @@
-lk 009: Beta Smoke Test
+# Task 009: Beta Smoke Test
 
 Version: 1.0.0
 Last Updated: 2026-07-13
