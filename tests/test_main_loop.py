@@ -100,6 +100,21 @@ def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> No
     assert kwargs["agent_runner"].dry_run is True
     assert kwargs["state_writer"].dry_run is True
     assert kwargs["delivery"].dry_run is True
+    assert kwargs["rework_service"].dry_run is True
+
+
+def test_cli_constructs_rework_service(tmp_path: Path) -> None:
+    env_path, repositories_path = _write_fixture(tmp_path)
+
+    with patch("devbot.main.PollingService") as mock_service_cls:
+        mock_service_cls.return_value.run_once.return_value = PollingResult(
+            status=PollingStatus.NO_READY_TASK
+        )
+        exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 0
+    _, kwargs = mock_service_cls.call_args
+    assert kwargs["rework_service"] is not None
 
 
 def test_continuous_loop_uses_configured_poll_interval() -> None:

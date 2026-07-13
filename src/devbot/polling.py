@@ -36,6 +36,7 @@ from devbot.models import (
     TaskState,
 )
 from devbot.queue import has_active_task, select_global_ready_task
+from devbot.rework import ReworkService
 from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
@@ -58,6 +59,7 @@ class PollingStatus(Enum):
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
     DELIVERED = "delivered"
+    REWORKED = "reworked"
     BLOCKED = "blocked"
     ITERATION_ERROR = "iteration_error"
 
@@ -128,6 +130,7 @@ class PollingService:
     build_prompt: BuildPromptFn = field(default=build_agent_prompt)
     state_writer: IssueStateWriter | None = None
     delivery: DeliveryService | None = None
+    rework_service: ReworkService | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
     def _block(
@@ -174,6 +177,11 @@ class PollingService:
             return PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))
 
         if has_active_task(tasks):
+            review_tasks = [task for task in tasks if task.state == TaskState.REVIEW]
+            working_exists = any(task.state == TaskState.WORKING for task in tasks)
+            if not working_exists and review_tasks and self.rework_service is not None:
+                return self._process_review_task(repositories, issues_by_key, review_tasks[0])
+
             self.logger.info(
                 "이미 진행 중인(working/review) Issue가 있어 새 작업을 선택하지 않습니다."
             )
@@ -313,6 +321,70 @@ class PollingService:
         self.logger.info("Delivery 완료, review로 전환: %s", delivery_result.message)
         return PollingResult(
             status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
+        )
+
+    def _process_review_task(
+        self,
+        repositories: Sequence[RepositoryConfig],
+        issues_by_key: dict[tuple[str, int], GitHubIssue],
+        selected: IssueTask,
+    ) -> PollingResult:
+        self.logger.info(
+            "Review Issue 확인: %s #%d (%s)", selected.repository, selected.number, selected.title
+        )
+        repository = next(repo for repo in repositories if repo.full_name == selected.repository)
+
+        try:
+            self.ensure_workspace_ready(repository)
+        except WorkspaceValidationError as exc:
+            self.logger.error(
+                "워크스페이스 검증 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.WORKSPACE_INVALID, task=selected, message=str(exc)
+            )
+
+        issue = issues_by_key[(selected.repository, selected.number)]
+        try:
+            comments = self.github_client.list_issue_comments(repository, issue.number)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "Review 댓글 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        branch = generate_branch_name(repository, issue.number, issue.title)
+        try:
+            rework_result = self.rework_service.process(  # type: ignore[union-attr]
+                repository, issue, branch, comments
+            )
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "Rework 처리 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        if not rework_result.triggered:
+            self.logger.info("처리할 @devbot review 댓글이 없습니다.")
+            return PollingResult(
+                status=PollingStatus.SKIPPED_ACTIVE_TASK,
+                task=selected,
+                message=rework_result.message,
+            )
+
+        if rework_result.message == "blocked":
+            self.logger.error("Rework 검증 실패로 blocked 처리: %s", rework_result.message)
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=rework_result.message
+            )
+
+        self.logger.info("Rework 완료: %s", rework_result.message)
+        return PollingResult(
+            status=PollingStatus.REWORKED, task=selected, message=rework_result.message
         )
 
 

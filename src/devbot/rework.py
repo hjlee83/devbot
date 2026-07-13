@@ -72,6 +72,7 @@ class ReworkService:
     state_writer: IssueStateWriter
     write_client: GitHubWriteClient
     apply_changes: ApplyChangesFn
+    dry_run: bool = False
     run_verification: RunVerificationFn = field(default=run_verification_commands)
     commit: CommitFn = field(default=commit_all_changes)
     push: PushFn = field(default=push_task_branch)
@@ -107,6 +108,17 @@ class ReworkService:
             )
             return ReworkResult(
                 triggered=True, comment=comment, verification=verification, message="blocked"
+            )
+
+        if self.dry_run:
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=verification,
+                message=(
+                    "[dry-run] rework verification passed; "
+                    "no commit, push, reaction, or review transition"
+                ),
             )
 
         self.commit(repository, build_commit_message(working_issue))

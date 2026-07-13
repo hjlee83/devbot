@@ -4,9 +4,10 @@ from unittest.mock import MagicMock, patch
 
 from devbot.agents.base import AgentRunResult
 from devbot.agents.codex import CodexRunner
-from devbot.github_client import GitHubIssue
+from devbot.github_client import GitHubIssue, PullRequestComment
 from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.polling import PollingService, PollingStatus
+from devbot.rework import ReworkService
 from devbot.workspace import WorkspaceValidationError
 
 
@@ -16,16 +17,23 @@ class FakeGitHubClient:
     def __init__(
         self,
         issues_by_repo: dict[str, list[GitHubIssue]] | None = None,
+        comments_by_issue: dict[tuple[str, int], list[PullRequestComment]] | None = None,
         *,
         error: Exception | None = None,
     ) -> None:
         self._issues_by_repo = issues_by_repo or {}
+        self._comments_by_issue = comments_by_issue or {}
         self._error = error
 
     def list_issues(self, repository: RepositoryConfig, *, state: str = "open", **_kwargs: object):
         if self._error is not None:
             raise self._error
         return self._issues_by_repo.get(repository.full_name, [])
+
+    def list_issue_comments(self, repository: RepositoryConfig, issue_number: int):
+        if self._error is not None:
+            raise self._error
+        return self._comments_by_issue.get((repository.full_name, issue_number), [])
 
 
 def _repo(name: str, *, enabled: bool = True) -> RepositoryConfig:
@@ -52,6 +60,21 @@ def _issue(
         state=state,
         labels=tuple(labels),
         created_at=created_at or datetime(2026, 1, 1),
+    )
+
+
+def _comment(
+    *,
+    comment_id: int = 1,
+    body: str = "@devbot please update this",
+    reactions: dict[str, int] | None = None,
+) -> PullRequestComment:
+    return PullRequestComment(
+        id=comment_id,
+        author="reviewer",
+        body=body,
+        created_at=datetime(2026, 1, 2),
+        reactions=reactions or {},
     )
 
 
@@ -100,6 +123,87 @@ def test_iteration_skips_when_review_task_exists() -> None:
 
     assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
     agent_runner.run.assert_not_called()
+
+
+def test_review_issue_without_unprocessed_comment_waits() -> None:
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 1, labels=["devbot:review"])
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 1): [_comment(reactions={"eyes": 1})]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    rework_service.process.return_value = MagicMock(
+        triggered=False, message="no unprocessed @devbot comments"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
+    rework_service.process.assert_called_once()
+
+
+def test_review_comment_triggers_rework() -> None:
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=3)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    rework_service.process.return_value = MagicMock(triggered=True, message="reworked")
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REWORKED
+    rework_service.process.assert_called_once()
+    (
+        called_repository,
+        called_issue,
+        called_branch,
+        called_comments,
+    ) = rework_service.process.call_args.args
+    assert called_repository == repo
+    assert called_issue == review_issue
+    assert called_branch == "devbot/myrepo-7-fix-bug"
+    assert called_comments == [comment]
+
+
+def test_working_issue_blocks_rework_even_when_review_exists() -> None:
+    repo = _repo("myrepo")
+    config = _config([repo])
+    working_issue = _issue(repo.full_name, 1, labels=["devbot:working"])
+    review_issue = _issue(repo.full_name, 2, labels=["devbot:review"])
+    github_client = FakeGitHubClient({repo.full_name: [working_issue, review_issue]})
+    rework_service = MagicMock(spec=ReworkService)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
+    rework_service.process.assert_not_called()
 
 
 def test_iteration_selects_one_ready_issue() -> None:

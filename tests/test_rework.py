@@ -132,6 +132,23 @@ def test_rework_reuses_existing_branch_and_pr() -> None:
     write_client.create_pull_request.assert_not_called()
 
 
+def test_rework_dry_run_does_not_push_or_mark_processed() -> None:
+    commit = MagicMock()
+    push = MagicMock()
+    service, state_writer, write_client = _service(commit=commit, push=push)
+    service.dry_run = True
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    write_client.add_reaction_to_comment.assert_not_called()
+    state_writer.mark_for_review.assert_not_called()
+    assert result.triggered is True
+    assert result.message.startswith("[dry-run]")
+
+
 def test_successful_rework_marks_comment_processed() -> None:
     service, _, write_client = _service()
     repository = _repo()
