@@ -5,5 +5,5 @@
 # at that path.
 repositories:
   - owner: hjlee83
-    repo: example-repo
-    enabled: false
+    repo: devbot
+    enabled: true
