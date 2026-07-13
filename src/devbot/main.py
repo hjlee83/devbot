@@ -6,6 +6,10 @@ a status-appropriate code.
 
 `uv run devbot` (no flags) runs the same iteration continuously on
 `POLL_INTERVAL_SECONDS`, until SIGINT/SIGTERM requests a safe shutdown.
+
+`--dry-run` forces dry-run regardless of the `DRY_RUN` environment
+variable, so a smoke test never depends on how the deployment's `.env` is
+configured.
 """
 
 from __future__ import annotations
@@ -14,11 +18,15 @@ import argparse
 import logging
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from devbot.agents.codex import CodexRunner
 from devbot.config import ConfigError, load_config
+from devbot.delivery import DeliveryService
 from devbot.github_client import GitHubClient
+from devbot.github_write_client import GitHubWriteClient
+from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.polling import PollingService, PollingStatus, run_forever
 
@@ -27,6 +35,7 @@ _LOGGER_NAME = "devbot"
 _FAILURE_STATUSES = {
     PollingStatus.WORKSPACE_INVALID,
     PollingStatus.AGENT_FAILED,
+    PollingStatus.BLOCKED,
     PollingStatus.ITERATION_ERROR,
 }
 
@@ -37,6 +46,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--once",
         action="store_true",
         help="한 번만 폴링하고 종료합니다.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="DRY_RUN 환경 변수 값과 무관하게 강제로 dry-run으로 실행합니다.",
     )
     return parser.parse_args(argv)
 
@@ -65,12 +79,18 @@ def main(
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 1
 
+    if args.dry_run and not config.dry_run:
+        config = replace(config, dry_run=True)
+
     try:
         with ProcessLock(config.lock_file):
+            write_client = GitHubWriteClient(config.github_token)
             polling_service = PollingService(
                 config=config,
                 github_client=GitHubClient(config.github_token),
                 agent_runner=CodexRunner(dry_run=config.dry_run),
+                state_writer=IssueStateWriter(client=write_client, dry_run=config.dry_run),
+                delivery=DeliveryService(client=write_client, dry_run=config.dry_run),
                 logger=logger,
             )
 

@@ -1,13 +1,17 @@
 """Polling: one safe iteration, and an optional continuous loop.
 
 Connects configuration, the GitHub read client, the global queue, workspace
-preparation, and the agent runner into a single testable iteration
-(`PollingService.run_once`), plus a continuous loop (`run_forever`) that
-repeats it on a configured interval until a shutdown signal arrives.
+preparation, the agent runner, Issue state writes, and delivery into a
+single testable iteration (`PollingService.run_once`), plus a continuous
+loop (`run_forever`) that repeats it on a configured interval until a
+shutdown signal arrives.
 
-No GitHub label writes, state transitions, commits, or PRs happen here —
-that is Task 006+ scope. This module only decides what *would* run next
-and hands it to the (possibly dry-run) `AgentRunner`.
+`state_writer` and `delivery` are optional. When both are supplied, a
+successful agent run is followed by the full `working -> verify -> commit
+-> push -> PR -> review` flow (or `-> blocked` on failure); when either is
+omitted, `run_once` falls back to its original Task 005 behavior (select
+and run the agent only, no GitHub writes) — this keeps every existing
+caller that doesn't need the write path working unchanged.
 """
 
 from __future__ import annotations
@@ -20,7 +24,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from devbot.agents.base import AgentRunner
+from devbot.delivery import DeliveryService
 from devbot.github_client import GitHubClient, GitHubIssue
+from devbot.issue_state import IssueStateWriter
 from devbot.models import (
     DevBotConfig,
     IssueComment,
@@ -34,6 +40,7 @@ from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
     ensure_git_workspace_ready,
+    generate_branch_name,
 )
 
 _STATE_LABEL_PREFIX = "devbot:"
@@ -50,6 +57,8 @@ class PollingStatus(Enum):
     WORKSPACE_INVALID = "workspace_invalid"
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
+    DELIVERED = "delivered"
+    BLOCKED = "blocked"
     ITERATION_ERROR = "iteration_error"
 
 
@@ -105,7 +114,10 @@ class PollingService:
 
     Every external dependency is injected (with real defaults) so tests can
     run this without a real GitHub account, a real Git checkout, or a real
-    agent process.
+    agent process. `state_writer` and `delivery` are the exception: they
+    have no side-effect-free default (both need a real `GitHubWriteClient`),
+    so they default to `None`, which disables the write path entirely (see
+    module docstring). `devbot.main` always supplies both in production.
     """
 
     config: DevBotConfig
@@ -114,6 +126,8 @@ class PollingService:
     select_task: SelectTaskFn = field(default=select_global_ready_task)
     ensure_workspace_ready: EnsureWorkspaceFn = field(default=ensure_git_workspace_ready)
     build_prompt: BuildPromptFn = field(default=build_agent_prompt)
+    state_writer: IssueStateWriter | None = None
+    delivery: DeliveryService | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
     def _collect(
@@ -174,6 +188,19 @@ class PollingService:
             )
 
         issue = issues_by_key[(selected.repository, selected.number)]
+        full_flow = self.state_writer is not None and self.delivery is not None
+
+        if full_flow:
+            try:
+                issue = self.state_writer.claim(repository, issue)
+            except Exception as exc:  # noqa: BLE001 - must not crash the loop
+                self.logger.error(
+                    "Issue claim 실패 (%s #%d): %s", selected.repository, selected.number, exc
+                )
+                return PollingResult(
+                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                )
+
         prompt = self.build_prompt(repository, issue, [])
 
         self.logger.info(
@@ -186,25 +213,67 @@ class PollingService:
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): %s", selected.repository, selected.number, exc
             )
+            if full_flow:
+                self.state_writer.block(repository, issue, f"AgentRunner 실행 실패: {exc}")
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=str(exc))
 
         if agent_result.returncode not in (None, 0):
+            message = (
+                agent_result.message
+                or f"AgentRunner exited with code {agent_result.returncode}"
+            )
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): 종료 코드 %s",
                 selected.repository,
                 selected.number,
                 agent_result.returncode,
             )
-            return PollingResult(
-                status=PollingStatus.AGENT_FAILED,
-                task=selected,
-                message=agent_result.message
-                or f"AgentRunner exited with code {agent_result.returncode}",
-            )
+            if full_flow:
+                self.state_writer.block(repository, issue, f"AgentRunner 실행 실패: {message}")
+            return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=message)
 
         self.logger.info("실행 결과: %s", agent_result.message)
+
+        if not full_flow:
+            return PollingResult(
+                status=PollingStatus.AGENT_COMPLETED, task=selected, message=agent_result.message
+            )
+
+        branch = generate_branch_name(repository, issue.number, issue.title)
+        self.logger.info("Delivery 시작: branch=%s", branch)
+
+        try:
+            delivery_result = self.delivery.deliver(repository, issue, branch, [])
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "Delivery 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        if not delivery_result.verification.passed:
+            self.logger.error(
+                "검증 실패로 blocked 처리 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                delivery_result.message,
+            )
+            self.state_writer.block(repository, issue, f"검증 실패: {delivery_result.message}")
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
+            )
+
+        if delivery_result.dry_run:
+            self.logger.info("Delivery 결과: %s", delivery_result.message)
+            return PollingResult(
+                status=PollingStatus.AGENT_COMPLETED, task=selected, message=delivery_result.message
+            )
+
+        self.state_writer.mark_for_review(repository, issue)
+        self.logger.info("Delivery 완료, review로 전환: %s", delivery_result.message)
         return PollingResult(
-            status=PollingStatus.AGENT_COMPLETED, task=selected, message=agent_result.message
+            status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
         )
 
 
