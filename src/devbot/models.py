@@ -14,6 +14,7 @@ class TaskState(StrEnum):
     READY = "ready"
     WORKING = "working"
     REVIEW = "review"
+    REWORK = "rework"
     BLOCKED = "blocked"
     DONE = "done"
 

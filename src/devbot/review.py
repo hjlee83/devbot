@@ -35,7 +35,7 @@ from devbot.agents.base import AgentRunner
 from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
-from devbot.models import RepositoryConfig, TaskState
+from devbot.models import JobType, RepositoryConfig, TaskState
 
 _MENTION = "@devbot"
 _MERGE_READY = "MERGE READY"
@@ -98,9 +98,9 @@ class ReviewResult:
       marker check says this head is already reviewed).
     - `status`: `"MERGE READY"` / `"REQUEST CHANGES"` on a valid review,
       else `None` (execution failure or an invalid Review Summary).
-    - `issue_state`: the Issue's resulting `devbot:*` state - always
-      `review` on a successfully posted review (Task 012: "결과와 관계없이
-      Issue를 devbot:review로 복귀"), `blocked` on any failure.
+    - `issue_state`: the Issue's resulting `devbot:*` state (Task 014
+      CP-014-2) - `review` on `MERGE READY`, `rework` on `REQUEST CHANGES`,
+      `blocked` on any failure.
     """
 
     triggered: bool
@@ -146,7 +146,7 @@ class ReviewService:
                 message="[dry-run] would run reviewer; no Agent execution, no GitHub write",
             )
 
-        working_issue = self.state_writer.request_changes(repository, issue)
+        working_issue = self.state_writer.claim(repository, issue, job_type=JobType.REVIEW)
 
         prompt = self.build_prompt(repository, issue, pull_request)
 
@@ -154,7 +154,7 @@ class ReviewService:
             result = self.reviewer_runner.run(repository, prompt)
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - record, then block
             reason = f"리뷰 Agent 실행 중 오류로 중단: {exc!r}"
-            self.state_writer.block(repository, working_issue, reason)
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
             return ReviewResult(
                 triggered=True,
                 status=None,
@@ -164,7 +164,7 @@ class ReviewService:
 
         if result.failed:
             reason = f"리뷰 Agent 실행 실패: {result.message}"
-            self.state_writer.block(repository, working_issue, reason)
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
             return ReviewResult(
                 triggered=True,
                 status=None,
@@ -179,7 +179,7 @@ class ReviewService:
                 f"리뷰 결과 형식이 올바르지 않습니다 (`{_MERGE_READY}` 또는 "
                 f"`{_REQUEST_CHANGES}` 중 정확히 하나 필요):\n\n{review_text}"
             )
-            self.state_writer.block(repository, working_issue, reason)
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
             return ReviewResult(
                 triggered=True,
                 status=None,
@@ -196,7 +196,7 @@ class ReviewService:
             self.write_client.create_comment(repository, pull_request.number, comment_body)
         except Exception as exc:  # noqa: BLE001 - record, then block
             reason = f"리뷰 결과 게시 실패: {exc!r}"
-            self.state_writer.block(repository, working_issue, reason)
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
             return ReviewResult(
                 triggered=True,
                 status=status,
@@ -204,11 +204,24 @@ class ReviewService:
                 message="blocked: failed to post review comment",
             )
 
-        self.state_writer.mark_for_review(repository, working_issue)
+        # CP-014-2: REQUEST CHANGES separates into its own `devbot:rework`
+        # state instead of staying `devbot:review` - Task 010's rework
+        # detection still keys off the `@devbot` mention in the posted
+        # comment above, unchanged.
+        if status == _REQUEST_CHANGES:
+            self.state_writer.send_to_rework(
+                repository, working_issue, job_type=JobType.REVIEW, reason="REQUEST CHANGES 게시 완료"
+            )
+            issue_state = TaskState.REWORK
+        else:
+            self.state_writer.mark_for_review(
+                repository, working_issue, job_type=JobType.REVIEW, reason="MERGE READY 게시 완료"
+            )
+            issue_state = TaskState.REVIEW
 
         return ReviewResult(
             triggered=True,
             status=status,
-            issue_state=TaskState.REVIEW,
+            issue_state=issue_state,
             message=f"reviewed: {status}",
         )

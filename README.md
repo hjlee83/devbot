@@ -38,18 +38,25 @@ uv run devbot --once --verbose   # same, but force DEBUG-level logs for this run
 ```
 
 Each iteration: if any repository has a `devbot:working` Issue, skip. If a
-`devbot:review` Issue has an unprocessed `@devbot` PR comment, rework it
-on the *existing* branch/PR (no new branch or PR); if it has none, wait.
-Otherwise select the highest-priority (then oldest) `devbot:ready` Issue
-across every enabled repository, validate its local Git workspace, claim
-it (`ready` -> `working`), and hand it to the configured `AgentRunner`. On
-success, verify (`uv run ruff check .` then `uv run pytest` in the target
-repository), commit, push the task branch, open a PR, and move the Issue
-to `review`. On agent or verification failure (either path), move the
-Issue to `blocked` with the failure as a comment. `DRY_RUN=true` (the
-default; `--dry-run` forces it) still runs verification but performs no
-agent process, Git write, or GitHub write. See
-`docs/08-beta-runbook.md` for a walkthrough and an operational checklist.
+`devbot:rework` Issue has an unprocessed `@devbot` PR comment, rework it on
+the *existing* branch/PR (no new branch or PR); if it has none, wait. If a
+`devbot:review` Issue's PR head has no auto-review marker yet, review it -
+`REQUEST CHANGES` moves the Issue to `devbot:rework`, `MERGE READY` leaves
+it `devbot:review` for a human Merge. Otherwise select the
+highest-priority (then oldest) `devbot:ready` Issue across every enabled
+repository, claim it (`ready` -> `working`), validate its local Git
+workspace, and hand it to the configured `AgentRunner`. A claim always
+happens before the workspace check; if that check fails, the claim is
+undone back to the Issue's prior state instead of leaving it `working`
+(Task 014). On success, verify (`uv run ruff check .` then `uv run
+pytest` in the target repository), commit, push the task branch, open a
+PR, and move the Issue to `review`. On agent, verification, or delivery
+failure, move the Issue to `blocked` with the failure as a comment - and
+any unexpected exception during a claimed Job is caught and blocked too,
+never left `working`. `DRY_RUN=true` (the default; `--dry-run` forces it)
+still runs verification but performs no agent process, Git write, or
+GitHub write. See `docs/08-beta-runbook.md` for a walkthrough and an
+operational checklist.
 
 Verification commands are currently hardcoded to `uv run ruff check .` and
 `uv run pytest` (see `src/devbot/delivery.py`), so target repositories must
@@ -99,7 +106,7 @@ src/devbot/
   queue.py                 global queue selection rules (no network)
   github_client.py         authenticated GitHub REST API read client (users, Issues, comments)
   github_write_client.py   authenticated GitHub REST API write client (labels, comments, PRs, reactions)
-  issue_state.py            devbot:* label state machine (claim/block/mark_for_review/request_changes)
+  issue_state.py            devbot:* label state machine (claim/restore/block/mark_for_review/send_to_rework)
   workspace.py             Git workspace checks, branch naming, prompt building
   delivery.py              verify -> commit -> push -> PR -> Issue comment
   rework.py                 @devbot PR feedback -> rework on the same branch/PR

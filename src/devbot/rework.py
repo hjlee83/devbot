@@ -1,10 +1,10 @@
 """PR feedback rework loop.
 
-While an Issue is `review`, a human (or the coordinating GPT) can leave a
-`@devbot` PR comment asking for changes. `ReworkService.process()` detects
-the first unprocessed such comment, returns the Issue to `working`, lets
-the caller apply the requested change (`apply_changes`), reruns
-verification, and either:
+An Issue moves to `rework` (Task 014 CP-014-2) when an automatic review
+posts `REQUEST CHANGES`, carrying an unprocessed `@devbot` PR comment.
+`ReworkService.process()` detects the first unprocessed such comment,
+claims the Issue to `working`, lets the caller apply the requested change
+(`apply_changes`), reruns verification, and either:
 
 - pushes the update to the *existing* branch (no new branch, no new PR)
   and marks the comment processed and the Issue `review` again, or
@@ -12,10 +12,11 @@ verification, and either:
   verification failure (or another failure reason) as evidence.
 
 Before touching anything, `process()` also confirms the workspace is
-actually checked out on the branch it is about to reuse, and it never
-lets an Agent exception or `KeyboardInterrupt` escape uncaught - both are
-recorded as a `blocked` reason instead, matching the same "never crash the
-loop, never silently push the wrong branch" contract as the rest of
+actually checked out on the branch it is about to reuse, and no exception -
+Agent, branch lookup, verification, commit/push/reaction, or
+`KeyboardInterrupt` - escapes uncaught: every one is recorded as a
+`blocked` reason instead (CP-014-7), matching the same "never crash the
+loop, never leave the Issue stuck in `working`" contract as the rest of
 `devbot.polling`.
 
 "Processed" is tracked with a GitHub-native `eyes` reaction on the
@@ -43,7 +44,7 @@ from devbot.delivery import (
 from devbot.github_client import GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
-from devbot.models import RepositoryConfig, TaskState
+from devbot.models import JobType, RepositoryConfig, TaskState
 
 _MENTION = "@devbot"
 _PROCESSED_REACTION = "eyes"
@@ -122,24 +123,37 @@ class ReworkService:
                 triggered=False,
                 comment=None,
                 verification=None,
-                # process() is only ever called for a `devbot:review` Issue
-                # (see `PollingService._process_review_task`); nothing
-                # changed, so the state stays `review`.
-                issue_state=TaskState.REVIEW,
+                # process() is only ever called for a `devbot:rework` Issue
+                # (Task 014 CP-014-3: `PollingService` only selects a REWORK
+                # Job when the Issue is already `devbot:rework`); nothing
+                # changed, so the state stays `rework`.
+                issue_state=TaskState.REWORK,
                 message="no unprocessed @devbot comments",
             )
 
         comment = unprocessed[0]
 
-        working_issue = self.state_writer.request_changes(repository, issue)
+        working_issue = self.state_writer.claim(repository, issue, job_type=JobType.REWORK)
 
-        actual_branch = self.current_branch(repository)
+        try:
+            actual_branch = self.current_branch(repository)
+        except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
+            reason = f"현재 브랜치 확인 중 오류로 rework 중단: {exc!r}"
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=None,
+                issue_state=TaskState.BLOCKED,
+                message="blocked: branch lookup failed",
+            )
+
         if actual_branch != branch:
             reason = (
                 "기존 PR head 브랜치와 로컬 브랜치 불일치로 rework 중단: "
                 f"expected={branch!r} actual={actual_branch!r}"
             )
-            self.state_writer.block(repository, working_issue, reason)
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -152,7 +166,7 @@ class ReworkService:
             self.apply_changes(repository, working_issue, comment)
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - record, then block
             reason = f"Agent 실행 중 오류로 rework 중단: {exc!r}"
-            self.state_writer.block(repository, working_issue, reason)
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -162,13 +176,28 @@ class ReworkService:
                 message="blocked: agent execution failed",
             )
 
-        verification = self.run_verification(repository)
+        try:
+            verification = self.run_verification(repository)
+        except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
+            reason = f"검증 실행 중 오류로 rework 중단: {exc!r}"
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=None,
+                issue_state=TaskState.BLOCKED,
+                code_changed=True,
+                pr_reused=True,
+                message="blocked: verification execution failed",
+            )
+
         if not verification.passed:
             self.state_writer.block(
                 repository,
                 working_issue,
                 "PR 피드백 반영 후 검증 실패: "
                 f"{' '.join(verification.failed_command or ())}\n\n{verification.output}",
+                job_type=JobType.REWORK,
             )
             return ReworkResult(
                 triggered=True,
@@ -195,12 +224,29 @@ class ReworkService:
                 ),
             )
 
-        self.commit(repository, build_commit_message(working_issue))
-        self.push(repository, branch)
-        self.write_client.add_reaction_to_comment(
-            repository, comment.id, content=_PROCESSED_REACTION
+        try:
+            self.commit(repository, build_commit_message(working_issue))
+            self.push(repository, branch)
+            self.write_client.add_reaction_to_comment(
+                repository, comment.id, content=_PROCESSED_REACTION
+            )
+        except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
+            reason = f"커밋/푸시/댓글 반응 처리 중 오류로 rework 중단: {exc!r}"
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=verification,
+                issue_state=TaskState.BLOCKED,
+                code_changed=True,
+                verification_passed=True,
+                pr_reused=True,
+                message="blocked: commit/push/reaction failed",
+            )
+
+        self.state_writer.mark_for_review(
+            repository, working_issue, job_type=JobType.REWORK, reason="rework 성공"
         )
-        self.state_writer.mark_for_review(repository, working_issue)
 
         return ReworkResult(
             triggered=True,

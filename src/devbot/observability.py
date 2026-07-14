@@ -558,6 +558,45 @@ def log_job_finished(
 
 
 @_safe_log
+def log_state_transition(
+    logger: logging.Logger,
+    *,
+    repository: str,
+    issue_number: int,
+    from_state: str,
+    to_state: str,
+    job_type: str | None,
+    reason: str = "",
+) -> None:
+    """INFO: every `devbot:*` label transition (Task 014 CP-014-11), with
+    the correlation fields an operator needs to reconstruct why an Issue
+    moved (or didn't) - repository, Issue number, source/target state, the
+    Job type that triggered it (`None` for a human-triggered/out-of-band
+    transition), and a short reason. `reason` may echo an Agent or GitHub
+    error message, so it is redacted the same as any other Job-failure
+    summary (Task 013 관례, CP-013-10)."""
+    redacted_reason = redact_secrets(reason) if reason else ""
+    logger.info(
+        "상태 전이: repo=%s issue=#%d %s -> %s job_type=%s reason=%s",
+        repository,
+        issue_number,
+        from_state,
+        to_state,
+        job_type or "-",
+        redacted_reason or "-",
+        extra={
+            "event": "state_transition",
+            "repository": repository,
+            "issue_number": issue_number,
+            "from_state": from_state,
+            "to_state": to_state,
+            "job_type": job_type,
+            "reason": redacted_reason,
+        },
+    )
+
+
+@_safe_log
 def log_stage(
     logger: logging.Logger,
     cycle_id: str,
