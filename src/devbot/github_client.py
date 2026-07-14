@@ -179,6 +179,13 @@ class GitHubClient:
         payload = self._get("/user").json()
         return GitHubUser(login=payload["login"], id=payload["id"])
 
+    def get_issue(self, repository: RepositoryConfig, issue_number: int) -> GitHubIssue:
+        """Fetch a single Issue by number (`GET /repos/{owner}/{repo}/issues/{number}`)."""
+        payload = self._get(
+            f"/repos/{repository.owner}/{repository.repo}/issues/{issue_number}"
+        ).json()
+        return _parse_issue(repository.full_name, payload)
+
     def list_issues(
         self,
         repository: RepositoryConfig,

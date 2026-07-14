@@ -29,11 +29,12 @@ from devbot.github_client import GitHubClient, GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
-from devbot.models import IssueComment, RepositoryConfig
+from devbot.models import DevBotConfig, IssueComment, RepositoryConfig
 from devbot.observability import LOG_LEVELS, install_secret_filter, log_startup
 from devbot.polling import PollingService, PollingStatus, run_forever
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
+from devbot.timeline import TimelineError, TimelineService
 from devbot.workspace import build_agent_prompt
 
 _LOGGER_NAME = "devbot"
@@ -63,6 +64,42 @@ def _apply_rework_changes(
         raise RuntimeError(message)
 
 
+def _add_timeline_common_args(sub_parser: argparse.ArgumentParser) -> None:
+    sub_parser.add_argument("--issue", type=int, required=True, help="대상 GitHub Issue 번호.")
+    sub_parser.add_argument(
+        "--repo",
+        default=None,
+        help="owner/repo 형식. 생략하면 config/repositories.yaml의 단일 enabled 저장소를 씁니다.",
+    )
+
+
+def _build_timeline_parser(subparsers: argparse._SubParsersAction) -> None:
+    timeline_parser = subparsers.add_parser(
+        "timeline", help="GitHub Status Timeline(Task 017 프로토콜)을 수동으로 기록/조회합니다."
+    )
+    timeline_subparsers = timeline_parser.add_subparsers(dest="timeline_command", required=True)
+
+    start_parser = timeline_subparsers.add_parser("start", help="phase 시작 이벤트를 기록합니다.")
+    _add_timeline_common_args(start_parser)
+    start_parser.add_argument("--phase", choices=["dev", "review"], required=True)
+    start_parser.add_argument("--actor", required=True, help="이 phase를 시작한 Agent/사람 식별자.")
+    start_parser.add_argument("--pr", type=int, default=None)
+
+    end_parser = timeline_subparsers.add_parser("end", help="phase 종료 이벤트를 기록합니다.")
+    _add_timeline_common_args(end_parser)
+    end_parser.add_argument("--phase", choices=["dev", "review"], required=True)
+    end_parser.add_argument("--actor", required=True, help="이 phase를 종료한 Agent/사람 식별자.")
+    end_parser.add_argument(
+        "--result",
+        required=True,
+        help="예: pushed, manual-action, blocked, merge-ready, request-changes, done",
+    )
+    end_parser.add_argument("--pr", type=int, default=None)
+
+    status_parser = timeline_subparsers.add_parser("status", help="Status Card를 조회합니다.")
+    _add_timeline_common_args(status_parser)
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="devbot")
     parser.add_argument(
@@ -80,6 +117,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="LOG_LEVEL 설정과 무관하게 이번 실행에서만 DEBUG 수준 로그를 켭니다.",
     )
+    subparsers = parser.add_subparsers(dest="command")
+    _build_timeline_parser(subparsers)
     return parser.parse_args(argv)
 
 
@@ -101,6 +140,66 @@ def _apply_log_level(logger: logging.Logger, config_log_level: str, *, verbose: 
     logger.setLevel(level)
 
 
+def _resolve_repository(config: DevBotConfig, repo_arg: str | None) -> RepositoryConfig:
+    """Pick the `RepositoryConfig` a `timeline` command targets: an
+    explicit `--repo owner/repo`, or the sole enabled repository when there
+    is exactly one (every current deployment - `config/repositories.yaml`
+    - manages a single repository)."""
+    if repo_arg is not None:
+        owner, separator, repo = repo_arg.partition("/")
+        if not separator:
+            raise ConfigError(f"--repo는 owner/repo 형식이어야 합니다: {repo_arg!r}")
+        for candidate in config.repositories:
+            if candidate.owner == owner and candidate.repo == repo:
+                return candidate
+        raise ConfigError(f"config/repositories.yaml에 없는 저장소입니다: {repo_arg!r}")
+
+    enabled = config.enabled_repositories
+    if len(enabled) != 1:
+        raise ConfigError(
+            "timeline 명령은 대상 저장소를 하나로 특정할 수 없습니다 "
+            f"(enabled repositories: {len(enabled)}개). --repo owner/repo를 지정하세요."
+        )
+    return enabled[0]
+
+
+def _run_timeline_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    service = TimelineService(
+        read_client=GitHubClient(config.github_token),
+        write_client=GitHubWriteClient(config.github_token),
+        dry_run=config.dry_run,
+    )
+
+    try:
+        if args.timeline_command == "start":
+            outcome = service.start(
+                repository, args.issue, phase=args.phase, actor=args.actor, pr=args.pr
+            )
+        elif args.timeline_command == "end":
+            outcome = service.end(
+                repository,
+                args.issue,
+                phase=args.phase,
+                actor=args.actor,
+                result=args.result,
+                pr=args.pr,
+            )
+        else:
+            outcome = service.status(repository, args.issue)
+    except TimelineError as exc:
+        print(f"timeline 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(outcome.status_card)
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     env_path: Path | str | None = None,
@@ -120,6 +219,9 @@ def main(
 
     _apply_log_level(logger, config.log_level, verbose=args.verbose)
     install_secret_filter(logger, [config.github_token])
+
+    if args.command == "timeline":
+        return _run_timeline_command(args, config)
 
     try:
         with ProcessLock(config.lock_file):
