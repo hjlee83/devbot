@@ -64,12 +64,12 @@ def _write_fixture(tmp_path: Path, *, lock_file: Path | None = None) -> tuple[Pa
 def test_run_once_exits_after_single_iteration(tmp_path: Path) -> None:
     env_path, repositories_path = _write_fixture(tmp_path)
 
-    with patch("devbot.polling.PollingService.run_once") as mock_run_once:
-        mock_run_once.return_value = PollingResult(status=PollingStatus.NO_READY_TASK)
+    with patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle:
+        mock_run_cycle.return_value = [PollingResult(status=PollingStatus.NO_READY_TASK)]
         exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 0
-    mock_run_once.assert_called_once()
+    mock_run_cycle.assert_called_once()
 
 
 def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> None:
@@ -90,9 +90,9 @@ def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> No
     )
 
     with patch("devbot.main.PollingService") as mock_service_cls:
-        mock_service_cls.return_value.run_once.return_value = PollingResult(
-            status=PollingStatus.NO_READY_TASK
-        )
+        mock_service_cls.return_value.run_cycle.return_value = [
+            PollingResult(status=PollingStatus.NO_READY_TASK)
+        ]
         exit_code = main(
             ["--once", "--dry-run"], env_path=env_path, repositories_path=repositories_path
         )
@@ -104,20 +104,22 @@ def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> No
     assert kwargs["state_writer"].dry_run is True
     assert kwargs["delivery"].dry_run is True
     assert kwargs["rework_service"].dry_run is True
+    assert kwargs["review_service"].dry_run is True
 
 
 def test_cli_constructs_rework_service(tmp_path: Path) -> None:
     env_path, repositories_path = _write_fixture(tmp_path)
 
     with patch("devbot.main.PollingService") as mock_service_cls:
-        mock_service_cls.return_value.run_once.return_value = PollingResult(
-            status=PollingStatus.NO_READY_TASK
-        )
+        mock_service_cls.return_value.run_cycle.return_value = [
+            PollingResult(status=PollingStatus.NO_READY_TASK)
+        ]
         exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 0
     _, kwargs = mock_service_cls.call_args
     assert kwargs["rework_service"] is not None
+    assert kwargs["review_service"] is not None
 
 
 def test_continuous_loop_uses_configured_poll_interval() -> None:

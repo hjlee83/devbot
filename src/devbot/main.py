@@ -31,6 +31,7 @@ from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import IssueComment, RepositoryConfig
 from devbot.polling import PollingService, PollingStatus, run_forever
+from devbot.review import ReviewService
 from devbot.rework import ReworkService
 from devbot.workspace import build_agent_prompt
 
@@ -132,13 +133,20 @@ def main(
                     ),
                     dry_run=config.dry_run,
                 ),
+                review_service=ReviewService(
+                    state_writer=state_writer,
+                    write_client=write_client,
+                    reviewer_runner=reviewer_runner,
+                    dry_run=config.dry_run,
+                ),
                 logger=logger,
             )
 
             if args.once:
-                result = polling_service.run_once()
-                logger.info("1회 실행 완료: %s", result.status.value)
-                return 1 if result.status in _FAILURE_STATUSES else 0
+                results = polling_service.run_cycle()
+                for result in results:
+                    logger.info("1회 실행 완료: %s", result.status.value)
+                return 1 if any(result.status in _FAILURE_STATUSES for result in results) else 0
 
             run_forever(polling_service, config.poll_interval_seconds, logger=logger)
             return 0

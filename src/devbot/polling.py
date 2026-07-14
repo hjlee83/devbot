@@ -1,17 +1,36 @@
-"""Polling: one safe iteration, and an optional continuous loop.
+"""Polling: one safe scheduling cycle, and an optional continuous loop.
 
-Connects configuration, the GitHub read client, the global queue, workspace
-preparation, the agent runner, Issue state writes, and delivery into a
-single testable iteration (`PollingService.run_once`), plus a continuous
-loop (`run_forever`) that repeats it on a configured interval until a
-shutdown signal arrives.
+Connects configuration, the GitHub read client, the job scheduler
+(`devbot.scheduler`), workspace preparation, the implementer/reviewer
+Agent runners, Issue state writes, and delivery into a single testable
+cycle (`PollingService.run_cycle`), plus a continuous loop (`run_forever`)
+that repeats it on a configured interval until a shutdown signal arrives.
+
+Each enabled repository contributes at most one job candidate per cycle -
+a pending Task 010 rework, an unreviewed PR head, or a `devbot:ready`
+implementation, in that priority order (see `devbot.scheduler.select_jobs`)
+- and a repository with any `devbot:working` Issue contributes none at all
+(that Issue's own job, from a previous or still-running cycle, has not
+resolved yet). `DevBotConfig.max_concurrent_jobs` (default `1`, the same
+serial behavior as before Task 012) bounds how many of those per-repository
+candidates actually run in one cycle; two different repositories' jobs may
+run in parallel, but never two jobs for the same repository or the same
+Issue.
+
+`run_once()` is a thin backward-compatible wrapper: with the default
+`max_concurrent_jobs=1`, `run_cycle()` never selects more than one job, so
+`run_once()` (`run_cycle()`'s first result, or a summary result when
+nothing was selected) is exactly what it always was.
 
 `state_writer` and `delivery` are optional. When both are supplied, a
-successful agent run is followed by the full `working -> verify -> commit
--> push -> PR -> review` flow (or `-> blocked` on failure); when either is
-omitted, `run_once` falls back to its original Task 005 behavior (select
-and run the agent only, no GitHub writes) — this keeps every existing
-caller that doesn't need the write path working unchanged.
+successful implementer run is followed by the full `working -> verify ->
+commit -> push -> PR -> review` flow (or `-> blocked` on failure); when
+either is omitted, ready-Issue jobs fall back to their original Task 005
+behavior (select and run the agent only, no GitHub writes) - this keeps
+every existing caller that doesn't need the write path working unchanged.
+`rework_service` and `review_service` independently gate whether rework and
+automatic-review jobs are ever generated at all; a deployment that hasn't
+wired one simply never sees that job type as a candidate.
 """
 
 from __future__ import annotations
@@ -21,23 +40,27 @@ import re
 import signal
 import time
 from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 
 from devbot.agents.base import AgentRunner
 from devbot.delivery import DeliveryService
-from devbot.github_client import GitHubClient, GitHubIssue, PullRequest
+from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.issue_state import IssueStateWriter
 from devbot.models import (
     DevBotConfig,
     IssueComment,
     IssueTask,
+    Job,
+    JobType,
     Priority,
     RepositoryConfig,
     TaskState,
 )
-from devbot.queue import has_active_task, select_global_ready_task
+from devbot.review import ReviewService, has_review_marker_for_head
 from devbot.rework import ReworkService, find_unprocessed_devbot_comments
+from devbot.scheduler import select_jobs
 from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
@@ -52,7 +75,7 @@ _LOGGER_NAME = "devbot"
 
 
 class PollingStatus(Enum):
-    """Outcome of a single `PollingService.run_once()` iteration."""
+    """Outcome of a single job within a `PollingService.run_cycle()` cycle."""
 
     SKIPPED_ACTIVE_TASK = "skipped_active_task"
     NO_READY_TASK = "no_ready_task"
@@ -61,13 +84,14 @@ class PollingStatus(Enum):
     AGENT_FAILED = "agent_failed"
     DELIVERED = "delivered"
     REWORKED = "reworked"
+    REVIEWED = "reviewed"
     BLOCKED = "blocked"
     ITERATION_ERROR = "iteration_error"
 
 
 @dataclass(frozen=True, slots=True)
 class PollingResult:
-    """Structured outcome of one iteration. Never raises for expected failures."""
+    """Structured outcome of one job. Never raises for expected failures."""
 
     status: PollingStatus
     task: IssueTask | None = None
@@ -129,14 +153,15 @@ def find_linked_pull_request(
     return None
 
 
-SelectTaskFn = Callable[[Iterable[IssueTask], Iterable[RepositoryConfig]], IssueTask | None]
 EnsureWorkspaceFn = Callable[[RepositoryConfig], None]
 BuildPromptFn = Callable[[RepositoryConfig, GitHubIssue, Sequence[IssueComment]], str]
+
+IssuesByKey = dict[tuple[str, int], GitHubIssue]
 
 
 @dataclass
 class PollingService:
-    """Runs one polling iteration against every enabled repository.
+    """Runs one scheduling cycle against every enabled repository.
 
     Every external dependency is injected (with real defaults) so tests can
     run this without a real GitHub account, a real Git checkout, or a real
@@ -150,19 +175,19 @@ class PollingService:
     github_client: GitHubClient
     implementer_runner: AgentRunner
     reviewer_runner: AgentRunner | None = None
-    select_task: SelectTaskFn = field(default=select_global_ready_task)
     ensure_workspace_ready: EnsureWorkspaceFn = field(default=ensure_git_workspace_ready)
     build_prompt: BuildPromptFn = field(default=build_agent_prompt)
     state_writer: IssueStateWriter | None = None
     delivery: DeliveryService | None = None
     rework_service: ReworkService | None = None
+    review_service: ReviewService | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
     def _block(
         self, repository: RepositoryConfig, issue: GitHubIssue, reason: str, selected: IssueTask
     ) -> PollingResult | None:
         """Attempt to move `issue` to `blocked`. Returns a `PollingResult`
-        if the state write itself fails (so `run_once` can return that
+        if the state write itself fails (so the caller can return that
         instead of letting the exception propagate); returns None on
         success so the caller keeps returning its own failure status."""
         try:
@@ -178,9 +203,9 @@ class PollingService:
 
     def _collect(
         self, repositories: Sequence[RepositoryConfig]
-    ) -> tuple[list[IssueTask], dict[tuple[str, int], GitHubIssue]]:
+    ) -> tuple[list[IssueTask], IssuesByKey]:
         tasks: list[IssueTask] = []
-        issues_by_key: dict[tuple[str, int], GitHubIssue] = {}
+        issues_by_key: IssuesByKey = {}
         for repository in repositories:
             for issue in self.github_client.list_issues(repository, state="open"):
                 task = issue_to_task(issue)
@@ -190,41 +215,236 @@ class PollingService:
                 issues_by_key[(issue.repository, issue.number)] = issue
         return tasks, issues_by_key
 
-    def run_once(self) -> PollingResult:
+    def _fetch_linked_pull_request_and_comments(
+        self, repository: RepositoryConfig, selected: IssueTask, issue: GitHubIssue
+    ) -> tuple[PullRequest | None, list[PullRequestComment], PollingResult | None]:
+        """Resolve `issue`'s linked PR and that PR's own conversation
+        comments (not `issue`'s comments - see the module docstring: both
+        rework detection and review-marker detection now key off the PR,
+        which is where review feedback actually gets posted)."""
+        try:
+            pull_requests = self.github_client.list_pull_requests(repository)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "PR 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return (
+                None,
+                [],
+                PollingResult(
+                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                ),
+            )
+
+        linked_pull_request = find_linked_pull_request(issue, pull_requests)
+        if linked_pull_request is None:
+            self.logger.error(
+                "review Issue에 연결된 PR을 찾지 못했습니다 (%s #%d)",
+                selected.repository,
+                selected.number,
+            )
+            return (
+                None,
+                [],
+                PollingResult(
+                    status=PollingStatus.ITERATION_ERROR,
+                    task=selected,
+                    message=f"No linked pull request found for Issue #{issue.number}",
+                ),
+            )
+
+        try:
+            pr_comments = self.github_client.list_issue_comments(
+                repository, linked_pull_request.number
+            )
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "PR 댓글 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return (
+                None,
+                [],
+                PollingResult(
+                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                ),
+            )
+
+        return linked_pull_request, pr_comments, None
+
+    def _review_state_candidate(
+        self, repository: RepositoryConfig, review_task: IssueTask, issue: GitHubIssue
+    ) -> tuple[Job | None, PollingResult | None]:
+        """A `devbot:review` Issue is a REWORK candidate if its linked PR
+        has an unprocessed `@devbot` comment, else a REVIEW candidate if
+        that PR's current head commit has no auto-review marker yet, else
+        no candidate at all (fully caught up - waiting on a human)."""
+        if self.rework_service is None and self.review_service is None:
+            return None, None
+
+        linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
+            repository, review_task, issue
+        )
+        if error is not None:
+            return None, error
+        assert linked_pull_request is not None  # `error` is None only when this is set
+
+        if self.rework_service is not None and find_unprocessed_devbot_comments(pr_comments):
+            return Job(job_type=JobType.REWORK, task=review_task), None
+
+        if self.review_service is not None and not has_review_marker_for_head(
+            pr_comments, linked_pull_request.head_sha
+        ):
+            return Job(job_type=JobType.REVIEW, task=review_task), None
+
+        return None, None
+
+    def _collect_job_candidates(
+        self,
+        repositories: Sequence[RepositoryConfig],
+        tasks: Sequence[IssueTask],
+        issues_by_key: IssuesByKey,
+    ) -> tuple[list[Job], list[PollingResult]]:
+        tasks_by_repo: dict[str, list[IssueTask]] = {}
+        for task in tasks:
+            tasks_by_repo.setdefault(task.repository, []).append(task)
+
+        candidates: list[Job] = []
+        hard_errors: list[PollingResult] = []
+
+        for repository in repositories:
+            repo_tasks = tasks_by_repo.get(repository.full_name, [])
+            if any(task.state == TaskState.WORKING for task in repo_tasks):
+                # Active (or crashed-mid-run) work already claims this
+                # repository's single local workspace this cycle.
+                continue
+
+            review_tasks = [task for task in repo_tasks if task.state == TaskState.REVIEW]
+            for review_task in review_tasks:
+                issue = issues_by_key[(review_task.repository, review_task.number)]
+                job, error = self._review_state_candidate(repository, review_task, issue)
+                if error is not None:
+                    hard_errors.append(error)
+                elif job is not None:
+                    candidates.append(job)
+
+            if review_tasks:
+                # An unmerged PR already occupies this repository's
+                # workspace; a fresh `ready` Issue waits for it.
+                continue
+
+            for ready_task in (task for task in repo_tasks if task.state == TaskState.READY):
+                candidates.append(Job(job_type=JobType.IMPLEMENT, task=ready_task))
+
+        return candidates, hard_errors
+
+    def _execute_job(
+        self, job: Job, repositories: Sequence[RepositoryConfig], issues_by_key: IssuesByKey
+    ) -> PollingResult:
+        repository = next(repo for repo in repositories if repo.full_name == job.task.repository)
+        if job.job_type is JobType.IMPLEMENT:
+            return self._run_implement_job(repository, job.task, issues_by_key)
+        if job.job_type is JobType.REWORK:
+            return self._run_rework_job(repository, job.task, issues_by_key)
+        return self._run_review_job(repository, job.task, issues_by_key)
+
+    def _execute_jobs(
+        self,
+        jobs: Sequence[Job],
+        repositories: Sequence[RepositoryConfig],
+        issues_by_key: IssuesByKey,
+    ) -> list[PollingResult]:
+        if not jobs:
+            return []
+
+        if len(jobs) == 1:
+            return [self._execute_job(jobs[0], repositories, issues_by_key)]
+
+        results: list[PollingResult] = [
+            PollingResult(status=PollingStatus.ITERATION_ERROR, task=job.task) for job in jobs
+        ]
+        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+            future_to_index = {
+                executor.submit(self._execute_job, job, repositories, issues_by_key): index
+                for index, job in enumerate(jobs)
+            }
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:  # noqa: BLE001 - must not crash other jobs/the next cycle
+                    self.logger.error(
+                        "Job 실행 중 예외 (%s #%d): %s",
+                        jobs[index].task.repository,
+                        jobs[index].task.number,
+                        exc,
+                    )
+                    results[index] = PollingResult(
+                        status=PollingStatus.ITERATION_ERROR,
+                        task=jobs[index].task,
+                        message=str(exc),
+                    )
+        return results
+
+    def run_cycle(self) -> list[PollingResult]:
+        """Run one scheduling cycle: collect every repository's job
+        candidate, select up to `config.max_concurrent_jobs` of them
+        (never two for the same repository), and run the selected ones -
+        serially if only one was selected, otherwise in parallel. Always
+        returns at least one `PollingResult`."""
         self.logger.info("폴링을 시작합니다.")
         repositories = self.config.enabled_repositories
         self.logger.info("관리 저장소 수: %d", len(repositories))
+        self.logger.info(
+            "Agent 구성: implementer=%s reviewer=%s dry_run=%s",
+            self.config.implementer_agent,
+            self.config.reviewer_agent,
+            self.config.dry_run,
+        )
 
         try:
             tasks, issues_by_key = self._collect(repositories)
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error("GitHub 조회 중 오류가 발생했습니다: %s", exc)
-            return PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))
-
-        if has_active_task(tasks):
-            review_tasks = [task for task in tasks if task.state == TaskState.REVIEW]
-            working_exists = any(task.state == TaskState.WORKING for task in tasks)
-            if not working_exists and review_tasks and self.rework_service is not None:
-                return self._process_review_task(repositories, issues_by_key, review_tasks[0])
-
-            self.logger.info(
-                "이미 진행 중인(working/review) Issue가 있어 새 작업을 선택하지 않습니다."
-            )
-            return PollingResult(status=PollingStatus.SKIPPED_ACTIVE_TASK)
+            return [PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))]
 
         ready_count = sum(1 for task in tasks if task.state == TaskState.READY)
         self.logger.info("ready 상태 Issue 수: %d", ready_count)
 
-        selected = self.select_task(tasks, repositories)
-        if selected is None:
-            self.logger.info("선택 가능한 ready Issue가 없습니다.")
-            return PollingResult(status=PollingStatus.NO_READY_TASK)
+        candidates, hard_errors = self._collect_job_candidates(repositories, tasks, issues_by_key)
+        selected_jobs = select_jobs(candidates, self.config.max_concurrent_jobs)
+        job_results = self._execute_jobs(selected_jobs, repositories, issues_by_key)
 
+        results = [*hard_errors, *job_results]
+        if results:
+            return results
+
+        if not tasks:
+            self.logger.info("선택 가능한 ready Issue가 없습니다.")
+            return [PollingResult(status=PollingStatus.NO_READY_TASK)]
+
+        if any(task.state in (TaskState.WORKING, TaskState.REVIEW) for task in tasks):
+            self.logger.info(
+                "이미 진행 중인(working/review) Issue가 있어 새 작업을 선택하지 않습니다."
+            )
+            return [PollingResult(status=PollingStatus.SKIPPED_ACTIVE_TASK)]
+
+        self.logger.info("선택 가능한 ready Issue가 없습니다.")
+        return [PollingResult(status=PollingStatus.NO_READY_TASK)]
+
+    def run_once(self) -> PollingResult:
+        """Backward-compatible single-result wrapper around `run_cycle()`.
+
+        With the default `max_concurrent_jobs=1`, `run_cycle()` never
+        selects more than one job, so this is exactly the same outcome
+        `run_once()` always returned."""
+        return self.run_cycle()[0]
+
+    def _run_implement_job(
+        self, repository: RepositoryConfig, selected: IssueTask, issues_by_key: IssuesByKey
+    ) -> PollingResult:
         self.logger.info(
             "Issue 선택: %s #%d (%s)", selected.repository, selected.number, selected.title
         )
-
-        repository = next(repo for repo in repositories if repo.full_name == selected.repository)
 
         try:
             self.ensure_workspace_ready(repository)
@@ -347,16 +567,12 @@ class PollingService:
             status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
         )
 
-    def _process_review_task(
-        self,
-        repositories: Sequence[RepositoryConfig],
-        issues_by_key: dict[tuple[str, int], GitHubIssue],
-        selected: IssueTask,
+    def _run_rework_job(
+        self, repository: RepositoryConfig, selected: IssueTask, issues_by_key: IssuesByKey
     ) -> PollingResult:
         self.logger.info(
-            "Review Issue 확인: %s #%d (%s)", selected.repository, selected.number, selected.title
+            "Rework 대상 확인: %s #%d (%s)", selected.repository, selected.number, selected.title
         )
-        repository = next(repo for repo in repositories if repo.full_name == selected.repository)
 
         try:
             self.ensure_workspace_ready(repository)
@@ -369,50 +585,15 @@ class PollingService:
             )
 
         issue = issues_by_key[(selected.repository, selected.number)]
-        try:
-            comments = self.github_client.list_issue_comments(repository, issue.number)
-        except Exception as exc:  # noqa: BLE001 - must not crash the loop
-            self.logger.error(
-                "Review 댓글 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
-            )
-            return PollingResult(
-                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
-            )
-
-        if not find_unprocessed_devbot_comments(comments):
-            self.logger.info("처리할 @devbot review 댓글이 없습니다.")
-            return PollingResult(
-                status=PollingStatus.SKIPPED_ACTIVE_TASK,
-                task=selected,
-                message="no unprocessed @devbot comments",
-            )
-
-        try:
-            pull_requests = self.github_client.list_pull_requests(repository)
-        except Exception as exc:  # noqa: BLE001 - must not crash the loop
-            self.logger.error(
-                "PR 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
-            )
-            return PollingResult(
-                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
-            )
-
-        linked_pull_request = find_linked_pull_request(issue, pull_requests)
-        if linked_pull_request is None:
-            self.logger.error(
-                "review Issue에 연결된 PR을 찾지 못했습니다 (%s #%d)",
-                selected.repository,
-                selected.number,
-            )
-            return PollingResult(
-                status=PollingStatus.ITERATION_ERROR,
-                task=selected,
-                message=f"No linked pull request found for Issue #{issue.number}",
-            )
+        linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
+            repository, selected, issue
+        )
+        if error is not None:
+            return error
 
         try:
             rework_result = self.rework_service.process(  # type: ignore[union-attr]
-                repository, issue, linked_pull_request.head_ref, comments
+                repository, issue, linked_pull_request.head_ref, pr_comments
             )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
@@ -441,6 +622,53 @@ class PollingService:
             status=PollingStatus.REWORKED, task=selected, message=rework_result.message
         )
 
+    def _run_review_job(
+        self, repository: RepositoryConfig, selected: IssueTask, issues_by_key: IssuesByKey
+    ) -> PollingResult:
+        self.logger.info(
+            "자동 리뷰 대상 확인: %s #%d (%s)", selected.repository, selected.number, selected.title
+        )
+
+        try:
+            self.ensure_workspace_ready(repository)
+        except WorkspaceValidationError as exc:
+            self.logger.error(
+                "워크스페이스 검증 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.WORKSPACE_INVALID, task=selected, message=str(exc)
+            )
+
+        issue = issues_by_key[(selected.repository, selected.number)]
+        linked_pull_request, _pr_comments, error = self._fetch_linked_pull_request_and_comments(
+            repository, selected, issue
+        )
+        if error is not None:
+            return error
+
+        try:
+            review_result = self.review_service.process(  # type: ignore[union-attr]
+                repository, issue, linked_pull_request
+            )
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "리뷰 처리 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        if review_result.issue_state is TaskState.BLOCKED:
+            self.logger.error("리뷰 실패로 blocked 처리: %s", review_result.message)
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=review_result.message
+            )
+
+        self.logger.info("리뷰 완료: %s", review_result.message)
+        return PollingResult(
+            status=PollingStatus.REVIEWED, task=selected, message=review_result.message
+        )
+
 
 def run_forever(
     polling_service: PollingService,
@@ -449,7 +677,11 @@ def run_forever(
     sleep_fn: Callable[[float], None] = time.sleep,
     logger: logging.Logger | None = None,
 ) -> None:
-    """Run `polling_service.run_once()` repeatedly until SIGINT/SIGTERM."""
+    """Run `polling_service.run_once()` repeatedly until SIGINT/SIGTERM.
+
+    `run_once()` still runs every job `run_cycle()` selects this cycle
+    (`max_concurrent_jobs` may be > 1) - it only ever *returns* the first
+    one, which is all a single-result caller like this loop needs."""
     log = logger or logging.getLogger(_LOGGER_NAME)
     shutdown_requested = False
 

@@ -1,46 +1,61 @@
 # Beta Runbook
 
-Task 009 wires Task 001-008's pieces into one flow inside
-`PollingService.run_once()` (see `src/devbot/polling.py`). Task 010 adds
-the `review`-state branch of that same flow: polled `@devbot` PR feedback
-now reworks the existing branch/PR automatically instead of waiting for a
-human to trigger it. This is a manual walkthrough for confirming both
-flows against a real target repository, plus the operational checklist
+Task 009 wires Task 001-008's pieces into one flow. Task 010 adds the
+`review`-state rework branch: polled `@devbot` PR feedback reworks the
+existing branch/PR automatically. Task 011 adds a second Agent role
+(reviewer) alongside the implementer. Task 012 turns all of this into a
+per-repository job scheduler (`PollingService.run_cycle()`, see
+`src/devbot/polling.py`) that also actually *runs* the reviewer role, so
+the full ready -> review -> merge relay needs no manual trigger at any
+step except the final Merge. This is a manual walkthrough for confirming
+the flow against a real target repository, plus the operational checklist
 for running DevBot beyond a single smoke test.
 
-## Full flow
+## Full flow (per repository, per cycle)
+
+Each enabled repository independently contributes at most one candidate
+job per cycle; `devbot.scheduler.select_jobs` then picks up to
+`MAX_CONCURRENT_JOBS` of them (default `1` — the same serial behavior as
+every earlier Task), never two for the same repository:
 
 ```text
-Any devbot:working Issue? --yes--> skip this iteration
+Any devbot:working Issue in this repository? --yes--> no candidate this cycle
 
 no
  |
  v
-Any devbot:review Issue with an unprocessed @devbot comment?
+Any devbot:review Issue in this repository?
  |
- +--yes--> ReworkService.process() (Task 010)
- |          reuses the EXISTING branch/PR (never creates a new one)
- |             |
- |             v
- |         request_changes (review -> working) -> AgentRunner
- |             |
- |             v
- |         run_verification_commands
- |             |
- |     passed? +----- failed?
- |        |               |
- |        v               v
- |  commit -> push   block (+ reason comment)
- |  -> react "eyes"
- |  on the comment
- |        |
- |        v
- |  mark_for_review (-> review)
+ +--yes--> its linked PR has an unprocessed @devbot comment?
+ |          |
+ |          +--yes--> REWORK job (Task 010, unchanged mechanics -
+ |          |          reuses the EXISTING branch/PR, reacts "eyes" when
+ |          |          done) -> review -> reviewer re-reviews the new head
+ |          |
+ |          +--no --> that PR's current head SHA has no auto-review
+ |                     marker yet?
+ |                      |
+ |                      +--yes--> REVIEW job (Task 012):
+ |                      |          reviewer_runner runs, posts
+ |                      |          `# Review Summary` + a
+ |                      |          `<!-- devbot:auto-review head=... -->`
+ |                      |          marker back to the PR.
+ |                      |            REQUEST CHANGES -> same comment also
+ |                      |            contains "@devbot", so next cycle's
+ |                      |            rework branch above picks it up.
+ |                      |            MERGE READY -> stays `devbot:review`,
+ |                      |            waiting on a human Merge.
+ |                      |
+ |                      +--no --> fully caught up, no candidate this cycle
  |
- no unprocessed comment / no review Issue
+ |  (a devbot:review Issue in this repository - rework OR review OR
+ |   neither - always blocks a fresh `ready` implementation from
+ |   starting in the SAME repository this cycle)
+ |
+ no review Issue in this repository
  |
  v
-ready --(claim)--> working --(AgentRunner)--> [agent output]
+ready --(claim)--> working --(implementer_runner)--> [agent output]
                                     |
                                     v
                           run_verification_commands
@@ -56,16 +71,13 @@ ready --(claim)--> working --(AgentRunner)--> [agent output]
                   mark_for_review (-> review)
 ```
 
-`state_writer`, `delivery`, and `rework_service` are optional constructor
-arguments on `PollingService`. When `state_writer`/`delivery` are both
-supplied (as `devbot.main` always does), the `ready` flow above runs.
-When `rework_service` is also supplied (also always true in
-`devbot.main`), a `review` Issue with an unprocessed `@devbot` comment is
-reworked before any `ready` Issue is even considered - rework always takes
-priority over starting new `ready` work. Any of the three being omitted
-falls back to progressively earlier Task behavior (down to Task 005's
-select + run the agent only) - this is what every earlier Task's tests
-still exercise, unchanged.
+`state_writer`, `delivery`, `rework_service`, and `review_service` are
+optional constructor arguments on `PollingService`. `devbot.main` always
+supplies all four in production; any subset being omitted falls back to
+progressively earlier Task behavior (down to Task 005's select + run the
+agent only) - this is what every earlier Task's tests still exercise,
+unchanged. Automatic Merge and automatic Issue Close are never performed
+by any of this - `MERGE READY` always waits for a human.
 
 ## Manual dry-run walkthrough
 
@@ -138,8 +150,24 @@ repo's Git history.
 - [ ] Start with `DRY_RUN=true` (or `--dry-run`) in any new environment
       and confirm the full flow's log output looks right before flipping
       to `DRY_RUN=false`.
-- [ ] `review`-state Issues are polled for unprocessed `@devbot` PR
-      comments every iteration (Task 010) and reworked automatically on
-      the existing branch/PR — no manual trigger needed. Only the first
-      review Issue found in collection order is reworked per iteration;
-      others wait for the next poll.
+- [ ] `review`-state Issues are polled every iteration for both an
+      unprocessed `@devbot` PR comment (Task 010 rework) and an unreviewed
+      PR head commit (Task 012 auto-review) — no manual trigger needed for
+      either. Each *repository* contributes at most one candidate per
+      cycle (rework outranks review outranks a fresh `ready`
+      implementation); a repository with multiple eligible Issues defers
+      the rest to the next cycle, but a slow/stuck repository no longer
+      blocks other repositories the way the pre-Task-012 global gate did.
+- [ ] `MAX_CONCURRENT_JOBS` (default `1`) bounds how many *different*
+      repositories' jobs run in the same cycle; leave it at `1` unless
+      you've confirmed every managed repository has its own independent
+      local workspace and Git remote credentials — two jobs never run for
+      the *same* repository regardless of this value.
+- [ ] If a `devbot:review` Issue looks stuck (no new auto-review comment
+      appears across several polls), check the PR for a
+      `<!-- devbot:auto-review head=... -->` marker matching its *current*
+      head SHA — if one is missing/mismatched, the reviewer role should
+      pick it up on the next cycle; if the Issue instead shows
+      `devbot:blocked`, the blocking comment names the reviewer failure
+      (missing/failed Agent CLI, or a Review Summary that didn't contain
+      exactly one of `MERGE READY`/`REQUEST CHANGES`).

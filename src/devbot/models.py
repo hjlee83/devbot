@@ -27,6 +27,15 @@ class Priority(StrEnum):
     NONE = "none"
 
 
+class JobType(StrEnum):
+    """The kind of work a scheduled `Job` represents. Role-neutral by
+    design (Task 012) - no vendor/product name appears here."""
+
+    REWORK = "rework"
+    REVIEW = "review"
+    IMPLEMENT = "implement"
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryConfig:
     """A single managed repository."""
@@ -81,3 +90,18 @@ class IssueComment:
 
     author: str
     body: str
+
+
+@dataclass(frozen=True, slots=True)
+class Job:
+    """One scheduling candidate: `job_type` work for `task`'s Issue.
+
+    Carries only what `devbot.scheduler.select_jobs` needs to order and
+    dedupe candidates (repository, priority, age, Issue number, via
+    `task`) - not the full GitHub state (linked PR, comments, ...) a job's
+    execution needs, which the caller re-fetches once a job is actually
+    selected to run.
+    """
+
+    job_type: JobType
+    task: IssueTask

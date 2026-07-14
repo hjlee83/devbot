@@ -1,10 +1,13 @@
 # DevBot AGENTS
 
-Version: 1.0.0
-Last Updated: 2026-07-13
+Version: 1.1.0
+Last Updated: 2026-07-14
 
 > 이 문서는 DevBot 프로젝트의 최상위 운영 규칙이다.
-> 모든 AI(Claude Code, Codex 등)는 작업을 시작하기 전에 반드시 이 문서를 먼저 읽는다.
+> 구현 역할과 리뷰 역할을 수행하는 모든 Agent는 작업을 시작하기 전에 반드시 이 문서를
+> 먼저 읽는다. 이 문서와 DevBot의 라벨·상태 전이·오케스트레이션 코드는 특정 Agent
+> 제품명이나 모델명에 종속되지 않는다 — 어떤 벤더의 Agent를 구현/리뷰 역할에 배정할지는
+> `IMPLEMENTER_AGENT`/`REVIEWER_AGENT` 설정값만으로 결정한다(`docs/04-agent-system.md`).
 
 ---
 
@@ -80,7 +83,7 @@ Last Updated: 2026-07-13
 
 ---
 
-# 5. 구현 AI 표준 절차 (SOP)
+# 5. 구현 역할 표준 절차 (SOP)
 
 새로운 Task를 시작하면 반드시 아래 절차를 수행한다.
 
@@ -140,7 +143,7 @@ uv run devbot
 
 ---
 
-# 8. 리뷰 AI 표준 절차 (SOP)
+# 8. 리뷰 역할 표준 절차 (SOP)
 
 Pull Request를 리뷰할 때 반드시 아래 순서를 따른다.
 
@@ -179,7 +182,7 @@ Pull Request를 리뷰할 때 반드시 아래 순서를 따른다.
 
 # 10. 리뷰 결과
 
-리뷰 AI는 Pull Request를 Merge하지 않는다.
+리뷰 역할은 Pull Request를 Merge하지 않는다.
 
 반드시 아래 형식으로 종료한다.
 
@@ -209,9 +212,35 @@ Pull Request를 리뷰할 때 반드시 아래 순서를 따른다.
 
 ---
 
-# 11. Prompt Contract
+# 11. 자동 트리거 규칙
 
-## 구현 AI
+폴링 데몬은 `devbot:*` 상태 라벨만 보고 구현 역할과 리뷰 역할을 자동으로 연결한다.
+사람이 "Task-XXX 수행해"/"PR-XXX 리뷰해"라고 직접 요청하지 않아도 아래 릴레이가
+자동으로 돈다.
+
+1. `devbot:ready` Issue는 구현 역할이 자동으로 가져가 구현, 검증, Commit, Push,
+   Pull Request 생성까지 수행하고 Issue를 `devbot:review`로 전환한다.
+2. Issue가 `devbot:review`이고 연결된 Pull Request의 현재 head commit이 아직
+   자동 리뷰되지 않았으면, 리뷰 역할이 자동으로 그 head를 리뷰하고 Pull Request에
+   `# Review Summary`를 게시한다. 같은 head commit은 두 번 리뷰하지 않는다.
+3. 그 Review Summary가 `REQUEST CHANGES`이면 게시된 댓글 자체에 `@devbot` 언급이
+   포함되어, 기존 PR 피드백 rework 경로(8절)가 다음 폴링에서 그 댓글을 감지해
+   같은 Issue/Branch/Pull Request를 재사용해 자동으로 수정한다. 수정된 head는
+   리뷰 역할이 다시 자동 리뷰한다.
+4. 그 Review Summary가 `MERGE READY`이면 `@devbot` 언급을 포함하지 않는다 -
+   자동 rework를 트리거하지 않고, Issue는 `devbot:review` 상태로 남아 사람의
+   Merge를 기다린다.
+5. 자동 Merge와 자동 Issue Close는 어떤 경우에도 수행하지 않는다. 최종 Merge는
+   항상 사람이 수행한다(10절).
+6. 이 릴레이는 특정 Agent 제품명이나 모델명에 의존하지 않는다 - 어떤 벤더가
+   구현/리뷰 역할을 맡는지는 설정값(`IMPLEMENTER_AGENT`/`REVIEWER_AGENT`)만
+   바꾸면 된다.
+
+---
+
+# 12. Prompt Contract
+
+## 구현 역할
 
 사용자가
 
@@ -225,7 +254,7 @@ Task가 모호한 경우에만 질문한다.
 
 ---
 
-## 리뷰 AI
+## 리뷰 역할
 
 사용자가
 
@@ -239,7 +268,7 @@ Merge하지 않고 Review Summary를 작성한다.
 
 ---
 
-# 12. 문서 규칙
+# 13. 문서 규칙
 
 - 구현과 문서는 항상 함께 수정한다.
 - 설계 변경은 docs에 기록한다.
@@ -248,12 +277,12 @@ Merge하지 않고 Review Summary를 작성한다.
 
 ---
 
-# 13. DevBot 철학
+# 14. DevBot 철학
 
 - Task는 계약이다.
 - Checkpoint는 품질 게이트이다.
 - Test는 계약을 증명한다.
 - Result는 다음 작업자를 위한 인수인계 문서이다.
 - Review는 계약 준수 여부를 검증한다.
-- 모든 AI는 동일한 규칙을 따른다.
+- 구현 역할과 리뷰 역할을 맡은 모든 Agent는 동일한 규칙을 따른다.
 - 사람은 최종 Merge만 수행한다.

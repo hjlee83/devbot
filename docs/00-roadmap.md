@@ -29,6 +29,15 @@
       path run through `implementer_runner`; `reviewer_runner` is
       constructed and injected but not yet invoked anywhere (automatic
       review execution is a later Task).
+- [x] Task 012: role-based polling orchestration. The reviewer role now
+      actually runs — a `devbot:review` Issue's linked PR is auto-reviewed
+      once per head commit, `REQUEST CHANGES` auto-triggers Task 010's
+      rework path via the same posted comment, `MERGE READY` waits for a
+      human Merge. A `Job`/`JobType` scheduler
+      (`devbot.scheduler.select_jobs`) replaced the old global single-task
+      gate with a per-repository one, so different repositories' jobs can
+      run in parallel under `MAX_CONCURRENT_JOBS` (default `1`, same serial
+      behavior as before).
 
 ## Phase 3 — Operations
 - [ ] macOS launchd

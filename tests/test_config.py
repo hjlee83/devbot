@@ -92,6 +92,35 @@ def test_invalid_dry_run_value_raises(tmp_path: Path, monkeypatch: pytest.Monkey
         load_config(env_path=env_path, repositories_path=repositories_path)
 
 
+def test_max_concurrent_jobs_defaults_to_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CP-012-10: with no MAX_CONCURRENT_JOBS set at all, config loading
+    defaults to 1 - the existing serial-execution safety default."""
+    monkeypatch.delenv("MAX_CONCURRENT_JOBS", raising=False)
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.max_concurrent_jobs == 1
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "not-a-number", "1.5"])
+def test_invalid_max_concurrent_jobs_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_value: str
+) -> None:
+    """CP-012-14: zero, negative, and non-integer MAX_CONCURRENT_JOBS
+    values all fail at config-loading time."""
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root, MAX_CONCURRENT_JOBS=bad_value)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    with pytest.raises(ConfigError, match="MAX_CONCURRENT_JOBS"):
+        load_config(env_path=env_path, repositories_path=repositories_path)
+
+
 def test_empty_default_agent_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace_root = tmp_path / "workspace"
     env_path = _write_env(tmp_path, workspace_root, DEFAULT_AGENT="")
