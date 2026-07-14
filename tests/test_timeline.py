@@ -20,6 +20,7 @@ from devbot.models import RepositoryConfig
 from devbot.timeline import (
     COMMENT_MARKER,
     TimelineMissingStartError,
+    TimelineOutcome,
     TimelineOverlappingStartError,
     TimelineService,
     parse_events,
@@ -456,3 +457,88 @@ def test_existing_devbot_once_cli_still_works(
     exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 0
+
+
+# --- 리뷰 피드백 회귀 (PR #35, hjlee83 REQUEST CHANGES Blocker 2) ----------
+#
+# 저장소 기본값 DRY_RUN=true 환경에서도 `timeline start/end`는 실제로
+# GitHub에 기록해야 한다(Task 018 Goal, CP-018-2/3/4). 전역 DRY_RUN 대신
+# 서브커맨드 자체의 `--dry-run` opt-in만 `TimelineService.dry_run`을
+# 결정해야 한다.
+
+
+def _write_env(tmp_path: Path, *, dry_run: str) -> tuple[Path, Path]:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir(exist_ok=True)
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\nDRY_RUN={dry_run}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        encoding="utf-8",
+    )
+    return env_path, repositories_path
+
+
+class _SpyTimelineService:
+    """Records the `dry_run` a `timeline` CLI invocation wires into
+    `TimelineService`, without making any real GitHub call."""
+
+    last_dry_run: bool | None = None
+
+    def __init__(self, *, read_client, write_client, dry_run: bool) -> None:
+        type(self).last_dry_run = dry_run
+
+    def start(self, *args, **kwargs) -> TimelineOutcome:
+        return TimelineOutcome(status_card="ok")
+
+    def end(self, *args, **kwargs) -> TimelineOutcome:
+        return TimelineOutcome(status_card="ok")
+
+    def status(self, *args, **kwargs) -> TimelineOutcome:
+        return TimelineOutcome(status_card="ok")
+
+
+def test_timeline_start_ignores_global_dry_run_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("devbot.main.TimelineService", _SpyTimelineService)
+    env_path, repositories_path = _write_env(tmp_path, dry_run="true")
+
+    exit_code = main(
+        ["timeline", "start", "--issue", "1", "--phase", "dev", "--actor", "claude"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 0
+    assert _SpyTimelineService.last_dry_run is False
+
+
+def test_timeline_start_dry_run_flag_opts_into_preview_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("devbot.main.TimelineService", _SpyTimelineService)
+    env_path, repositories_path = _write_env(tmp_path, dry_run="false")
+
+    exit_code = main(
+        [
+            "timeline",
+            "start",
+            "--issue",
+            "1",
+            "--phase",
+            "dev",
+            "--actor",
+            "claude",
+            "--dry-run",
+        ],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 0
+    assert _SpyTimelineService.last_dry_run is True

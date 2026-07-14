@@ -414,13 +414,20 @@ ClockFn = Callable[[], datetime]
 @dataclass
 class TimelineService:
     """Reads/writes the single Timeline comment on an Issue and computes
-    the Status Card from its event history. `dry_run=True` (the default,
-    matching every other write path in this codebase - `IssueStateWriter`,
-    `DeliveryService`) computes but never calls the GitHub write client."""
+    the Status Card from its event history.
+
+    Unlike `IssueStateWriter`/`DeliveryService` (whose `dry_run=True`
+    default gates the *daemon*'s automatic writes), `dry_run=False` is the
+    default here: `timeline start`/`end` is a manual, single-shot command a
+    human or Agent runs by explicitly typing it, and Task 018's contract
+    requires that running it actually records to GitHub (Goal / Scope item
+    2 / CP-018-2,3,4). `devbot.main` wires this to the CLI's own
+    `--dry-run` flag, deliberately independent of the deployment's global
+    `DRY_RUN` setting - see `_add_timeline_write_args` there."""
 
     read_client: GitHubClient
     write_client: GitHubWriteClient
-    dry_run: bool = True
+    dry_run: bool = False
     clock: ClockFn = field(default=lambda: datetime.now(UTC))
     tz: ZoneInfo = field(default_factory=lambda: _DEFAULT_TZ)
 

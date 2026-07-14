@@ -73,6 +73,21 @@ def _add_timeline_common_args(sub_parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_timeline_write_args(sub_parser: argparse.ArgumentParser) -> None:
+    """`start`/`end`에만 붙는 자체 `--dry-run`. `devbot`(daemon) 최상위의
+    `--dry-run`/`DRY_RUN` 환경 변수와는 별개다 - `timeline start/end`는
+    사람이 그 순간 명시적으로 실행한 1회성 기록 커맨드이므로 daemon의
+    "기본은 안전하게 dry-run" 정책을 그대로 물려받으면 계약(Task 018
+    Goal/Scope 2, CP-018-2/3/4)이 요구하는 "실행하면 실제로 GitHub에
+    기록한다"를 기본 배포 설정에서 지키지 못한다. 미리보기가 필요하면
+    이 플래그로 명시적으로 opt-in한다."""
+    sub_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="실제로 GitHub에 쓰지 않고 계산된 Status Card만 출력합니다.",
+    )
+
+
 def _build_timeline_parser(subparsers: argparse._SubParsersAction) -> None:
     timeline_parser = subparsers.add_parser(
         "timeline", help="GitHub Status Timeline(Task 017 프로토콜)을 수동으로 기록/조회합니다."
@@ -84,6 +99,7 @@ def _build_timeline_parser(subparsers: argparse._SubParsersAction) -> None:
     start_parser.add_argument("--phase", choices=["dev", "review"], required=True)
     start_parser.add_argument("--actor", required=True, help="이 phase를 시작한 Agent/사람 식별자.")
     start_parser.add_argument("--pr", type=int, default=None)
+    _add_timeline_write_args(start_parser)
 
     end_parser = timeline_subparsers.add_parser("end", help="phase 종료 이벤트를 기록합니다.")
     _add_timeline_common_args(end_parser)
@@ -95,6 +111,7 @@ def _build_timeline_parser(subparsers: argparse._SubParsersAction) -> None:
         help="예: pushed, manual-action, blocked, merge-ready, request-changes, done",
     )
     end_parser.add_argument("--pr", type=int, default=None)
+    _add_timeline_write_args(end_parser)
 
     status_parser = timeline_subparsers.add_parser("status", help="Status Card를 조회합니다.")
     _add_timeline_common_args(status_parser)
@@ -170,10 +187,15 @@ def _run_timeline_command(args: argparse.Namespace, config: DevBotConfig) -> int
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 1
 
+    # `getattr(..., False)`: only `start`/`end` define their own `--dry-run`
+    # (`status` never writes, so it has none). Deliberately *not*
+    # `config.dry_run` - see `_add_timeline_write_args`'s docstring for why
+    # this command must default to a real write regardless of the
+    # deployment's global `DRY_RUN` value.
     service = TimelineService(
         read_client=GitHubClient(config.github_token),
         write_client=GitHubWriteClient(config.github_token),
-        dry_run=config.dry_run,
+        dry_run=getattr(args, "dry_run", False),
     )
 
     try:

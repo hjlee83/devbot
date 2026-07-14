@@ -20,9 +20,8 @@
     Card에는 raw marker 필드를 노출하지 않는다.
   - `TimelineService`: `GitHubClient`(read)/`GitHubWriteClient`(write)를 받아
     `<!-- devbot-timeline:comment:v1 -->` marker를 가진 단일 Timeline comment를
-    찾고, `start`/`end`/`status`를 수행한다. `dry_run=True`(기본값)는 이
-    코드베이스의 다른 모든 write 경로(`IssueStateWriter`, `DeliveryService`)와
-    동일하게 계산은 하되 실제 GitHub 쓰기는 하지 않는다.
+    찾고, `start`/`end`/`status`를 수행한다. `dry_run=False`가 기본값이다 —
+    이유는 아래 "리뷰 피드백 반영" 참고.
 - `src/devbot/github_client.py`: `get_issue()` 추가 — 단일 Issue를 조회해
   `timeline status`/`start`/`end`가 현재 `devbot:*` 라벨을 읽을 수 있게 한다.
 - `src/devbot/github_write_client.py`: `update_comment()`(PATCH) 추가 — 기존
@@ -33,7 +32,8 @@
   `ProcessLock`/`PollingService` 초기화보다 앞에서 반환하므로, 데몬이 이미 실행
   중이어도 안전하게 병행 호출할 수 있다. `--repo owner/repo`는 선택 인자이며,
   생략하면 `config/repositories.yaml`의 단일 enabled 저장소를 사용한다(현재
-  배포는 `hjlee83/devbot` 하나뿐).
+  배포는 `hjlee83/devbot` 하나뿐). `start`/`end`에는 daemon 최상위 `--dry-run`과
+  별개인 자체 `--dry-run`이 있다(리뷰 피드백 반영 참고).
 - 대상 저장소 `hjlee83/devbot`, Issue #34에 대해 실제 `uv run devbot timeline
   status --issue 34`를 실행해 read 경로(인증, `get_issue`, `list_issue_comments`)가
   실제 GitHub API로 동작함을 확인했다(Issue #34는 아직 Timeline comment가 없어
@@ -71,13 +71,17 @@
 | CP-018-11 daemon CLI 회귀 없음 | `test_existing_devbot_once_cli_still_works` |
 | CP-018-12 Result/문서 정합성 | 이 문서 자체 + PR Evidence (전용 unit test 없음 — 계약에도 CP-018-12에 대응하는 별도 필수 테스트 이름이 없다) |
 
-보조 회귀 테스트(계약의 필수 테스트 목록 밖, 새 public API 커버리지):
+보조 회귀 테스트(계약의 필수 테스트 목록 밖, 새 public API/리뷰 피드백 커버리지):
 
 - `test_get_issue_parses_single_issue` (`tests/test_github_client.py`) — 신규 `GitHubClient.get_issue()`.
 - `test_update_comment_sends_patch_with_body` (`tests/test_github_write_client.py`) — 신규 `GitHubWriteClient.update_comment()`.
 - `test_client_exposes_read_operations_only` (기존, Task 002 계약) — `get_issue` 추가를 허용 목록에 반영해 업데이트.
+- `test_timeline_start_ignores_global_dry_run_by_default` (`tests/test_timeline.py`) — PR #35 리뷰 Blocker 2 회귀.
+- `test_timeline_start_dry_run_flag_opts_into_preview_only` (`tests/test_timeline.py`) — 위와 동일, `--dry-run` opt-in 경로.
 
 ## 검증 결과
+
+PR #35 리뷰 피드백(Blocker 1/2) 반영 커밋 기준 전체 재검증:
 
 ```
 uv sync
@@ -88,11 +92,12 @@ uv run ruff check .
   All checks passed!
 
 uv run pytest
-  270 passed (신규 12개 + 보조 회귀 2개 + 기존 256개, 회귀 없음)
+  272 passed (신규 14개 + 보조 회귀 3개 + 기존 255개, 회귀 없음)
 
 uv run devbot timeline --help
   usage: devbot timeline [-h] {start,end,status} ...
-  (start/end/status 서브커맨드 --help 포함 모두 정상 출력 확인)
+  (start/end/status 서브커맨드 --help 포함 모두 정상 출력 확인;
+   start/end에 --dry-run 옵션이 노출됨을 확인)
 
 uv run devbot timeline status --issue 34
   #34 / PR #-
@@ -134,6 +139,45 @@ uv run devbot timeline status --issue 34
   014의 `IssueStateWriter`가 갖는 프로세스 내부 락과 달리 이 CLI는 매 호출이
   독립 프로세스이므로 프로세스 간 락을 제공하지 않는다 — 수동 운영 빈도에서는
   허용 가능한 위험으로 판단했다(계약에도 분산 락 요구가 없음).
+- `timeline start/end`의 `--dry-run`은 daemon 최상위 `--dry-run`/`DRY_RUN`
+  환경 변수와 이름은 같지만 완전히 별개 스위치다(아래 "리뷰 피드백 반영"
+  참고). 운영자가 이름만 보고 둘을 같은 것으로 오해하지 않도록 `devbot
+  timeline start --help`의 설명 문구에 "실제로 GitHub에 쓰지 않고"를 명시했다.
+
+## 리뷰 피드백 반영 (PR #35, `hjlee83` REQUEST CHANGES)
+
+`hjlee83`의 `REQUEST CHANGES` 리뷰(Blocker 2개)를 반영했다.
+
+- **Blocker 1 — PR Evidence 누락**: PR #35 본문이 초기 "Planned scope" 상태로
+  남아 있어 `docs/09-task-contract-standard.md`가 요구하는 PR Evidence(연결
+  Issue/Task 경로, Branch/PR 번호, Result 문서 경로, Checkpoint별 테스트,
+  검증 명령/결과, CI 상태, Task/Result/PR 일치 근거)가 없었다. PR #35 본문을
+  구현 완료 상태의 Evidence로 갱신했다(Checkpoint-to-test 표 포함).
+- **Blocker 2 — 기본 dry-run 충돌**: `src/devbot/main.py`가
+  `TimelineService(..., dry_run=config.dry_run)`으로 구성되어 있어, 배포
+  기본값 `DRY_RUN=true` 환경에서는 `timeline start/end`가 Status Card만
+  계산하고 실제 GitHub comment를 생성/수정하지 않을 수 있었다. 이는
+  `tasks/018-timeline-cli.md` Goal("실제 수동 운영에 사용할 수 있어야
+  한다")과 Scope 2("start/end는 comment를 찾아 없으면 만들고 있으면
+  수정한다"), CP-018-2/3/4와 정면으로 충돌하는 동작이었다.
+  - **수정**: `start`/`end` 서브커맨드에 자체 `--dry-run` 플래그를
+    추가했다(`_add_timeline_write_args`). `_run_timeline_command`는
+    이제 `config.dry_run`이 아니라 이 플래그(`getattr(args, "dry_run",
+    False)`)로 `TimelineService.dry_run`을 결정한다. `TimelineService`의
+    dataclass 기본값도 `True → False`로 바꾸고, 이 클래스가 daemon의
+    자동 쓰기(`IssueStateWriter`/`DeliveryService`)와 다른 이유(사람이
+    그 순간 명시적으로 실행하는 1회성 기록 커맨드)를 docstring에 남겼다.
+  - **결과**: `devbot timeline start/end`는 이제 전역 `DRY_RUN` 값과
+    무관하게 기본적으로 실제 GitHub에 기록한다. 미리보기가 필요하면
+    `--dry-run`을 명시적으로 줘야 한다.
+  - **회귀 테스트 추가**: `test_timeline_start_ignores_global_dry_run_by_default`
+    (env `DRY_RUN=true`여도 `TimelineService`가 `dry_run=False`로 구성됨을
+    고정), `test_timeline_start_dry_run_flag_opts_into_preview_only`
+    (`--dry-run`을 주면 `dry_run=True`로 구성됨을 고정).
+  - **CP-018 영향 없음**: 계약의 CP-018-2/3/4/CLI 예시(Scope item 1)는
+    바뀌지 않았다 — 오히려 이번 수정이 그 요구를 실제로 충족시킨다.
+- **검증**: `uv run ruff check .` 통과, `uv run pytest` 272 passed(신규 회귀
+  테스트 2개 포함, 기존 270개 회귀 없음).
 
 ## Improvement Suggestions
 
