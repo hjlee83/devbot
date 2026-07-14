@@ -12,6 +12,7 @@ _CONFIG_ENV_VARS = (
     "DEFAULT_AGENT",
     "MAX_CONCURRENT_JOBS",
     "DRY_RUN",
+    "LOG_LEVEL",
 )
 
 

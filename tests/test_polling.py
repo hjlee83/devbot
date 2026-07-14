@@ -1,6 +1,9 @@
+import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from devbot.agents.base import AgentRunResult
 from devbot.agents.codex import CodexRunner
@@ -374,9 +377,7 @@ def test_reviewer_runner_is_not_used_for_implementation() -> None:
     ready_issue = _issue(repo.full_name, 7, labels=["devbot:ready"], title="Fix bug")
     ready_github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
     ready_implementer = MagicMock()
-    ready_implementer.run.return_value = AgentRunResult(
-        executed=True, dry_run=False, message="ok"
-    )
+    ready_implementer.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
     ready_reviewer = MagicMock()
     ready_service = PollingService(
         config=ready_config,
@@ -649,7 +650,12 @@ def test_iteration_handles_empty_queue() -> None:
     agent_runner.run.assert_not_called()
 
 
-def test_iteration_with_zero_repositories_returns_no_ready_task() -> None:
+def test_iteration_with_zero_repositories_returns_no_managed_repositories() -> None:
+    """Task 013 (동작 규칙 #4) narrows this from `NO_READY_TASK`: zero
+    *managed* repositories is a distinct, more actionable diagnostic than
+    "no ready Issue among the repositories we did search" - see
+    `test_zero_managed_repositories_logs_diagnostic_and_skips_polling` for
+    the accompanying log assertion."""
     config = _config([])
     github_client = FakeGitHubClient({})
     agent_runner = MagicMock()
@@ -659,7 +665,7 @@ def test_iteration_with_zero_repositories_returns_no_ready_task() -> None:
 
     result = service.run_once()
 
-    assert result.status is PollingStatus.NO_READY_TASK
+    assert result.status is PollingStatus.NO_MANAGED_REPOSITORIES
 
 
 def test_issue_without_devbot_label_is_ignored() -> None:
@@ -752,9 +758,7 @@ def test_ready_task_uses_implementer_runner() -> None:
     issue = _issue(repo.full_name, 7, labels=["devbot:ready"], title="Fix bug")
     github_client = FakeGitHubClient({repo.full_name: [issue]})
     implementer_runner = MagicMock()
-    implementer_runner.run.return_value = AgentRunResult(
-        executed=True, dry_run=False, message="ok"
-    )
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
     reviewer_runner = MagicMock()
     service = PollingService(
         config=config,
@@ -912,9 +916,7 @@ def test_ready_issue_triggers_implement_job() -> None:
     ready_issue = _issue(repo.full_name, 7, labels=["devbot:ready"], title="Fix bug")
     github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
     implementer_runner = MagicMock()
-    implementer_runner.run.return_value = AgentRunResult(
-        executed=True, dry_run=False, message="ok"
-    )
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
     service = PollingService(
         config=config,
         github_client=github_client,
@@ -1068,9 +1070,7 @@ def test_parallel_cycle_runs_jobs_for_different_repositories() -> None:
     issue_b = _issue(repo_b.full_name, 1, labels=["devbot:ready"], title="B")
     github_client = FakeGitHubClient({repo_a.full_name: [issue_a], repo_b.full_name: [issue_b]})
     implementer_runner = MagicMock()
-    implementer_runner.run.return_value = AgentRunResult(
-        executed=True, dry_run=False, message="ok"
-    )
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
     service = PollingService(
         config=config,
         github_client=github_client,
@@ -1107,9 +1107,7 @@ def test_repository_error_during_candidate_collection_does_not_block_other_repos
     github_client.list_pull_requests = _list_pull_requests  # type: ignore[method-assign]
     rework_service = MagicMock()
     implementer_runner = MagicMock()
-    implementer_runner.run.return_value = AgentRunResult(
-        executed=True, dry_run=False, message="ok"
-    )
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
     service = PollingService(
         config=config,
         github_client=github_client,
@@ -1123,3 +1121,203 @@ def test_repository_error_during_candidate_collection_does_not_block_other_repos
     results_by_repo = {result.task.repository: result for result in results}
     assert results_by_repo[repo_a.full_name].status is PollingStatus.ITERATION_ERROR
     assert results_by_repo[repo_b.full_name].status is PollingStatus.AGENT_COMPLETED
+
+
+# --- Task 013: observability / debug logging -------------------------------
+
+
+def test_zero_managed_repositories_logs_diagnostic_and_skips_polling(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CP-013-5: zero managed repositories is diagnosed distinctly from
+    `NO_READY_TASK` (`no_managed_repositories`) and the cycle is skipped
+    before any GitHub call is made."""
+    config = _config([])
+    github_client = MagicMock()
+    service = PollingService(
+        config=config, github_client=github_client, implementer_runner=MagicMock()
+    )
+
+    with caplog.at_level(logging.WARNING, logger="devbot"):
+        result = service.run_once()
+
+    assert result.status is PollingStatus.NO_MANAGED_REPOSITORIES
+    github_client.list_issues.assert_not_called()
+    diagnostics = [
+        r for r in caplog.records if getattr(r, "event", None) == "no_managed_repositories"
+    ]
+    assert len(diagnostics) == 1
+
+
+def test_debug_log_contains_repository_search_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CP-013-6: DEBUG logs the per-repository search state/label filter
+    and result count DevBot used to decide what to search for."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 1, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="devbot"):
+        service.run_once()
+
+    search_records = [r for r in caplog.records if getattr(r, "event", None) == "repository_search"]
+    assert len(search_records) == 1
+    record = search_records[0]
+    assert record.repository == repo.full_name
+    assert record.state == "open"
+    assert record.result_count == 1
+    assert isinstance(record.cycle_id, str) and record.cycle_id
+
+
+def test_info_logging_omits_debug_search_details(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-013-11: at INFO (the default), the DEBUG-only search diagnostics
+    never appear - they are suppressed at the source, not merely hidden by
+    the test."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 1, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    assert not any(getattr(r, "event", None) == "repository_search" for r in caplog.records)
+    assert not any(r.levelno == logging.DEBUG for r in caplog.records)
+
+
+def test_selected_job_log_contains_correlation_fields(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-013-8: a selected Job's log line carries the cycle/repository/
+    issue/job-type correlation fields an operator needs to trace one Job
+    across every log line it produced."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 5, labels=["devbot:ready"], title="Fix bug")
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    selected = [r for r in caplog.records if getattr(r, "event", None) == "job_selected"]
+    assert len(selected) == 1
+    record = selected[0]
+    assert record.repository == repo.full_name
+    assert record.issue_number == 5
+    assert record.job_type == "implement"
+    assert isinstance(record.cycle_id, str) and record.cycle_id
+
+
+def test_job_log_records_elapsed_time(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-013-9: the Job end log records how long the Job took, in
+    milliseconds."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 1, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    finished = [r for r in caplog.records if getattr(r, "event", None) == "job_finished"]
+    assert len(finished) == 1
+    record = finished[0]
+    assert record.status == "agent_completed"
+    assert isinstance(record.elapsed_ms, float)
+    assert record.elapsed_ms >= 0
+
+
+def test_candidate_exclusion_logged_for_already_reviewed_head(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CP-013-7 (polling-level): a review candidate skipped because its PR
+    head is already reviewed logs a structured `already_reviewed_head`
+    exclusion, not a free-form message."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    linked_pr = _pull_request(101, issue_number=7, head_sha="sha-1")
+    marker_comment = _comment(
+        comment_id=99, body=f"# Review Summary\n\n{build_review_marker('sha-1')}"
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 101): [marker_comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        review_service=MagicMock(),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="devbot"):
+        service.run_once()
+
+    excluded = [r for r in caplog.records if getattr(r, "event", None) == "candidate_excluded"]
+    reasons = {r.reason for r in excluded if r.issue_number == 7}
+    assert "already_reviewed_head" in reasons
+
+
+def test_logging_failure_does_not_abort_job_execution() -> None:
+    """CP-013-12: a broken log handler (raises on every `emit()`) must
+    never change a Job's outcome - logging is a side channel, not part of
+    the Job's own success/failure contract."""
+
+    class _RaisingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise RuntimeError("logging backend unavailable")
+
+    broken_logger = logging.getLogger("devbot.test-cp-013-12")
+    broken_logger.handlers.clear()
+    broken_logger.addHandler(_RaisingHandler())
+    broken_logger.setLevel(logging.DEBUG)
+    broken_logger.propagate = False
+
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 1, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        logger=broken_logger,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_COMPLETED
+    assert result.task is not None
+    assert result.task.number == 1

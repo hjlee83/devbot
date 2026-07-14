@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from devbot.models import IssueTask, Job, JobType, Priority, TaskState
-from devbot.scheduler import select_jobs
+from devbot.models import ExclusionReason, IssueTask, Job, JobType, Priority, TaskState
+from devbot.scheduler import select_jobs, select_jobs_with_exclusions
 
 
 def _task(
@@ -99,3 +99,40 @@ def test_select_jobs_returns_empty_list_when_max_concurrent_jobs_is_zero() -> No
     candidates = [Job(job_type=JobType.IMPLEMENT, task=_task())]
 
     assert select_jobs(candidates, max_concurrent_jobs=0) == []
+
+
+def test_scheduler_logs_structured_candidate_exclusion_reason() -> None:
+    """CP-013-7: every candidate that does not become a selected Job is
+    reported with a structured `ExclusionReason` (not a free-form string),
+    and the reason matches the scheduler's actual ranking decision."""
+    rework_task = _task(repository="someone/repo-a", number=1, state=TaskState.REVIEW)
+    same_repo_loser = _task(repository="someone/repo-a", number=2, state=TaskState.READY)
+    over_capacity_task = _task(repository="someone/repo-b", number=1, state=TaskState.READY)
+    candidates = [
+        Job(job_type=JobType.REWORK, task=rework_task),
+        Job(job_type=JobType.IMPLEMENT, task=same_repo_loser),
+        Job(job_type=JobType.IMPLEMENT, task=over_capacity_task),
+    ]
+
+    result = select_jobs_with_exclusions(candidates, max_concurrent_jobs=1)
+
+    assert [job.task.number for job in result.selected] == [1]
+    exclusions_by_issue = {exclusion.issue_number: exclusion for exclusion in result.exclusions}
+    assert exclusions_by_issue[2].reason is ExclusionReason.LOWER_PRIORITY
+    assert exclusions_by_issue[2].repository == "someone/repo-a"
+    assert exclusions_by_issue[1].reason is ExclusionReason.CONCURRENCY_LIMIT
+    # (Boundary) `select_jobs()` itself is unaffected by the new
+    # diagnostics - same selection as always.
+    assert select_jobs(candidates, max_concurrent_jobs=1) == result.selected
+
+
+def test_select_jobs_with_exclusions_reports_concurrency_limit_when_zero_slots() -> None:
+    """Boundary: `max_concurrent_jobs=0` excludes every candidate with
+    `CONCURRENCY_LIMIT`, never silently dropping the diagnostic."""
+    candidates = [Job(job_type=JobType.IMPLEMENT, task=_task())]
+
+    result = select_jobs_with_exclusions(candidates, max_concurrent_jobs=0)
+
+    assert result.selected == []
+    assert len(result.exclusions) == 1
+    assert result.exclusions[0].reason is ExclusionReason.CONCURRENCY_LIMIT

@@ -161,9 +161,7 @@ def test_list_pull_requests_follows_pagination_and_parses_head_ref() -> None:
 
 def test_github_error_is_translated() -> None:
     session = MagicMock()
-    session.get.return_value = _mock_response(
-        status_code=404, json_data={"message": "Not Found"}
-    )
+    session.get.return_value = _mock_response(status_code=404, json_data={"message": "Not Found"})
     client = GitHubClient("token123", session=session)
 
     with pytest.raises(GitHubNotFoundError):

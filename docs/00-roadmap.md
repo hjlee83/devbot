@@ -42,4 +42,16 @@
 ## Phase 3 — Operations
 - [ ] macOS launchd
 - [ ] VPS systemd migration
-- [ ] Logging, recovery, and observability
+- [x] Task 013: 운영 관찰성 및 디버그 로깅. 시작 시 실행 구성(버전/역할/
+      dry-run/poll interval/concurrency)과 관리 저장소 목록을 INFO로
+      기록하고, 관리 저장소가 0개면 `no_managed_repositories`로
+      `no_ready_task`와 명확히 구분해 해당 cycle을 건너뛴다. 매 cycle마다
+      `cycle_id`로 로그를 연관지을 수 있고, `LOG_LEVEL=DEBUG` 또는
+      `--verbose`에서 저장소별 검색 조건, 후보 Job, 표준화된 제외 사유
+      (`repository_busy`/`issue_busy`/`concurrency_limit`/
+      `missing_linked_pr`/`already_reviewed_head`/`no_unprocessed_feedback`/
+      `not_ready`/`lower_priority` 등), 선택 Job, 단계별 소요 시간을
+      추적할 수 있다. `SecretRedactingFilter`/`SafeLogger`
+      (`src/devbot/observability.py`)로 Secret·Authorization 노출과 로깅
+      예외로 인한 Job 실행 중단을 모두 방지했다. Task 012의 자동화·우선순위·
+      concurrency 동작은 변경하지 않았다.

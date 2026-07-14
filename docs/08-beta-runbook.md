@@ -7,9 +7,12 @@ existing branch/PR automatically. Task 011 adds a second Agent role
 per-repository job scheduler (`PollingService.run_cycle()`, see
 `src/devbot/polling.py`) that also actually *runs* the reviewer role, so
 the full ready -> review -> merge relay needs no manual trigger at any
-step except the final Merge. This is a manual walkthrough for confirming
-the flow against a real target repository, plus the operational checklist
-for running DevBot beyond a single smoke test.
+step except the final Merge. Task 013 adds structured operational
+logging (`src/devbot/observability.py`) so an operator can answer "why did
+(or didn't) the daemon pick up this Issue" from logs alone. This is a
+manual walkthrough for confirming the flow against a real target
+repository, plus the operational checklist for running DevBot beyond a
+single smoke test.
 
 ## Full flow (per repository, per cycle)
 
@@ -171,3 +174,64 @@ repo's Git history.
       `devbot:blocked`, the blocking comment names the reviewer failure
       (missing/failed Agent CLI, or a Review Summary that didn't contain
       exactly one of `MERGE READY`/`REQUEST CHANGES`).
+
+## 운영 진단 절차 (Task 013)
+
+데몬이 "왜" 특정 Issue를 선택했는지, 혹은 선택하지 않았는지 로그만으로
+판단하는 절차다. 기본 로그 수준은 `INFO`이며, 상세 근거가 필요하면
+`LOG_LEVEL=DEBUG`(영구 설정) 또는 `--verbose`(이번 실행에만 적용)를 켠다.
+
+1. **시작 로그 확인**: 데몬을 시작하면 한 번 `DevBot 시작: version=...
+   implementer=... reviewer=... dry_run=... poll_interval_seconds=...
+   max_concurrent_jobs=... log_level=... 관리 저장소 수=...`와, 관리 저장소
+   각각에 대해 `관리 저장소: <owner>/<repo> local_path=... default_branch=...`
+   가 출력된다. 여기서 역할 배정(`implementer`/`reviewer`), `dry_run`
+   여부, 관리 저장소 목록이 기대한 값과 일치하는지 먼저 확인한다.
+2. **관리 저장소가 0개인 경우**: `no_managed_repositories: 관리 저장소가
+   0개라 이번 cycle을 건너뜁니다...` 로그가 보이면 `config/repositories.yaml`
+   또는 각 repository의 `enabled` 설정을 확인한다. 이 상태는 "선택 가능한
+   ready Issue가 없음"(`no_ready_task`)과 로그 문구·상태 코드가 다르게
+   구분되므로 혼동하지 않는다.
+3. **cycle 단위로 추적**: 매 cycle은 `cycle 시작: cycle_id=...`로 시작해
+   `cycle 종료: cycle_id=... 소요=...ms 후보(rework=... review=...
+   implement=...) 선택=.../... 결과=...`로 끝난다. 같은 `cycle_id`를 가진
+   로그 줄을 모으면 그 cycle에서 실제로 무엇을 검색하고, 무엇을 후보로
+   만들고, 무엇을 선택해 실행했는지 전부 재구성할 수 있다.
+4. **저장소별 검색 조건 확인 (DEBUG)**: `저장소 검색: cycle_id=... repo=...
+   state=open label_filter=devbot:*(client-side) 결과 수=...`로 GitHub에
+   실제로 어떤 조건을 보냈고 몇 건이 돌아왔는지 확인한다. DevBot은 라벨로
+   서버 측 검색을 하지 않고 `state=open`으로 전체를 가져온 뒤
+   `devbot:*` 라벨을 클라이언트에서 걸러낸다.
+5. **후보 제외 사유 확인 (DEBUG)**: `후보 제외: cycle_id=... repo=...
+   issue=#... job_type=... reason=... detail=...`의 `reason`은 항상 다음
+   중 하나로 고정된 코드다.
+
+   | reason | 의미 |
+   |---|---|
+   | `repository_busy` | 같은 저장소에 `devbot:working` Issue가 있어 이번 cycle에 후보를 만들지 않음 |
+   | `issue_busy` | 같은 저장소의 `devbot:review` Issue가 워크스페이스를 점유해 `ready` Issue가 대기 |
+   | `concurrency_limit` | `MAX_CONCURRENT_JOBS` slot이 이미 다 찼음 |
+   | `missing_linked_pr` | `review` Issue에 연결된(Closes #N) 열린 PR을 찾지 못함 |
+   | `missing_pr_head` | 연결된 PR의 head commit을 확인할 수 없음 (예약된 코드, 현재 경로에서는 발생하지 않음) |
+   | `already_reviewed_head` | PR의 현재 head SHA가 이미 자동 리뷰 marker를 가짐 |
+   | `no_unprocessed_feedback` | 연결된 PR에 처리되지 않은 `@devbot` 댓글이 없음 |
+   | `not_ready` | Issue 상태가 `devbot:blocked`/`devbot:done`처럼 이번 cycle의 스케줄 대상이 아님 |
+   | `lower_priority` | 같은 저장소에서 더 높은 순위(REWORK>REVIEW>IMPLEMENT, 우선순위, 나이, Issue 번호) 후보가 이미 선택됨 |
+   | `dry_run` | 예약된 코드 (Task 013 시점에는 실제로 발생하지 않음) |
+
+6. **선택된 Job과 실행 시간 확인**: `Job 선택: cycle_id=... repo=...
+   issue=#... job_type=... 순위=...` 뒤에 `Job 시작`/`Job 종료`가 이어진다.
+   `Job 종료` 줄의 `소요=...ms`가 총 소요 시간이고, DEBUG에서는
+   `단계 완료: ... stage=workspace_validate|agent_execution|delivery|
+   rework_process|review_process 소요=...ms`로 단계별 소요 시간도 확인할
+   수 있다.
+7. **실패 원인 확인**: Job이 실패(`workspace_invalid`/`agent_failed`/
+   `blocked`/`iteration_error`)로 끝나면 `Job 종료` 바로 뒤에 `Job 실패
+   요약: ...`이 ERROR 수준으로 남는다. Agent의 원본 stdout/stderr 전체는
+   INFO에 출력되지 않고, 이 요약도 Secret/Token/Authorization 값은 항상
+   `***`로 치환된다.
+
+`--verbose`는 `.env`나 실제 프로세스 환경을 변경하지 않고 그 실행에만
+적용된다. 운영 중인 데몬을 잠시 더 자세히 보고 싶을 때는 별도로 `--once
+--verbose`를 실행해 한 cycle만 상세 로그로 확인하는 편이 연속 실행 중인
+데몬의 `LOG_LEVEL`을 바꾸는 것보다 안전하다.

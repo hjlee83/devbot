@@ -1,3 +1,4 @@
+import logging
 import os
 import signal
 import subprocess
@@ -120,6 +121,72 @@ def test_cli_constructs_rework_service(tmp_path: Path) -> None:
     _, kwargs = mock_service_cls.call_args
     assert kwargs["rework_service"] is not None
     assert kwargs["review_service"] is not None
+
+
+def test_verbose_flag_enables_debug_logging(tmp_path: Path) -> None:
+    """CP-013-3: `--verbose` switches this process's logging to DEBUG
+    regardless of the configured `LOG_LEVEL` (default INFO here), and does
+    so only for this process - it never touches `.env` or the real
+    environment (Task 013 동작 규칙 #7)."""
+    env_path, repositories_path = _write_fixture(tmp_path)
+    logger = logging.getLogger("devbot")
+    logger.setLevel(logging.INFO)
+
+    with patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle:
+        mock_run_cycle.return_value = [PollingResult(status=PollingStatus.NO_READY_TASK)]
+        main(["--once", "--verbose"], env_path=env_path, repositories_path=repositories_path)
+
+    assert logger.level == logging.DEBUG
+
+
+def test_startup_log_contains_runtime_configuration(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CP-013-4: the startup log records the resolved implementer/reviewer
+    role assignments, dry-run flag, concurrency, and every managed
+    repository - what an operator needs to confirm the daemon started with
+    the configuration they actually expect."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\n"
+        f"GITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n"
+        "IMPLEMENTER_AGENT=claude\n"
+        "REVIEWER_AGENT=codex\n"
+        "MAX_CONCURRENT_JOBS=1\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        encoding="utf-8",
+    )
+
+    with (
+        caplog.at_level(logging.INFO, logger="devbot"),
+        patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle,
+    ):
+        mock_run_cycle.return_value = [PollingResult(status=PollingStatus.NO_READY_TASK)]
+        main(["--once", "--dry-run"], env_path=env_path, repositories_path=repositories_path)
+
+    startup_records = [r for r in caplog.records if getattr(r, "event", None) == "startup"]
+    assert len(startup_records) == 1
+    startup = startup_records[0]
+    assert startup.implementer_agent == "claude"
+    assert startup.reviewer_agent == "codex"
+    assert startup.dry_run is True
+    assert startup.max_concurrent_jobs == 1
+    assert startup.managed_repository_count == 1
+
+    repo_records = [r for r in caplog.records if getattr(r, "event", None) == "managed_repository"]
+    assert len(repo_records) == 1
+    assert repo_records[0].repository == "someone/myrepo"
+    assert repo_records[0].default_branch == "main"
+
+    # Never leaks the token, in this most basic case either.
+    assert "test-token" not in caplog.text
 
 
 def test_continuous_loop_uses_configured_poll_interval() -> None:
