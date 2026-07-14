@@ -7,7 +7,12 @@ from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import RepositoryConfig, TaskState
-from devbot.review import ReviewService, build_review_marker, has_review_marker_for_head
+from devbot.review import (
+    ReviewService,
+    build_review_marker,
+    build_review_prompt,
+    has_review_marker_for_head,
+)
 
 HEAD_SHA = "a1b2c3d4e5f6"
 
@@ -68,6 +73,78 @@ def _service(
 
 def _process(service: ReviewService, pull_request: PullRequest | None = None):
     return service.process(_repo(), _issue(), pull_request or _pull_request())
+
+
+# --- CP-015: review gate standardization ----------------------------------
+
+
+def test_agents_review_gate_requires_request_changes_for_evidence_mismatch() -> None:
+    agents_text = Path("AGENTS.md").read_text(encoding="utf-8")
+
+    assert "PR Evidence" in agents_text
+    assert "Result" in agents_text
+    assert "운영 정책" in agents_text
+    assert "하나라도 만족하지 않으면" in agents_text
+    assert "`REQUEST CHANGES`" in agents_text
+    assert "구현에 관여한 리뷰어" in agents_text
+
+
+def test_task_contract_standard_documents_single_task_branch_pr_policy() -> None:
+    standard_text = Path("docs/09-task-contract-standard.md").read_text(encoding="utf-8")
+
+    assert "## 단일 Task 추적 정책" in standard_text
+    assert "하나의 작업 Branch와 하나의 Pull Request" in standard_text
+    assert "기존 Branch와 Pull Request를 업데이트" in standard_text
+    assert "## PR Evidence 필수 항목" in standard_text
+    assert "## Review Gate 표준" in standard_text
+
+
+def test_review_prompt_requires_contract_result_pr_ci_alignment() -> None:
+    prompt = build_review_prompt(_repo(), _issue(), _pull_request())
+
+    assert "Task 계약" in prompt
+    assert "Result 문서" in prompt
+    assert "PR Evidence" in prompt
+    assert "CI 결과" in prompt
+    assert "AGENTS.md 운영 정책" in prompt
+    assert "서로 일치" in prompt
+
+
+def test_review_prompt_requires_request_changes_for_any_gate_mismatch() -> None:
+    prompt = build_review_prompt(_repo(), _issue(), _pull_request())
+
+    assert "코드와 테스트가 통과했더라도" in prompt
+    assert "하나라도" in prompt
+    assert "`REQUEST CHANGES`" in prompt
+    assert "누락" in prompt
+    assert "불일치" in prompt
+    assert "최신성" in prompt
+
+
+def test_review_prompt_mentions_stricter_evidence_for_involved_reviewer() -> None:
+    prompt = build_review_prompt(_repo(), _issue(), _pull_request())
+
+    assert "구현에 관여한 리뷰어" in prompt
+    assert "더 엄격하게" in prompt
+    assert "실제 diff" in prompt
+    assert "검증 결과" in prompt
+
+
+def test_review_status_parsing_still_requires_exactly_one_status() -> None:
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True,
+        dry_run=False,
+        message="# Review Summary\n\nMERGE READY\nREQUEST CHANGES",
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+
+    result = _process(service)
+
+    assert result.status is None
+    assert result.issue_state is TaskState.BLOCKED
+    state_writer.block.assert_called_once()
+    write_client.create_comment.assert_not_called()
 
 
 # --- CP-012-3: marker prevents duplicate review for the same head -------
