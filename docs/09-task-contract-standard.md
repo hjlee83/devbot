@@ -1,6 +1,6 @@
 # Task Contract Standard
 
-Version: 1.0.0
+Version: 1.1.0
 Last Updated: 2026-07-14
 
 이 문서는 DevBot에서 Task 계약서를 작성하고 발행할 때 적용하는 운영 표준이다.
@@ -76,6 +76,43 @@ PR과 실행용 Issue를 생성하기 전에 다음을 확인한다.
 - `devbot:ready`는 계약서 PR 생성 후에만 부착한다.
 - 계약서 PR이 닫히거나 폐기되면 실행용 Issue도 `not_planned`로 닫는다.
 - 동일 Task에 중복 실행용 Issue를 만들지 않는다.
+
+## 단일 Task 추적 정책
+
+- 하나의 Task는 하나의 작업 Branch와 하나의 Pull Request로 추적한다.
+- 같은 Task의 수정, 리뷰 반영, 재검증은 기존 Branch와 Pull Request를 업데이트한다.
+- 별도 `-impl` Branch, 임시 자동 Branch, 중복 Pull Request를 만들지 않는다.
+- 실행용 Issue에는 Task 계약서 경로, 작업 Branch, Pull Request 번호, Result 문서 경로를 명시한다.
+
+## PR Evidence 필수 항목
+
+Pull Request 본문 또는 최신 댓글에는 최소 다음 Evidence가 있어야 한다.
+
+- 연결된 실행용 Issue와 Task 계약서 경로
+- 작업 Branch와 Pull Request 번호
+- Result 문서 경로
+- Checkpoint별 대응 테스트
+- 실행한 검증 명령과 결과
+- CI 상태 또는 CI를 확인하지 못한 명확한 이유
+- Task 범위, Result, PR 변경 사항이 일치한다는 근거
+
+Evidence가 누락되거나 실제 변경 사항과 맞지 않으면 리뷰는 통과할 수 없다.
+
+## Review Gate 표준
+
+리뷰 역할은 Task 계약, Result, PR Evidence, CI, 운영 정책을 하나의 게이트로 검증한다.
+다음 중 하나라도 불일치하면 코드와 테스트가 통과했더라도 `REQUEST CHANGES`로 판단한다.
+
+- Task 계약과 구현 범위가 다르다.
+- Result가 실제 변경 파일, 테스트, 검증 결과를 반영하지 않는다.
+- PR Evidence가 누락되었거나 최신 head commit 기준이 아니다.
+- CI 실패 또는 검증 미실행 상태를 성공처럼 보고한다.
+- 단일 Task 추적 정책이나 AGENTS.md 운영 정책을 위반한다.
+
+위 Review Gate는 구현 관여 여부와 관계없이 모든 리뷰어에게 예외 없이 적용되는 기본
+기준이다. 구현에 관여했는지, 어떤 Agent가 Reviewer 역할을 맡았는지에 따라 기준을 완화하거나
+강화하지 않는다. 모든 Reviewer는 PR Evidence와 Result가 실제 diff, 테스트, 검증 결과를
+빠짐없이 증명하는지 같은 strict gate를 적용한다.
 
 ## 변경 관리
 

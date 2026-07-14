@@ -158,6 +158,8 @@ Pull Request를 리뷰할 때 반드시 아래 순서를 따른다.
 - 품질 게이트
 - 필수 테스트
 - 테스트 품질
+- PR Evidence
+- Result
 - CI
 - 보안
 - 문서
@@ -177,6 +179,13 @@ Pull Request를 리뷰할 때 반드시 아래 순서를 따른다.
 - Result 문서가 최신이다.
 - PR Evidence가 최신이다.
 - CI가 성공했다.
+- Task 계약, Result, PR Evidence, CI, 운영 정책이 서로 일치한다.
+
+하나라도 만족하지 않으면 코드와 테스트가 통과했더라도 `REQUEST CHANGES`로 판단한다.
+이 기준은 구현 관여 여부와 관계없이 모든 리뷰어에게 예외 없이 적용되는 기본값이다.
+구현에 관여했는지, 어떤 Agent가 Reviewer 역할을 맡았는지에 따라 기준을 완화하거나
+강화하지 않는다. 모든 Reviewer는 PR Evidence와 Result가 실제 변경 사항을 빠짐없이
+증명하는지 같은 strict gate를 적용한다.
 
 ---
 
