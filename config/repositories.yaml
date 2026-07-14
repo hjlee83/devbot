@@ -1,9 +1,0 @@
-# Managed repositories.
-#
-# `local_path` is derived at runtime as `WORKSPACE_ROOT / repo` (see
-# `.env.example`). Set `enabled: true` once a repository is actually cloned
-# at that path.
-repositories:
-  - owner: hjlee83
-    repo: example-repo
-    enabled: false

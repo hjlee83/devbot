@@ -10,3 +10,35 @@ dist/
 build/
 *.lock.local
 uv.lock.local
+
+# Local DevBot configuration
+config/repositories.yaml
+
+# Local worktree metadata
+.worktrees/
+
+# Debug reports
+du_report.sh
+du_report.txt
+storage_report.sh
+storage_report.txt
+library_top.txt
+
+# Local backups
+config/repositories.yaml.backup.*
+
+# Local DevBot configuration
+config/repositories.yaml
+
+# Local worktree metadata
+.worktrees/
+
+# Debug reports
+du_report.sh
+du_report.txt
+storage_report.sh
+storage_report.txt
+library_top.txt
+
+# Local backups
+config/repositories.yaml.backup.*
