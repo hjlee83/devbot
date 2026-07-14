@@ -1,7 +1,7 @@
 # DevBot AGENTS
 
-Version: 1.1.0
-Last Updated: 2026-07-14
+Version: 1.2.0
+Last Updated: 2026-07-15
 
 > 이 문서는 DevBot 프로젝트의 최상위 운영 규칙이다.
 > 구현 역할과 리뷰 역할을 수행하는 모든 Agent는 작업을 시작하기 전에 반드시 이 문서를
@@ -295,3 +295,19 @@ Merge하지 않고 Review Summary를 작성한다.
 - Review는 계약 준수 여부를 검증한다.
 - 구현 역할과 리뷰 역할을 맡은 모든 Agent는 동일한 규칙을 따른다.
 - 사람은 최종 Merge만 수행한다.
+
+---
+
+# 15. 상태 질문 응답 규칙
+
+"현재 상태" 또는 이에 준하는 질문("지금 어디까지 됐어", "Task-XXX 진행 상황")을 받으면
+반드시 아래를 따른다 (상세 규격은 `docs/10-github-status-timeline.md`).
+
+- GitHub Issue, Pull Request, Label, Comment, Check(CI), Commit을 기준으로 답한다.
+- VPS나 로컬 DevBot 로그는 사용자가 명시적으로 요청했을 때만 참고 자료로 사용한다.
+  로그를 상태 질문의 기본 근거로 삼지 않는다.
+- 답변은 가능한 한 `docs/10-github-status-timeline.md`의 상태 카드(Status Card) 형식을
+  따른다 — `State`, `Waiting`, `Queue`, cycle별 `Dev`/`Wait reviewer`/`Review`/
+  `Wait implementer`/`Result`, `Total active`, `Total waiting`, `Total elapsed`.
+- 타임라인 marker(`<!-- devbot-timeline:v1 ... -->`)가 아직 기록되지 않은 구간은 GitHub
+  라벨 변경/댓글/커밋/리뷰 타임스탬프로 최선 추정한 것임을 답변에 명시한다.
