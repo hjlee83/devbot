@@ -36,6 +36,24 @@ class JobType(StrEnum):
     IMPLEMENT = "implement"
 
 
+class ExclusionReason(StrEnum):
+    """Structured reason a candidate `Job` did not run this cycle (Task
+    013's "표준 제외 사유"). Diagnostic logging uses these codes instead of
+    free-form strings so operators and tests can match on a fixed
+    vocabulary rather than parsing prose."""
+
+    REPOSITORY_BUSY = "repository_busy"
+    ISSUE_BUSY = "issue_busy"
+    CONCURRENCY_LIMIT = "concurrency_limit"
+    MISSING_LINKED_PR = "missing_linked_pr"
+    MISSING_PR_HEAD = "missing_pr_head"
+    ALREADY_REVIEWED_HEAD = "already_reviewed_head"
+    NO_UNPROCESSED_FEEDBACK = "no_unprocessed_feedback"
+    NOT_READY = "not_ready"
+    LOWER_PRIORITY = "lower_priority"
+    DRY_RUN = "dry_run"
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryConfig:
     """A single managed repository."""
@@ -65,6 +83,7 @@ class DevBotConfig:
     dry_run: bool
     github_token: str
     repositories: tuple[RepositoryConfig, ...]
+    log_level: str = "INFO"
 
     @property
     def enabled_repositories(self) -> tuple[RepositoryConfig, ...]:
@@ -105,3 +124,17 @@ class Job:
 
     job_type: JobType
     task: IssueTask
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateExclusion:
+    """One candidate that did not become a selected `Job` this cycle,
+    with a structured `ExclusionReason` (Task 013). `job_type` is `None`
+    when a task was excluded before any job type could even be
+    determined for it (e.g. its `devbot:*` state isn't schedulable)."""
+
+    repository: str
+    issue_number: int
+    reason: ExclusionReason
+    job_type: JobType | None = None
+    detail: str = ""

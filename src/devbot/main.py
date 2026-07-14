@@ -30,6 +30,7 @@ from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import IssueComment, RepositoryConfig
+from devbot.observability import LOG_LEVELS, install_secret_filter, log_startup
 from devbot.polling import PollingService, PollingStatus, run_forever
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
@@ -74,6 +75,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="DRY_RUN 환경 변수 값과 무관하게 강제로 dry-run으로 실행합니다.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="LOG_LEVEL 설정과 무관하게 이번 실행에서만 DEBUG 수준 로그를 켭니다.",
+    )
     return parser.parse_args(argv)
 
 
@@ -85,6 +91,14 @@ def _configure_logging() -> logging.Logger:
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
     return logger
+
+
+def _apply_log_level(logger: logging.Logger, config_log_level: str, *, verbose: bool) -> None:
+    """`--verbose` overrides `LOG_LEVEL` to DEBUG for this process only - it
+    never writes back to `.env` or the process environment (Task 013 동작
+    규칙 #7)."""
+    level = logging.DEBUG if verbose else LOG_LEVELS[config_log_level]
+    logger.setLevel(level)
 
 
 def main(
@@ -104,14 +118,12 @@ def main(
     if args.dry_run and not config.dry_run:
         config = replace(config, dry_run=True)
 
+    _apply_log_level(logger, config.log_level, verbose=args.verbose)
+    install_secret_filter(logger, [config.github_token])
+
     try:
         with ProcessLock(config.lock_file):
-            logger.info(
-                "실행 구성: implementer=%s reviewer=%s dry_run=%s",
-                config.implementer_agent,
-                config.reviewer_agent,
-                config.dry_run,
-            )
+            log_startup(logger, config)
             write_client = GitHubWriteClient(config.github_token)
             implementer_runner = build_agent_runner(
                 config.implementer_agent, dry_run=config.dry_run

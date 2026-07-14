@@ -24,7 +24,10 @@ _DEFAULTS: dict[str, str] = {
     "DEFAULT_AGENT": "codex",
     "MAX_CONCURRENT_JOBS": "1",
     "DRY_RUN": "true",
+    "LOG_LEVEL": "INFO",
 }
+
+_ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 
 # Fallback used only when neither a role-specific agent nor the legacy
 # DEFAULT_AGENT is configured at all (a brand new deployment). Existing
@@ -71,6 +74,13 @@ def _require_positive_int(name: str, value: int) -> int:
     if value < 1:
         raise ConfigError(f"{name} must be >= 1, got: {value}")
     return value
+
+
+def _require_valid_log_level(name: str, value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized not in _ALLOWED_LOG_LEVELS:
+        raise ConfigError(f"{name} must be one of {sorted(_ALLOWED_LOG_LEVELS)}, got: {value!r}")
+    return normalized
 
 
 def _resolve_role_agent(
@@ -170,6 +180,7 @@ def load_config(
     lock_file = Path(lock_file_raw).expanduser()
     default_agent = _require_nonempty("DEFAULT_AGENT", _get_env("DEFAULT_AGENT"))
     dry_run = _parse_bool("DRY_RUN", _get_env("DRY_RUN"))
+    log_level = _require_valid_log_level("LOG_LEVEL", _get_env("LOG_LEVEL"))
 
     # `os.environ.get` (not `_get_env`) here so an *unset* DEFAULT_AGENT is
     # distinguishable from one explicitly set to its own package default -
@@ -201,4 +212,5 @@ def load_config(
         dry_run=dry_run,
         github_token=github_token,
         repositories=repositories,
+        log_level=log_level,
     )

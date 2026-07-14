@@ -249,6 +249,44 @@ def test_repository_enabled_quoted_false_string_is_parsed_as_disabled(
     assert config.repositories[0].enabled is False
 
 
+def test_log_level_defaults_to_info(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CP-013-1: with no LOG_LEVEL set at all, config loading defaults to
+    INFO."""
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.log_level == "INFO"
+
+
+@pytest.mark.parametrize("value", ["debug", "Debug", "WARNING", "error"])
+def test_log_level_is_case_insensitive_and_normalized_to_upper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root, LOG_LEVEL=value)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.log_level == value.upper()
+
+
+def test_invalid_log_level_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CP-013-2: an unrecognized LOG_LEVEL fails at config-loading time,
+    the same way an unrecognized agent name or non-integer concurrency
+    value does."""
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root, LOG_LEVEL="VERBOSE")
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    with pytest.raises(ConfigError, match="LOG_LEVEL"):
+        load_config(env_path=env_path, repositories_path=repositories_path)
+
+
 def test_malformed_repositories_yaml_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

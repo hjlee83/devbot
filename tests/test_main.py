@@ -24,18 +24,13 @@ def test_main_starts_and_exits_successfully(
 
     env_path = tmp_path / ".env"
     env_path.write_text(
-        f"WORKSPACE_ROOT={workspace_root}\n"
-        f"GITHUB_TOKEN=test-token\n"
-        f"DEVBOT_LOCK_FILE={lock_file}\n",
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\nDEVBOT_LOCK_FILE={lock_file}\n",
         encoding="utf-8",
     )
 
     repositories_path = tmp_path / "repositories.yaml"
     repositories_path.write_text(
-        "repositories:\n"
-        "  - owner: someone\n"
-        "    repo: myrepo\n"
-        "    enabled: false\n",
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: false\n",
         encoding="utf-8",
     )
 

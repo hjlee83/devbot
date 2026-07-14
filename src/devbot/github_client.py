@@ -110,8 +110,7 @@ def _raise_for_status(response: requests.Response) -> None:
 
 def _parse_issue(repository: str, raw: dict[str, Any]) -> GitHubIssue:
     labels = tuple(
-        label["name"] if isinstance(label, dict) else str(label)
-        for label in raw.get("labels", [])
+        label["name"] if isinstance(label, dict) else str(label) for label in raw.get("labels", [])
     )
     return GitHubIssue(
         repository=repository,
@@ -127,9 +126,7 @@ def _parse_issue(repository: str, raw: dict[str, Any]) -> GitHubIssue:
 def _parse_comment(raw: dict[str, Any]) -> PullRequestComment:
     reactions_raw = raw.get("reactions") or {}
     reactions = {
-        key: int(value)
-        for key, value in reactions_raw.items()
-        if key not in ("url", "total_count")
+        key: int(value) for key, value in reactions_raw.items() if key not in ("url", "total_count")
     }
     return PullRequestComment(
         id=raw["id"],

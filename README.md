@@ -34,6 +34,7 @@ Only `enabled: true` repositories are validated and managed.
 uv run devbot --once             # one polling iteration, then exit
 uv run devbot --once --dry-run   # same, but force dry-run regardless of DRY_RUN
 uv run devbot                    # continuous polling until SIGINT/SIGTERM
+uv run devbot --once --verbose   # same, but force DEBUG-level logs for this run only
 ```
 
 Each iteration: if any repository has a `devbot:working` Issue, skip. If a
@@ -53,6 +54,30 @@ agent process, Git write, or GitHub write. See
 Verification commands are currently hardcoded to `uv run ruff check .` and
 `uv run pytest` (see `src/devbot/delivery.py`), so target repositories must
 themselves be `uv`-managed Python projects with those commands available.
+
+## Logging
+
+`LOG_LEVEL` (`.env`, default `INFO`) sets the daemon's log level; allowed
+values are `DEBUG`, `INFO`, `WARNING`, `ERROR` (case-insensitive - an
+unrecognized value fails config loading with a clear error instead of
+silently falling back). `--verbose` overrides it to `DEBUG` for that one
+process only, without touching `.env` or the environment.
+
+- `INFO` (default): startup configuration, managed repositories, cycle
+  start/end summaries, selected/finished Jobs, and failures - what an
+  operator needs during normal operation.
+- `DEBUG`: adds per-repository search conditions and result counts, every
+  candidate Job found or excluded (with a structured reason code such as
+  `repository_busy`, `already_reviewed_head`, or `concurrency_limit`), and
+  per-stage elapsed time within a Job.
+
+Every log line in one polling cycle shares a `cycle_id` so related lines
+can be correlated. Zero *managed* (enabled) repositories logs a distinct
+`no_managed_repositories` diagnostic and skips that cycle without any
+GitHub call - it is never conflated with "no ready Issue found". Secrets
+(`GITHUB_TOKEN`, `Authorization`/`Bearer` header values) are never written
+to any log line, at any level. See `docs/08-beta-runbook.md` for a
+diagnostic walkthrough.
 
 ## Development
 
@@ -79,6 +104,7 @@ src/devbot/
   delivery.py              verify -> commit -> push -> PR -> Issue comment
   rework.py                 @devbot PR feedback -> rework on the same branch/PR
   polling.py               PollingService (one iteration, wired end to end) and the continuous loop
+  observability.py          structured startup/cycle/Job logging, secret redaction, LOG_LEVEL/--verbose support
   agents/
     base.py               AgentRunner interface
     codex.py               Codex CLI runner (dry-run by default)

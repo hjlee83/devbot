@@ -49,8 +49,7 @@ def validate_repository_paths(
             continue
         if not repository.local_path.is_dir():
             raise WorkspaceValidationError(
-                f"Repository path does not exist: {repository.local_path} "
-                f"({repository.full_name})"
+                f"Repository path does not exist: {repository.local_path} ({repository.full_name})"
             )
         validated.append(repository)
 
@@ -77,8 +76,7 @@ def ensure_git_workspace_ready(repository: RepositoryConfig) -> None:
     """
     if not repository.local_path.is_dir():
         raise WorkspaceValidationError(
-            f"Repository path does not exist: {repository.local_path} "
-            f"({repository.full_name})"
+            f"Repository path does not exist: {repository.local_path} ({repository.full_name})"
         )
 
     if not (repository.local_path / ".git").exists():
@@ -88,8 +86,7 @@ def ensure_git_workspace_ready(repository: RepositoryConfig) -> None:
 
     if _has_uncommitted_changes(repository.local_path):
         raise DirtyWorkspaceError(
-            f"Workspace has uncommitted changes: {repository.local_path} "
-            f"({repository.full_name})"
+            f"Workspace has uncommitted changes: {repository.local_path} ({repository.full_name})"
         )
 
 

@@ -189,9 +189,7 @@ class ReviewService:
 
         comment_body = review_text.rstrip("\n")
         if status == _REQUEST_CHANGES:
-            comment_body += (
-                f"\n\n{_MENTION} 위 REQUEST CHANGES 내용을 반영해 rework 해주세요."
-            )
+            comment_body += f"\n\n{_MENTION} 위 REQUEST CHANGES 내용을 반영해 rework 해주세요."
         comment_body += f"\n\n{build_review_marker(pull_request.head_sha)}"
 
         try:
