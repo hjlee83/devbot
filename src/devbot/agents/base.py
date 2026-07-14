@@ -16,6 +16,25 @@ from dataclasses import dataclass
 
 from devbot.models import RepositoryConfig
 
+_APPROVAL_REQUIRED_PATTERNS = (
+    "needs your approval",
+    "need your approval",
+    "should i proceed",
+    "approval required",
+    "approval_required",
+)
+
+
+def is_approval_required_output(message: str) -> bool:
+    """True when an Agent's own output ends in an interactive approval
+    request DevBot cannot answer (Task 016 CP-016-9) - e.g. a read-only
+    command the CLI paused on for human confirmation - rather than a
+    genuine failure or a completed change. Callers must not proceed to
+    commit/push/PR delivery when this is True, even though the process
+    itself may have exited 0 (`AgentRunResult.failed` is False)."""
+    lowered = message.casefold()
+    return any(pattern in lowered for pattern in _APPROVAL_REQUIRED_PATTERNS)
+
 
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:

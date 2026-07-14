@@ -9,10 +9,11 @@ from devbot.delivery import (
     build_commit_message,
     build_pr_body,
     commit_all_changes,
+    local_branch_exists,
     push_task_branch,
     repository_has_changes,
 )
-from devbot.github_client import GitHubIssue
+from devbot.github_client import GitHubIssue, PullRequest
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
 from devbot.models import RepositoryConfig
 
@@ -39,6 +40,18 @@ def _issue(*, number: int = 42, title: str = "Add feature X") -> GitHubIssue:
     )
 
 
+def _linked_pull_request(
+    *, number: int = 30, head_ref: str = "task/016-existing-branch", issue_number: int = 31
+) -> PullRequest:
+    return PullRequest(
+        number=number,
+        head_ref=head_ref,
+        head_sha="deadbeef",
+        body=f"Closes #{issue_number}",
+        html_url=f"https://github.com/someone/myrepo/pull/{number}",
+    )
+
+
 def _passing_service(client: MagicMock, *, dry_run: bool) -> DeliveryService:
     return DeliveryService(
         client=client,
@@ -46,6 +59,8 @@ def _passing_service(client: MagicMock, *, dry_run: bool) -> DeliveryService:
         run_verification=lambda repository: VerificationResult(passed=True),
         commit=MagicMock(),
         push=MagicMock(),
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: True,
     )
 
 
@@ -185,3 +200,115 @@ def test_delivery_dry_run_has_no_side_effects() -> None:
     assert result.pushed is False
     assert result.pull_request is None
     assert result.dry_run is True
+
+
+def test_local_branch_exists_uses_show_ref() -> None:
+    repository = _repo(Path("/tmp/workspace/myrepo"))
+
+    with patch("devbot.delivery.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        assert local_branch_exists(repository, "devbot/myrepo-42-add-feature-x") is True
+
+    args = mock_run.call_args.args[0]
+    assert args == [
+        "git",
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/heads/devbot/myrepo-42-add-feature-x",
+    ]
+
+
+def test_delivery_uses_linked_pr_head_branch() -> None:
+    """CP-016-10: when the Issue already has a linked open PR, delivery
+    must push that PR's own head branch - never a freshly generated
+    `devbot/devbot-*` name - and must not open a second PR for it."""
+    client = MagicMock(spec=GitHubWriteClient)
+    commit = MagicMock()
+    push = MagicMock()
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=commit,
+        push=push,
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: True,
+    )
+    linked_pull_request = _linked_pull_request()
+    repository = _repo(Path("/tmp/workspace/myrepo"))
+
+    result = service.deliver(
+        repository,
+        _issue(number=31),
+        "devbot/myrepo-31-generated-name",
+        [],
+        linked_pull_request=linked_pull_request,
+    )
+
+    push.assert_called_once_with(repository, "task/016-existing-branch")
+    client.create_pull_request.assert_not_called()
+    client.create_comment.assert_called_once()
+    assert result.pushed is True
+    assert result.pull_request is not None
+    assert result.pull_request.number == 30
+
+
+def test_delivery_rejects_missing_local_branch_before_push() -> None:
+    """CP-016-11: a push-target branch that doesn't exist locally must be
+    rejected as `delivery_branch_invalid` before `push` is ever called -
+    never surfaced as a post-hoc `src refspec ... does not match any`."""
+    client = MagicMock(spec=GitHubWriteClient)
+    commit = MagicMock()
+    push = MagicMock()
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=commit,
+        push=push,
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: False,
+    )
+
+    result = service.deliver(
+        _repo(Path("/tmp/workspace/myrepo")), _issue(), "devbot/myrepo-42-add-feature-x", []
+    )
+
+    commit.assert_called_once()
+    push.assert_not_called()
+    client.create_pull_request.assert_not_called()
+    client.create_comment.assert_not_called()
+    assert result.committed is True
+    assert result.pushed is False
+    assert result.pull_request is None
+    assert "delivery_branch_invalid" in result.message
+
+
+def test_delivery_does_not_push_when_commit_created_no_changes() -> None:
+    """CP-016-12: a clean workspace (no-op/already-implemented Agent run)
+    must not attempt `commit` or `push` - reported as
+    `no_repository_changes`, not a `DeliveryError`."""
+    client = MagicMock(spec=GitHubWriteClient)
+    commit = MagicMock()
+    push = MagicMock()
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=commit,
+        push=push,
+        has_changes=lambda repository: False,
+    )
+
+    result = service.deliver(
+        _repo(Path("/tmp/workspace/myrepo")), _issue(), "devbot/myrepo-42-add-feature-x", []
+    )
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    client.create_pull_request.assert_not_called()
+    assert result.committed is False
+    assert result.pushed is False
+    assert result.message == "no_repository_changes"

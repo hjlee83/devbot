@@ -14,7 +14,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from devbot.github_client import GitHubIssue
+from devbot.github_client import GitHubIssue, PullRequest
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
 from devbot.models import RepositoryConfig
 
@@ -129,6 +129,23 @@ def push_task_branch(repository: RepositoryConfig, branch: str) -> None:
     _run_git(repository, "push", "origin", f"{branch}:{branch}")
 
 
+def local_branch_exists(repository: RepositoryConfig, branch: str) -> bool:
+    """True when `branch` exists as a local ref.
+
+    Checked before `push_task_branch` (Task 016 CP-016-11) so a missing
+    branch fails as a clean, structured `delivery_branch_invalid` result
+    instead of surfacing as Git's own `src refspec ... does not match
+    any` from inside `push_task_branch` after the fact."""
+    completed = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=str(repository.local_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
 def current_git_branch(repository: RepositoryConfig) -> str:
     """Return the branch currently checked out in `repository.local_path`
     (the literal string `"HEAD"` if the checkout is detached)."""
@@ -168,6 +185,7 @@ CommitFn = Callable[[RepositoryConfig, str], None]
 PushFn = Callable[[RepositoryConfig, str], None]
 CurrentBranchFn = Callable[[RepositoryConfig], str]
 HasChangesFn = Callable[[RepositoryConfig], bool]
+BranchExistsFn = Callable[[RepositoryConfig, str], bool]
 
 
 @dataclass
@@ -180,6 +198,8 @@ class DeliveryService:
     run_verification: RunVerificationFn = field(default=run_verification_commands)
     commit: CommitFn = field(default=commit_all_changes)
     push: PushFn = field(default=push_task_branch)
+    has_changes: HasChangesFn = field(default=repository_has_changes)
+    branch_exists: BranchExistsFn = field(default=local_branch_exists)
 
     def deliver(
         self,
@@ -187,7 +207,15 @@ class DeliveryService:
         issue: GitHubIssue,
         branch: str,
         checkpoint_evidence: Sequence[CheckpointEvidence],
+        *,
+        linked_pull_request: PullRequest | None = None,
     ) -> DeliveryResult:
+        """`branch` is only the fallback: when `linked_pull_request` is
+        given, its head branch is used instead and no new
+        `devbot/devbot-*` branch is ever created or pushed to (Task 016
+        CP-016-10) - `linked_pull_request` is present exactly when the
+        Issue already has an open PR (e.g. a retried IMPLEMENT job), so
+        reusing its branch and PR is required, not merely preferred."""
         verification = self.run_verification(repository)
         if not verification.passed:
             return DeliveryResult(
@@ -209,19 +237,56 @@ class DeliveryService:
                 message="[dry-run] verification passed; no commit, push, or PR",
             )
 
-        self.commit(repository, build_commit_message(issue))
-        self.push(repository, branch)
+        target_branch = linked_pull_request.head_ref if linked_pull_request is not None else branch
 
-        pull_request = self.client.create_pull_request(
-            repository,
-            title=build_commit_message(issue),
-            body=build_pr_body(issue, checkpoint_evidence),
-            head=branch,
-            base=repository.default_branch,
-        )
-        self.client.create_comment(
-            repository, issue.number, f"Opened pull request: {pull_request.html_url}"
-        )
+        if not self.has_changes(repository):
+            # CP-016-12: no commit was created (a clean workspace after a
+            # no-op/already-implemented Agent run), so there is nothing to
+            # push - this is `no_repository_changes`, not a `DeliveryError`.
+            return DeliveryResult(
+                verification=verification,
+                committed=False,
+                pushed=False,
+                pull_request=None,
+                dry_run=False,
+                message="no_repository_changes",
+            )
+
+        self.commit(repository, build_commit_message(issue))
+
+        if not self.branch_exists(repository, target_branch):
+            # CP-016-11: fail cleanly before `git push` instead of letting
+            # Git's own `src refspec ... does not match any` surface as an
+            # uncaught `DeliveryError` after the fact.
+            return DeliveryResult(
+                verification=verification,
+                committed=True,
+                pushed=False,
+                pull_request=None,
+                dry_run=False,
+                message=f"delivery_branch_invalid: local branch {target_branch!r} not found",
+            )
+
+        self.push(repository, target_branch)
+
+        if linked_pull_request is not None:
+            pull_request = PullRequestInfo(
+                number=linked_pull_request.number, html_url=linked_pull_request.html_url
+            )
+            self.client.create_comment(
+                repository, issue.number, f"Updated pull request: {pull_request.html_url}"
+            )
+        else:
+            pull_request = self.client.create_pull_request(
+                repository,
+                title=build_commit_message(issue),
+                body=build_pr_body(issue, checkpoint_evidence),
+                head=target_branch,
+                base=repository.default_branch,
+            )
+            self.client.create_comment(
+                repository, issue.number, f"Opened pull request: {pull_request.html_url}"
+            )
 
         return DeliveryResult(
             verification=verification,

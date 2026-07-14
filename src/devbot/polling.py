@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from devbot import observability
-from devbot.agents.base import AgentRunner
+from devbot.agents.base import AgentRunner, is_approval_required_output
 from devbot.delivery import DeliveryService
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.issue_state import ClaimConflictError, IssueStateWriter
@@ -353,6 +353,29 @@ class PollingService:
             )
 
         return linked_pull_request, pr_comments, None
+
+    def _find_linked_pull_request_best_effort(
+        self, repository: RepositoryConfig, selected: IssueTask, issue: GitHubIssue
+    ) -> PullRequest | None:
+        """Best-effort linked-PR lookup for IMPLEMENT delivery (CP-016-10).
+
+        Unlike `_fetch_linked_pull_request_and_comments` (REWORK/REVIEW,
+        where a missing linked PR is itself a hard error - those states
+        imply a PR must already exist), a `devbot:ready` Issue normally
+        has no PR yet. So this never fails the Job: any lookup error just
+        falls back to `None` (a freshly generated branch name), the same
+        as if no PR were linked."""
+        try:
+            pull_requests = self.github_client.list_pull_requests(repository)
+        except Exception as exc:  # noqa: BLE001 - optional lookup, must not crash the loop
+            self.logger.warning(
+                "Linked PR 조회 실패, 신규 branch로 진행 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            return None
+        return find_linked_pull_request(issue, pull_requests)
 
     def _rework_state_candidate(
         self,
@@ -944,12 +967,62 @@ class PollingService:
 
         self.logger.info("실행 결과: %s", agent_result.message)
 
-        branch = generate_branch_name(repository, issue.number, issue.title)
+        if is_approval_required_output(agent_result.message):
+            # CP-016-9: the Agent process may have exited 0 having done
+            # nothing but ask a question it can't answer itself (e.g. a
+            # read-only command paused on interactive confirmation) - that
+            # is not a completed change, so delivery must not run. This
+            # needs a human, not a `blocked` retry loop, so it goes to
+            # `manual-action` like Task 016's other non-committable cases.
+            reason = (
+                "Agent output이 승인 대기 상태로 종료되어 delivery를 실행하지 않음 "
+                f"(approval_required): {agent_result.message}"
+            )
+            self.logger.error(
+                "Agent output이 승인이 필요한 상태입니다 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                agent_result.message,
+            )
+            try:
+                self.state_writer.require_manual_action(  # type: ignore[union-attr]
+                    repository, issue, reason, job_type=JobType.IMPLEMENT
+                )
+            except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
+                self.logger.error(
+                    "Manual action 처리 실패 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    exc,
+                )
+                return PollingResult(
+                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                )
+            return PollingResult(
+                status=PollingStatus.BLOCKED,
+                task=selected,
+                message=f"approval_required: {agent_result.message}",
+            )
+
+        linked_pull_request = self._find_linked_pull_request_best_effort(
+            repository, selected, issue
+        )
+        if linked_pull_request is not None:
+            branch = linked_pull_request.head_ref
+            self.logger.info(
+                "기존 linked PR 발견, 해당 branch 재사용: PR #%d branch=%s",
+                linked_pull_request.number,
+                branch,
+            )
+        else:
+            branch = generate_branch_name(repository, issue.number, issue.title)
         self.logger.info("Delivery 시작: branch=%s", branch)
 
         delivery_start = time.monotonic()
         try:
-            delivery_result = self.delivery.deliver(repository, issue, branch, [])
+            delivery_result = self.delivery.deliver(
+                repository, issue, branch, [], linked_pull_request=linked_pull_request
+            )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "Delivery 실패 (%s #%d): %s", selected.repository, selected.number, exc

@@ -946,6 +946,79 @@ def test_unexpected_exception_never_leaves_issue_working() -> None:
     assert "delivery crashed" in write_client.create_comment.call_args.args[2]
 
 
+def test_approval_required_agent_output_skips_delivery() -> None:
+    """CP-016-9: when the Agent's own output ends in an interactive
+    approval request (e.g. a read-only command paused on human
+    confirmation), DevBot must not run commit/push/PR delivery, even
+    though the process itself exited without error. The Issue moves to
+    `devbot:manual-action`, not `devbot:blocked` (this needs a human, and
+    must not loop)."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 31, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(
+        executed=True,
+        dry_run=False,
+        message="I ran `gh pr list` but this needs your approval before I can continue.",
+    )
+    delivery = MagicMock()
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    delivery.deliver.assert_not_called()
+    assert result.status is PollingStatus.BLOCKED
+    assert result.message.startswith("approval_required:")
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 31, ["devbot:manual-action"])
+
+
+def test_ready_implement_reuses_linked_pr_branch() -> None:
+    """CP-016-10: when the Issue already has a linked open PR (e.g. a
+    retried IMPLEMENT job), delivery must be called with that PR's own
+    head branch, never a freshly generated `devbot/devbot-*` name."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 31, labels=["devbot:ready"])
+    linked_pr = _pull_request(30, issue_number=31, head_ref="task/016-existing-branch")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = MagicMock(
+        verification=VerificationResult(passed=True), dry_run=False
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    service.run_once()
+
+    delivery.deliver.assert_called_once()
+    args, kwargs = delivery.deliver.call_args
+    assert args[2] == "task/016-existing-branch"
+    assert kwargs["linked_pull_request"] is linked_pr
+
+
 def test_iteration_dry_run_has_no_external_side_effects() -> None:
     repo = _repo("myrepo")
     config = _config([repo], dry_run=True)
