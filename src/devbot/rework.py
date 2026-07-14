@@ -28,10 +28,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from devbot.delivery import (
     CommitFn,
     CurrentBranchFn,
+    HasChangesFn,
     PushFn,
     RunVerificationFn,
     VerificationResult,
@@ -39,6 +41,7 @@ from devbot.delivery import (
     commit_all_changes,
     current_git_branch,
     push_task_branch,
+    repository_has_changes,
     run_verification_commands,
 )
 from devbot.github_client import GitHubIssue, PullRequestComment
@@ -48,6 +51,71 @@ from devbot.models import JobType, RepositoryConfig, TaskState
 
 _MENTION = "@devbot"
 _PROCESSED_REACTION = "eyes"
+
+
+class ReworkActionScope(StrEnum):
+    """The kind of action a rework comment asks DevBot to perform."""
+
+    REPOSITORY_CHANGE = "repository-change"
+    METADATA_ONLY = "metadata-only"
+    EXTERNAL_VERIFICATION = "external-verification"
+
+
+_METADATA_PATTERNS = (
+    "pr evidence",
+    "pr body",
+    "pull request body",
+    "pr title",
+    "pull request title",
+    "issue comment",
+    "pr comment",
+    "label",
+    "metadata",
+)
+
+_EXTERNAL_VERIFICATION_PATTERNS = (
+    "ci",
+    "github actions",
+    "check run",
+    "network",
+    "dry-run",
+    "dry run",
+    "external verification",
+    "사람",
+    "승인",
+)
+
+_REPOSITORY_CHANGE_PATTERNS = (
+    "code",
+    "test",
+    "docs",
+    "document",
+    "result",
+    "file",
+    "source",
+    "코드",
+    "테스트",
+    "문서",
+    "파일",
+)
+
+
+def classify_rework_action_scope(comment_body: str) -> ReworkActionScope:
+    """Classify an unprocessed rework request by the action DevBot can take.
+
+    The classifier is deliberately conservative: explicit metadata or
+    external-verification wording wins, otherwise an ambiguous `@devbot`
+    request remains a repository-change so existing rework behavior is
+    preserved.
+    """
+    body = comment_body.casefold()
+    if any(pattern in body for pattern in _EXTERNAL_VERIFICATION_PATTERNS):
+        return ReworkActionScope.EXTERNAL_VERIFICATION
+    if any(pattern in body for pattern in _METADATA_PATTERNS):
+        return ReworkActionScope.METADATA_ONLY
+    if any(pattern in body for pattern in _REPOSITORY_CHANGE_PATTERNS):
+        return ReworkActionScope.REPOSITORY_CHANGE
+    return ReworkActionScope.REPOSITORY_CHANGE
 
 
 def find_unprocessed_devbot_comments(
@@ -89,6 +157,7 @@ class ReworkResult:
     comment: PullRequestComment | None
     verification: VerificationResult | None
     issue_state: TaskState
+    action_scope: ReworkActionScope | None = None
     code_changed: bool = False
     verification_passed: bool = False
     committed: bool = False
@@ -109,6 +178,7 @@ class ReworkService:
     commit: CommitFn = field(default=commit_all_changes)
     push: PushFn = field(default=push_task_branch)
     current_branch: CurrentBranchFn = field(default=current_git_branch)
+    has_changes: HasChangesFn = field(default=repository_has_changes)
 
     def process(
         self,
@@ -132,8 +202,26 @@ class ReworkService:
             )
 
         comment = unprocessed[0]
+        action_scope = classify_rework_action_scope(comment.body)
 
         working_issue = self.state_writer.claim(repository, issue, job_type=JobType.REWORK)
+
+        if action_scope is not ReworkActionScope.REPOSITORY_CHANGE:
+            reason = (
+                f"Rework 요청이 repository commit으로 해결할 수 없는 action scope입니다: "
+                f"{action_scope.value}. 사람 또는 GitHub metadata 조치가 필요합니다."
+            )
+            self.state_writer.require_manual_action(
+                repository, working_issue, reason, job_type=JobType.REWORK
+            )
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=None,
+                issue_state=TaskState.MANUAL_ACTION,
+                action_scope=action_scope,
+                message=f"manual action required: {action_scope.value}",
+            )
 
         try:
             actual_branch = self.current_branch(repository)
@@ -145,6 +233,7 @@ class ReworkService:
                 comment=comment,
                 verification=None,
                 issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
                 message="blocked: branch lookup failed",
             )
 
@@ -159,6 +248,7 @@ class ReworkService:
                 comment=comment,
                 verification=None,
                 issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
                 message="blocked: branch mismatch",
             )
 
@@ -172,6 +262,7 @@ class ReworkService:
                 comment=comment,
                 verification=None,
                 issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
                 pr_reused=True,
                 message="blocked: agent execution failed",
             )
@@ -186,6 +277,7 @@ class ReworkService:
                 comment=comment,
                 verification=None,
                 issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
                 code_changed=True,
                 pr_reused=True,
                 message="blocked: verification execution failed",
@@ -204,6 +296,7 @@ class ReworkService:
                 comment=comment,
                 verification=verification,
                 issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
                 code_changed=True,
                 pr_reused=True,
                 message="blocked",
@@ -215,6 +308,7 @@ class ReworkService:
                 comment=comment,
                 verification=verification,
                 issue_state=TaskState.WORKING,
+                action_scope=action_scope,
                 code_changed=True,
                 verification_passed=True,
                 pr_reused=True,
@@ -225,6 +319,30 @@ class ReworkService:
             )
 
         try:
+            if not self.has_changes(repository):
+                self.write_client.add_reaction_to_comment(
+                    repository, comment.id, content=_PROCESSED_REACTION
+                )
+                self.state_writer.mark_for_review(
+                    repository,
+                    working_issue,
+                    job_type=JobType.REWORK,
+                    reason=(
+                        "rework 검증은 통과했지만 repository 변경이 없어 "
+                        "commit/push 없이 review로 복귀"
+                    ),
+                )
+                return ReworkResult(
+                    triggered=True,
+                    comment=comment,
+                    verification=verification,
+                    issue_state=TaskState.REVIEW,
+                    action_scope=action_scope,
+                    code_changed=False,
+                    verification_passed=True,
+                    pr_reused=True,
+                    message="no_repository_changes",
+                )
             self.commit(repository, build_commit_message(working_issue))
             self.push(repository, branch)
             self.write_client.add_reaction_to_comment(
@@ -238,6 +356,7 @@ class ReworkService:
                 comment=comment,
                 verification=verification,
                 issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
                 code_changed=True,
                 verification_passed=True,
                 pr_reused=True,
@@ -256,6 +375,7 @@ class ReworkService:
                 comment=comment,
                 verification=verification,
                 issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
                 code_changed=True,
                 verification_passed=True,
                 committed=True,
@@ -269,6 +389,7 @@ class ReworkService:
             comment=comment,
             verification=verification,
             issue_state=TaskState.REVIEW,
+            action_scope=action_scope,
             code_changed=True,
             verification_passed=True,
             committed=True,

@@ -8,6 +8,7 @@ version):
     working -> review                 # successful implement, successful
                                        # rework, or MERGE READY review
     working -> rework                 # REQUEST CHANGES review posted
+    working -> manual-action           # metadata/external action required
     working -> ready | review | rework  # claim-preflight-failure restore
                                        # (back to whichever stable state
                                        # was claimed from)
@@ -60,9 +61,16 @@ _STATE_LABEL_PREFIX = "devbot:"
 
 _ALLOWED_TRANSITIONS: dict[TaskState, tuple[TaskState, ...]] = {
     TaskState.READY: (TaskState.WORKING,),
-    TaskState.WORKING: (TaskState.REVIEW, TaskState.REWORK, TaskState.READY, TaskState.BLOCKED),
+    TaskState.WORKING: (
+        TaskState.REVIEW,
+        TaskState.REWORK,
+        TaskState.MANUAL_ACTION,
+        TaskState.READY,
+        TaskState.BLOCKED,
+    ),
     TaskState.REVIEW: (TaskState.WORKING, TaskState.REWORK, TaskState.DONE),
     TaskState.REWORK: (TaskState.WORKING,),
+    TaskState.MANUAL_ACTION: (TaskState.REVIEW, TaskState.REWORK, TaskState.READY),
     TaskState.BLOCKED: (TaskState.READY,),
     TaskState.DONE: (),
 }
@@ -75,6 +83,7 @@ _LABEL_PRECEDENCE: tuple[TaskState, ...] = (
     TaskState.DONE,
     TaskState.BLOCKED,
     TaskState.WORKING,
+    TaskState.MANUAL_ACTION,
     TaskState.REWORK,
     TaskState.REVIEW,
     TaskState.READY,
@@ -274,3 +283,21 @@ class IssueStateWriter:
         return self._transition(
             repository, issue, TaskState.REWORK, job_type=job_type, reason=reason
         )
+
+    def require_manual_action(
+        self,
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        reason: str,
+        *,
+        job_type: JobType | None = None,
+    ) -> GitHubIssue:
+        """Move a `working` Issue to `manual-action` and post the reason
+        when metadata-only or external verification work cannot be solved
+        by committing repository files."""
+        updated = self._transition(
+            repository, issue, TaskState.MANUAL_ACTION, job_type=job_type, reason=reason
+        )
+        if not self.dry_run:
+            self.client.create_comment(repository, issue.number, reason)
+        return updated

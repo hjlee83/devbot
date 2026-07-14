@@ -133,6 +133,39 @@ def test_review_prompt_applies_same_strict_gate_to_all_reviewers() -> None:
     assert "검증 결과" in prompt
 
 
+def test_review_prompt_does_not_trigger_rework_for_metadata_only_actions() -> None:
+    prompt = build_review_prompt(_repo(), _issue(), _pull_request())
+
+    assert "metadata-only" in prompt
+    assert "`@devbot rework`를 요구하지 말고" in prompt
+    assert "Metadata action required" in prompt
+    assert "Manual action required" in prompt
+
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True,
+        dry_run=False,
+        message=(
+            "# Review Summary\n\n"
+            "## 상태\n\n"
+            "- REQUEST CHANGES\n\n"
+            "## Blocker\n\n"
+            "- PR Evidence와 PR body를 최신 head 기준으로 갱신해야 합니다."
+        ),
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+
+    result = _process(service)
+
+    assert result.status == "REQUEST CHANGES"
+    assert result.issue_state is TaskState.MANUAL_ACTION
+    state_writer.require_manual_action.assert_called_once()
+    state_writer.send_to_rework.assert_not_called()
+    _, _, posted_body = write_client.create_comment.call_args.args
+    assert "@devbot" not in posted_body
+    assert "metadata-only" in posted_body
+
+
 def test_review_status_parsing_still_requires_exactly_one_status() -> None:
     reviewer_runner = MagicMock()
     reviewer_runner.run.return_value = AgentRunResult(

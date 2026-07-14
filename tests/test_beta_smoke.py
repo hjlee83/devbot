@@ -276,7 +276,7 @@ def test_delivery_after_verification() -> None:
     delivery = MagicMock(spec=DeliveryService)
     pull_request = PullRequestInfo(number=1, html_url="https://github.com/someone/myrepo/pull/1")
 
-    def _deliver(repository, issue_arg, branch, evidence):
+    def _deliver(repository, issue_arg, branch, evidence, *, linked_pull_request=None):
         call_order.append("deliver")
         return _delivered(pull_request)
 
@@ -494,6 +494,8 @@ def test_reuse_existing_pr() -> None:
         run_verification=lambda repository: VerificationResult(passed=True),
         commit=MagicMock(),
         push=MagicMock(),
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: True,
     )
     agent_runner = MagicMock()
     agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
@@ -530,6 +532,7 @@ def test_reuse_existing_pr() -> None:
         commit=MagicMock(),
         push=MagicMock(),
         current_branch=lambda repository: branch,
+        has_changes=lambda repository: True,
     )
 
     rework_result = rework_service.process(repo, review_issue, branch, [comment])

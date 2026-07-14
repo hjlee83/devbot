@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from devbot import observability
-from devbot.agents.base import AgentRunner
+from devbot.agents.base import AgentRunner, is_approval_required_output
 from devbot.delivery import DeliveryService
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.issue_state import ClaimConflictError, IssueStateWriter
@@ -353,6 +353,29 @@ class PollingService:
             )
 
         return linked_pull_request, pr_comments, None
+
+    def _find_linked_pull_request_best_effort(
+        self, repository: RepositoryConfig, selected: IssueTask, issue: GitHubIssue
+    ) -> PullRequest | None:
+        """Best-effort linked-PR lookup for IMPLEMENT delivery (CP-016-10).
+
+        Unlike `_fetch_linked_pull_request_and_comments` (REWORK/REVIEW,
+        where a missing linked PR is itself a hard error - those states
+        imply a PR must already exist), a `devbot:ready` Issue normally
+        has no PR yet. So this never fails the Job: any lookup error just
+        falls back to `None` (a freshly generated branch name), the same
+        as if no PR were linked."""
+        try:
+            pull_requests = self.github_client.list_pull_requests(repository)
+        except Exception as exc:  # noqa: BLE001 - optional lookup, must not crash the loop
+            self.logger.warning(
+                "Linked PR 조회 실패, 신규 branch로 진행 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            return None
+        return find_linked_pull_request(issue, pull_requests)
 
     def _rework_state_candidate(
         self,
@@ -944,12 +967,62 @@ class PollingService:
 
         self.logger.info("실행 결과: %s", agent_result.message)
 
-        branch = generate_branch_name(repository, issue.number, issue.title)
+        if is_approval_required_output(agent_result.message):
+            # CP-016-9: the Agent process may have exited 0 having done
+            # nothing but ask a question it can't answer itself (e.g. a
+            # read-only command paused on interactive confirmation) - that
+            # is not a completed change, so delivery must not run. This
+            # needs a human, not a `blocked` retry loop, so it goes to
+            # `manual-action` like Task 016's other non-committable cases.
+            reason = (
+                "Agent output이 승인 대기 상태로 종료되어 delivery를 실행하지 않음 "
+                f"(approval_required): {agent_result.message}"
+            )
+            self.logger.error(
+                "Agent output이 승인이 필요한 상태입니다 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                agent_result.message,
+            )
+            try:
+                self.state_writer.require_manual_action(  # type: ignore[union-attr]
+                    repository, issue, reason, job_type=JobType.IMPLEMENT
+                )
+            except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
+                self.logger.error(
+                    "Manual action 처리 실패 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    exc,
+                )
+                return PollingResult(
+                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                )
+            return PollingResult(
+                status=PollingStatus.BLOCKED,
+                task=selected,
+                message=f"approval_required: {agent_result.message}",
+            )
+
+        linked_pull_request = self._find_linked_pull_request_best_effort(
+            repository, selected, issue
+        )
+        if linked_pull_request is not None:
+            branch = linked_pull_request.head_ref
+            self.logger.info(
+                "기존 linked PR 발견, 해당 branch 재사용: PR #%d branch=%s",
+                linked_pull_request.number,
+                branch,
+            )
+        else:
+            branch = generate_branch_name(repository, issue.number, issue.title)
         self.logger.info("Delivery 시작: branch=%s", branch)
 
         delivery_start = time.monotonic()
         try:
-            delivery_result = self.delivery.deliver(repository, issue, branch, [])
+            delivery_result = self.delivery.deliver(
+                repository, issue, branch, [], linked_pull_request=linked_pull_request
+            )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "Delivery 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -1000,6 +1073,91 @@ class PollingService:
             self.logger.info("Delivery 결과: %s", delivery_result.message)
             return PollingResult(
                 status=PollingStatus.AGENT_COMPLETED, task=selected, message=delivery_result.message
+            )
+
+        if delivery_result.message == "no_repository_changes":
+            if linked_pull_request is not None:
+                # Nothing new to commit, but the Issue already has an open
+                # PR carrying an implementation that just passed
+                # verification again - review can safely resume on that
+                # PR's existing (unchanged) head.
+                try:
+                    self.state_writer.mark_for_review(
+                        repository,
+                        issue,
+                        job_type=JobType.IMPLEMENT,
+                        reason=(
+                            "구현 검증은 통과했지만 신규 repository 변경이 없어 "
+                            f"기존 연결 PR #{linked_pull_request.number}을 유지한 채 review로 복귀"
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001 - must not crash the loop
+                    self.logger.error(
+                        "Review 전환 실패 (%s #%d): %s", selected.repository, selected.number, exc
+                    )
+                    return PollingResult(
+                        status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                    )
+                self.logger.info("Delivery 완료(변경 없음), 기존 PR 유지하며 review로 전환")
+                return PollingResult(
+                    status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
+                )
+
+            # No linked PR and nothing was committed: moving to `review`
+            # would leave the Issue there with no PR to actually review -
+            # the exact "automation silently advances without a real
+            # delivery" failure Task 016 exists to close, just via the
+            # no-op path instead of approval-required.
+            reason = (
+                "구현 검증은 통과했지만 신규 repository 변경도 연결된 PR도 없어 "
+                f"review로 전환하지 않고 manual-action으로 표시함: {delivery_result.message}"
+            )
+            self.logger.error(
+                "변경/PR 없이 review 전환을 막고 manual-action 처리 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                delivery_result.message,
+            )
+            try:
+                self.state_writer.require_manual_action(  # type: ignore[union-attr]
+                    repository, issue, reason, job_type=JobType.IMPLEMENT
+                )
+            except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
+                self.logger.error(
+                    "Manual action 처리 실패 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    exc,
+                )
+                return PollingResult(
+                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                )
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
+            )
+
+        if not delivery_result.pushed or delivery_result.pull_request is None:
+            # e.g. `delivery_branch_invalid`: verification passed, but the
+            # actual push/PR never happened. Never let this silently
+            # advance to `review` - block it like any other delivery
+            # failure instead.
+            self.logger.error(
+                "Push/PR 없이 delivery 종료, blocked 처리 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                delivery_result.message,
+            )
+            block_failure = self._block(
+                repository,
+                issue,
+                f"Delivery 실패: {delivery_result.message}",
+                selected,
+                job_type=JobType.IMPLEMENT,
+            )
+            if block_failure is not None:
+                return block_failure
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
             )
 
         try:
@@ -1100,7 +1258,15 @@ class PollingService:
                 status=PollingStatus.BLOCKED, task=selected, message=rework_result.message
             )
 
-        self.logger.info("Rework 완료: %s", rework_result.message)
+        self.logger.info(
+            "Rework 완료: %s action_scope=%s",
+            rework_result.message,
+            (
+                rework_result.action_scope.value
+                if rework_result.action_scope is not None
+                else "unknown"
+            ),
+        )
         return PollingResult(
             status=PollingStatus.REWORKED, task=selected, message=rework_result.message
         )

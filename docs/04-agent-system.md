@@ -87,8 +87,18 @@ review -> working -> review
 review -> working -> rework
 rework -> working -> review
 working -> ready|review|rework   # preflight restore to the claimed state
+working -> manual-action         # metadata-only or external verification required
 working -> blocked               # execution, verification, delivery, or unexpected failure
 ```
+
+Task 016 adds rework action scope handling. Automatic review comments only
+create an `@devbot` rework trigger for repository file changes. Metadata-only
+requests (PR body/evidence, labels, comments, reactions) and external
+verification requests move to `devbot:manual-action` with a comment instead
+of entering the commit/push path. If a repository-change rework verifies
+successfully but leaves the Git workspace clean, DevBot records
+`no_repository_changes`, skips commit/push, marks the feedback comment
+processed, and returns the Issue to `devbot:review`.
 
 Every successful state write removes all other `devbot:*` state labels
 before adding the target state, so an Issue ends with exactly one state

@@ -5,6 +5,7 @@
 - `devbot:working`
 - `devbot:review`
 - `devbot:blocked`
+- `devbot:manual-action`
 - `devbot:done`
 - `priority:high`
 - `priority:medium`
