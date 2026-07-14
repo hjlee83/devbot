@@ -180,7 +180,10 @@ def test_processed_feedback_is_not_reworked_twice_at_polling_level() -> None:
     write_client = MagicMock(spec=GitHubWriteClient)
     state_writer = IssueStateWriter(client=write_client, dry_run=False)
     rework_service = ReworkService(
-        state_writer=state_writer, write_client=write_client, apply_changes=MagicMock()
+        state_writer=state_writer,
+        write_client=write_client,
+        apply_changes=MagicMock(),
+        has_changes=lambda repository: True,
     )
     service = PollingService(
         config=config,
@@ -304,6 +307,7 @@ def test_rework_reuses_existing_branch_and_pull_request() -> None:
         commit=MagicMock(),
         push=push,
         current_branch=lambda repository: actual_pr_head,
+        has_changes=lambda repository: True,
     )
     service = PollingService(
         config=config,
@@ -349,6 +353,7 @@ def test_rework_uses_implementer_runner() -> None:
         commit=MagicMock(),
         push=MagicMock(),
         current_branch=lambda repository: "devbot/myrepo-7-fix-bug",
+        has_changes=lambda repository: True,
     )
     service = PollingService(
         config=config,
@@ -412,6 +417,7 @@ def test_reviewer_runner_is_not_used_for_implementation() -> None:
         commit=MagicMock(),
         push=MagicMock(),
         current_branch=lambda repository: "devbot/myrepo-9-fix-bug",
+        has_changes=lambda repository: True,
     )
     rework_polling_service = PollingService(
         config=rework_config,
@@ -510,6 +516,7 @@ def test_rework_polling_dry_run_has_no_side_effects() -> None:
         commit=commit,
         push=push,
         current_branch=lambda repository: "devbot/myrepo-7-fix-bug",
+        has_changes=lambda repository: True,
     )
     service = PollingService(
         config=config,

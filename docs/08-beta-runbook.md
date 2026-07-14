@@ -185,6 +185,12 @@ repo's Git history.
       reaction. If no unprocessed comment exists, either add the missing
       feedback comment or manually move the Issue back to `devbot:review`
       after confirming the PR head is ready for review.
+- [ ] If an Issue is `devbot:manual-action`, the latest review/rework
+      comment asked for GitHub metadata work, external verification, or
+      human approval that DevBot intentionally did not route through
+      commit/push. Complete the named action, then move the Issue back to
+      the appropriate stable state (`devbot:review`, `devbot:rework`, or
+      `devbot:ready`).
 - [ ] If an Issue is `devbot:blocked`, read the blocking comment first.
       After manual remediation, remove `devbot:blocked` and add the
       appropriate stable label (`devbot:ready`, `devbot:review`, or

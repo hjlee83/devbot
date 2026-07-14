@@ -107,6 +107,23 @@ def commit_all_changes(repository: RepositoryConfig, message: str) -> None:
     _run_git(repository, "commit", "-m", message)
 
 
+def repository_has_changes(repository: RepositoryConfig) -> bool:
+    """Return True when the Git workspace has staged or unstaged changes."""
+    completed = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(repository.local_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise DeliveryError(
+            f"git status --porcelain failed in {repository.local_path}: "
+            f"{completed.stderr or completed.stdout}"
+        )
+    return bool(completed.stdout.strip())
+
+
 def push_task_branch(repository: RepositoryConfig, branch: str) -> None:
     """Push exactly `branch` to `origin`, never any other ref."""
     _run_git(repository, "push", "origin", f"{branch}:{branch}")
@@ -150,6 +167,7 @@ RunVerificationFn = Callable[[RepositoryConfig], VerificationResult]
 CommitFn = Callable[[RepositoryConfig, str], None]
 PushFn = Callable[[RepositoryConfig, str], None]
 CurrentBranchFn = Callable[[RepositoryConfig], str]
+HasChangesFn = Callable[[RepositoryConfig], bool]
 
 
 @dataclass

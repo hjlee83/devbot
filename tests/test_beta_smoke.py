@@ -530,6 +530,7 @@ def test_reuse_existing_pr() -> None:
         commit=MagicMock(),
         push=MagicMock(),
         current_branch=lambda repository: branch,
+        has_changes=lambda repository: True,
     )
 
     rework_result = rework_service.process(repo, review_issue, branch, [comment])

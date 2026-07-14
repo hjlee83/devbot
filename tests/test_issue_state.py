@@ -125,6 +125,22 @@ def test_send_to_rework_moves_working_to_rework() -> None:
     client.set_labels.assert_called_once_with(repository, 11, ["devbot:rework"])
 
 
+def test_manual_action_transition_keeps_single_state_label() -> None:
+    writer, client = _writer(dry_run=False)
+    repository = _repository()
+    issue = _issue(12, labels=("devbot:working", "devbot:rework", "priority:high"))
+
+    updated = writer.require_manual_action(
+        repository, issue, "metadata action required", job_type=JobType.REWORK
+    )
+
+    assert updated.labels == ("priority:high", "devbot:manual-action")
+    client.set_labels.assert_called_once_with(
+        repository, 12, ["priority:high", "devbot:manual-action"]
+    )
+    client.create_comment.assert_called_once_with(repository, 12, "metadata action required")
+
+
 def test_restore_moves_working_back_to_ready() -> None:
     """CP-014-5: undoing a claim after a preflight failure, before any
     Agent ran."""

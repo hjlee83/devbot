@@ -36,6 +36,7 @@ from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
+from devbot.rework import ReworkActionScope, classify_rework_action_scope
 
 _MENTION = "@devbot"
 _MERGE_READY = "MERGE READY"
@@ -96,6 +97,15 @@ def build_review_prompt(
         "적용됩니다. 구현 관여 여부나 특정 Agent 종류에 따라 기준을 완화하거나 "
         "강화하지 말고, 모든 Reviewer가 PR Evidence와 Result가 실제 diff, 테스트, "
         "검증 결과를 빠짐없이 증명하는지 같은 strict gate로 확인하세요.\n\n"
+        "Rework 트리거 정책:\n"
+        "- repository file change(code/test/docs/result file 등 commit이 필요한 변경)가 "
+        "필요한 경우에만 `@devbot rework`로 처리될 수 있게 작성하세요.\n"
+        "- PR title/body/evidence, label, Issue/PR comment, reaction 같은 metadata-only "
+        "조치에는 `@devbot rework`를 요구하지 말고 `Metadata action required` 섹션에 "
+        "사람이 해야 할 일을 적으세요.\n"
+        "- CI 확인, 네트워크가 열린 환경의 dry-run 확인, 사람 승인 같은 external "
+        "verification 조치에는 `@devbot rework`를 요구하지 말고 "
+        "`Manual action required` 섹션에 적으세요.\n\n"
         "최종 출력은 반드시 AGENTS.md에 정의된 `# Review Summary` 형식을 따르고, "
         f"`## 상태` 아래에 `{_MERGE_READY}` 또는 `{_REQUEST_CHANGES}` 중 정확히 하나만 "
         "포함해야 합니다. Pull Request를 Merge하지 마세요."
@@ -202,7 +212,14 @@ class ReviewService:
 
         comment_body = review_text.rstrip("\n")
         if status == _REQUEST_CHANGES:
-            comment_body += f"\n\n{_MENTION} 위 REQUEST CHANGES 내용을 반영해 rework 해주세요."
+            action_scope = classify_rework_action_scope(review_text)
+            if action_scope is ReworkActionScope.REPOSITORY_CHANGE:
+                comment_body += f"\n\n{_MENTION} 위 REQUEST CHANGES 내용을 반영해 rework 해주세요."
+            else:
+                comment_body += (
+                    f"\n\nMetadata/Manual action scope: `{action_scope.value}`. "
+                    "자동 rework 트리거를 만들지 않습니다."
+                )
         comment_body += f"\n\n{build_review_marker(pull_request.head_sha)}"
 
         try:
@@ -223,13 +240,26 @@ class ReviewService:
         # comment above, unchanged.
         try:
             if status == _REQUEST_CHANGES:
-                self.state_writer.send_to_rework(
-                    repository,
-                    working_issue,
-                    job_type=JobType.REVIEW,
-                    reason="REQUEST CHANGES 게시 완료",
-                )
-                issue_state = TaskState.REWORK
+                action_scope = classify_rework_action_scope(review_text)
+                if action_scope is ReworkActionScope.REPOSITORY_CHANGE:
+                    self.state_writer.send_to_rework(
+                        repository,
+                        working_issue,
+                        job_type=JobType.REVIEW,
+                        reason="REQUEST CHANGES 게시 완료",
+                    )
+                    issue_state = TaskState.REWORK
+                else:
+                    self.state_writer.require_manual_action(
+                        repository,
+                        working_issue,
+                        (
+                            "리뷰 결과가 repository 변경이 아닌 "
+                            f"{action_scope.value} 조치를 요구합니다."
+                        ),
+                        job_type=JobType.REVIEW,
+                    )
+                    issue_state = TaskState.MANUAL_ACTION
             else:
                 self.state_writer.mark_for_review(
                     repository,

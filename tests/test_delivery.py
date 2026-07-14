@@ -10,6 +10,7 @@ from devbot.delivery import (
     build_pr_body,
     commit_all_changes,
     push_task_branch,
+    repository_has_changes,
 )
 from devbot.github_client import GitHubIssue
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
@@ -105,6 +106,18 @@ def test_push_targets_task_branch_only() -> None:
         "origin",
         "devbot/myrepo-42-add-feature-x:devbot/myrepo-42-add-feature-x",
     ]
+
+
+def test_repository_has_changes_uses_porcelain_status() -> None:
+    repository = _repo(Path("/tmp/workspace/myrepo"))
+
+    with patch("devbot.delivery.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=" M src/app.py\n", stderr="")
+
+        assert repository_has_changes(repository) is True
+
+    args = mock_run.call_args.args[0]
+    assert args == ["git", "status", "--porcelain"]
 
 
 def test_pr_targets_default_branch() -> None:

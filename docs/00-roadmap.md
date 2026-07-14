@@ -67,7 +67,7 @@
       게이트를 고정한다. PR Evidence, Result, CI, Task 계약, 운영 정책이
       하나라도 불일치하면 `REQUEST CHANGES`로 판단하며, 이 기준은 구현 관여
       여부나 특정 Agent 종류와 관계없이 모든 Reviewer에게 동일하게 적용된다.
-- [ ] Task 016: rework no-op and metadata action handling. 리뷰 결과가
+- [x] Task 016: rework no-op and metadata action handling. 리뷰 결과가
       repository file change, GitHub metadata-only action, external verification
       중 무엇을 요구하는지 구분하고, `nothing to commit`을 DeliveryError로
       처리해 `devbot:blocked` 루프를 만드는 문제를 제거한다. metadata-only

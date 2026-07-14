@@ -1100,7 +1100,15 @@ class PollingService:
                 status=PollingStatus.BLOCKED, task=selected, message=rework_result.message
             )
 
-        self.logger.info("Rework 완료: %s", rework_result.message)
+        self.logger.info(
+            "Rework 완료: %s action_scope=%s",
+            rework_result.message,
+            (
+                rework_result.action_scope.value
+                if rework_result.action_scope is not None
+                else "unknown"
+            ),
+        )
         return PollingResult(
             status=PollingStatus.REWORKED, task=selected, message=rework_result.message
         )

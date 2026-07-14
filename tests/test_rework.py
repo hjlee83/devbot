@@ -7,7 +7,7 @@ from devbot.github_client import GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
-from devbot.rework import ReworkService
+from devbot.rework import ReworkActionScope, ReworkService, classify_rework_action_scope
 
 BRANCH = "devbot/myrepo-42-existing-branch"
 
@@ -51,6 +51,7 @@ def _service(
     commit: MagicMock | None = None,
     push: MagicMock | None = None,
     current_branch=None,
+    has_changes=None,
 ) -> tuple[ReworkService, IssueStateWriter | MagicMock, MagicMock]:
     state_writer = state_writer or MagicMock(spec=IssueStateWriter)
     if isinstance(state_writer, MagicMock):
@@ -64,8 +65,30 @@ def _service(
         commit=commit or MagicMock(),
         push=push or MagicMock(),
         current_branch=current_branch or (lambda repository: BRANCH),
+        has_changes=has_changes or (lambda repository: True),
     )
     return service, state_writer, write_client
+
+
+def test_rework_classifies_repository_change_comment() -> None:
+    assert (
+        classify_rework_action_scope("@devbot update tests and result file")
+        is ReworkActionScope.REPOSITORY_CHANGE
+    )
+
+
+def test_rework_classifies_metadata_only_comment() -> None:
+    assert (
+        classify_rework_action_scope("@devbot update the PR Evidence and PR body")
+        is ReworkActionScope.METADATA_ONLY
+    )
+
+
+def test_rework_classifies_external_verification_comment() -> None:
+    assert (
+        classify_rework_action_scope("@devbot verify CI and rerun dry-run with network access")
+        is ReworkActionScope.EXTERNAL_VERIFICATION
+    )
 
 
 def test_only_unprocessed_devbot_comments_trigger_rework() -> None:
@@ -173,6 +196,77 @@ def test_successful_rework_reuses_pr_and_returns_issue_to_review() -> None:
     state_writer.mark_for_review.assert_called_once()
     assert result.pr_reused is True
     assert result.issue_state == TaskState.REVIEW
+
+
+def test_clean_rework_does_not_commit() -> None:
+    commit = MagicMock()
+    push = MagicMock()
+    service, state_writer, write_client = _service(
+        commit=commit,
+        push=push,
+        has_changes=lambda repository: False,
+    )
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    write_client.add_reaction_to_comment.assert_called_once_with(repository, 1, content="eyes")
+    state_writer.mark_for_review.assert_called_once()
+    state_writer.block.assert_not_called()
+    assert result.message == "no_repository_changes"
+    assert result.action_scope is ReworkActionScope.REPOSITORY_CHANGE
+    assert result.committed is False
+    assert result.pushed is False
+    assert result.issue_state is TaskState.REVIEW
+
+
+def test_metadata_only_rework_does_not_block_queue() -> None:
+    commit = MagicMock()
+    push = MagicMock()
+    service, state_writer, write_client = _service(commit=commit, push=push)
+
+    result = service.process(
+        _repo(), _issue(), BRANCH, [_comment(body="@devbot update PR Evidence only")]
+    )
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    state_writer.require_manual_action.assert_called_once()
+    state_writer.block.assert_not_called()
+    state_writer.mark_for_review.assert_not_called()
+    write_client.add_reaction_to_comment.assert_not_called()
+    assert result.action_scope is ReworkActionScope.METADATA_ONLY
+    assert result.issue_state is TaskState.MANUAL_ACTION
+
+
+def test_repository_change_rework_still_commits_and_returns_review() -> None:
+    commit = MagicMock()
+    push = MagicMock()
+    service, state_writer, _ = _service(commit=commit, push=push)
+    repository = _repo()
+
+    result = service.process(
+        repository, _issue(), BRANCH, [_comment(body="@devbot update tests for this bug")]
+    )
+
+    commit.assert_called_once()
+    push.assert_called_once_with(repository, BRANCH)
+    state_writer.mark_for_review.assert_called_once()
+    assert result.action_scope is ReworkActionScope.REPOSITORY_CHANGE
+    assert result.committed is True
+    assert result.pushed is True
+    assert result.issue_state is TaskState.REVIEW
+
+
+def test_no_repository_changes_is_logged() -> None:
+    service, _, _ = _service(has_changes=lambda repository: False)
+
+    result = service.process(_repo(), _issue(), BRANCH, [_comment()])
+
+    assert result.message == "no_repository_changes"
+    assert result.action_scope is ReworkActionScope.REPOSITORY_CHANGE
 
 
 def test_rework_dry_run_does_not_push_or_mark_processed() -> None:
@@ -465,6 +559,7 @@ def test_rework_with_real_dry_run_state_writer_completes_full_cycle() -> None:
         commit=MagicMock(),
         push=MagicMock(),
         current_branch=lambda repository: BRANCH,
+        has_changes=lambda repository: True,
     )
     repository = _repo()
 
