@@ -82,3 +82,9 @@
       시간을 모두 표시하고, 사람이 읽는 상태 카드와 기계용 hidden marker 형식을
       분리해 정의한다(`docs/10-github-status-timeline.md`). marker 자동 기록,
       `devbot status` CLI, Dashboard/UI는 후속 Task로 남긴다.
+- [x] Task 018: timeline CLI. 수동 Claude/Codex/GPT 작업에서도 Task 017의
+      단일 Timeline comment를 갱신할 수 있도록 `timeline start`, `timeline end`,
+      `timeline status` 명령을 제공한다. 이벤트는 UTC marker로 저장하고 Status Card는
+      Queue/Dev/Review/Waiting 구간과 actor별 작업 시간을 계산해 표시한다
+      (`src/devbot/timeline.py`, `results/018-timeline-cli.md`). daemon 자동
+      marker 기록은 후속 Task로 남긴다.

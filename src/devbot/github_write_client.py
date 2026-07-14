@@ -91,6 +91,13 @@ class GitHubWriteClient:
         _raise_for_status(response)
         return response
 
+    def _patch(self, path: str, json: dict[str, Any]) -> requests.Response:
+        response = self._session.patch(
+            f"{self.base_url}{path}", headers=self._headers(), json=json, timeout=30
+        )
+        _raise_for_status(response)
+        return response
+
     def set_labels(
         self, repository: RepositoryConfig, issue_number: int, labels: Sequence[str]
     ) -> None:
@@ -104,6 +111,15 @@ class GitHubWriteClient:
         """Post a new comment on an Issue."""
         self._post(
             f"/repos/{repository.owner}/{repository.repo}/issues/{issue_number}/comments",
+            json={"body": body},
+        )
+
+    def update_comment(self, repository: RepositoryConfig, comment_id: int, body: str) -> None:
+        """Replace an existing Issue/PR comment's full body (used by
+        `devbot.timeline` to keep a single Timeline comment per Issue up to
+        date instead of posting a new comment per event)."""
+        self._patch(
+            f"/repos/{repository.owner}/{repository.repo}/issues/comments/{comment_id}",
             json={"body": body},
         )
 

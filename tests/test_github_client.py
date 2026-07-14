@@ -69,6 +69,21 @@ def test_get_authenticated_user() -> None:
     assert kwargs["headers"]["Authorization"] == "Bearer token123"
 
 
+def test_get_issue_parses_single_issue() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response(
+        json_data=_issue(34, labels=["devbot:working"])
+    )
+    client = GitHubClient("token123", session=session)
+
+    issue = client.get_issue(_repository(), 34)
+
+    assert issue.number == 34
+    assert issue.labels == ("devbot:working",)
+    args, _kwargs = session.get.call_args
+    assert args[0].endswith("/repos/someone/myrepo/issues/34")
+
+
 def test_list_issues_follows_pagination() -> None:
     session = MagicMock()
     page_1 = [_issue(1), _issue(2)]
@@ -191,6 +206,7 @@ def test_github_generic_error_is_translated() -> None:
 def test_client_exposes_read_operations_only() -> None:
     allowed_public_methods = {
         "get_authenticated_user",
+        "get_issue",
         "list_issues",
         "list_issue_comments",
         "list_pull_requests",
