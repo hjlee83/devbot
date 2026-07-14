@@ -80,6 +80,7 @@ class PullRequest:
 
     number: int
     head_ref: str
+    head_sha: str
     body: str
     html_url: str
 
@@ -143,6 +144,7 @@ def _parse_pull_request(raw: dict[str, Any]) -> PullRequest:
     return PullRequest(
         number=raw["number"],
         head_ref=raw["head"]["ref"],
+        head_sha=raw["head"]["sha"],
         body=raw.get("body") or "",
         html_url=raw["html_url"],
     )

@@ -67,6 +67,12 @@ def _parse_int(name: str, value: str) -> int:
         raise ConfigError(f"{name} must be an integer, got: {value!r}") from exc
 
 
+def _require_positive_int(name: str, value: int) -> int:
+    if value < 1:
+        raise ConfigError(f"{name} must be >= 1, got: {value}")
+    return value
+
+
 def _resolve_role_agent(
     role_env_name: str, raw_default_agent: str | None, built_in_default: str
 ) -> str:
@@ -157,7 +163,9 @@ def load_config(
         raise ConfigError("Missing required environment variable: GITHUB_TOKEN")
 
     poll_interval_seconds = _parse_int("POLL_INTERVAL_SECONDS", _get_env("POLL_INTERVAL_SECONDS"))
-    max_concurrent_jobs = _parse_int("MAX_CONCURRENT_JOBS", _get_env("MAX_CONCURRENT_JOBS"))
+    max_concurrent_jobs = _require_positive_int(
+        "MAX_CONCURRENT_JOBS", _parse_int("MAX_CONCURRENT_JOBS", _get_env("MAX_CONCURRENT_JOBS"))
+    )
     lock_file_raw = _require_nonempty("DEVBOT_LOCK_FILE", _get_env("DEVBOT_LOCK_FILE"))
     lock_file = Path(lock_file_raw).expanduser()
     default_agent = _require_nonempty("DEFAULT_AGENT", _get_env("DEFAULT_AGENT"))

@@ -25,9 +25,10 @@ name raises `UnknownAgentError` — there is no silent fallback.
   Issue's initial implementation and Task 010's PR-feedback rework. Both
   paths share one `implementer_runner` instance (built once in
   `devbot.main`).
-- `reviewer_agent` — constructed into a `reviewer_runner` and injected into
-  `PollingService`, but not invoked anywhere yet. Automatically triggering
-  a review run is a later Task; this Task only wires the role through.
+- `reviewer_agent` — constructed into a `reviewer_runner`, wrapped in a
+  `ReviewService` (`devbot.review`), and injected into `PollingService` as
+  `review_service`. Task 012 is what actually *calls* it — see "Automatic
+  review relay" below.
 
 Resolution order for each role (`load_config`, see `devbot.config`):
 
@@ -39,6 +40,41 @@ Resolution order for each role (`load_config`, see `devbot.config`):
 
 An agent name that resolves to anything other than `codex`/`claude` fails
 config loading with a `ConfigError` — never a silent fallback.
+
+## Automatic review relay (Task 012)
+
+`PollingService.run_cycle()` (see `devbot.polling`) turns `devbot:ready` /
+`devbot:review` Issues into scheduled `Job`s of type `IMPLEMENT`, `REWORK`,
+or `REVIEW` (`devbot.models.JobType` — deliberately role-neutral, no
+vendor/product name), and runs up to `MAX_CONCURRENT_JOBS` of them per
+cycle (`devbot.scheduler.select_jobs`; default `1`, the same serial
+behavior as before this Task). At most one job runs per repository at a
+time, regardless of concurrency.
+
+- A `devbot:review` Issue's linked PR is a `REVIEW` candidate whenever its
+  *current* head commit SHA has no auto-review marker comment yet
+  (`devbot.review.has_review_marker_for_head`), and a `REWORK` candidate
+  whenever it has an unprocessed `@devbot` comment (Task 010) — REWORK
+  always outranks REVIEW for the same Issue.
+- `ReviewService.process()` runs `reviewer_runner`, requires the reviewer's
+  output to contain exactly one of the literal strings `MERGE READY` /
+  `REQUEST CHANGES` (`AGENTS.md` section 10's `# Review Summary` format —
+  both or neither is an invalid review, and blocks the Issue), and posts
+  that output back to the PR with a trailing idempotency marker:
+
+  ```html
+  <!-- devbot:auto-review head=<FULL_HEAD_SHA> -->
+  ```
+
+  On `REQUEST CHANGES`, the same posted comment also contains a literal
+  `@devbot` mention — no separate mechanism exists for this; the *existing*
+  Task 010 rework path detects it on the next cycle. `MERGE READY` never
+  contains that mention, so it never triggers rework. Both rework and
+  review detection now read the **linked PR's** comments (not the tracked
+  Issue's own comments) — see the `devbot.polling` module docstring.
+- Automatic Merge and automatic Issue Close are out of scope for every
+  Task through 012; `MERGE READY` leaves the Issue in `devbot:review` for
+  a human to merge.
 
 The target repository's root `AGENTS.md` is the project-specific source of truth.
 DevBot does not duplicate those rules into its own repository-specific configuration.

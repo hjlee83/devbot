@@ -10,6 +10,7 @@ from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import DevBotConfig, RepositoryConfig, TaskState
 from devbot.polling import PollingService, PollingStatus
+from devbot.review import build_review_marker
 from devbot.rework import ReworkService
 from devbot.workspace import WorkspaceValidationError
 
@@ -74,11 +75,16 @@ def _issue(
 
 
 def _pull_request(
-    number: int, *, issue_number: int, head_ref: str = "devbot/existing-branch"
+    number: int,
+    *,
+    issue_number: int,
+    head_ref: str = "devbot/existing-branch",
+    head_sha: str = "deadbeef",
 ) -> PullRequest:
     return PullRequest(
         number=number,
         head_ref=head_ref,
+        head_sha=head_sha,
         body=f"Closes #{issue_number}",
         html_url=f"https://github.com/someone/myrepo/pull/{number}",
     )
@@ -162,9 +168,11 @@ def test_processed_review_comment_is_not_reworked_again() -> None:
     config = _config([repo])
     review_issue = _issue(repo.full_name, 1, labels=["devbot:review"])
     processed_comment = _comment(reactions={"eyes": 1})
+    linked_pr = _pull_request(101, issue_number=1)
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 1): [processed_comment]},
+        comments_by_issue={(repo.full_name, 101): [processed_comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     write_client = MagicMock(spec=GitHubWriteClient)
     state_writer = IssueStateWriter(client=write_client, dry_run=False)
@@ -197,7 +205,7 @@ def test_polling_detects_unprocessed_devbot_review_comment() -> None:
     linked_pr = _pull_request(101, issue_number=7, head_ref="devbot/myrepo-7-fix-bug")
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 7): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     rework_service = MagicMock(spec=ReworkService)
@@ -240,7 +248,7 @@ def test_rework_is_prioritized_over_ready_task() -> None:
     linked_pr = _pull_request(101, issue_number=7)
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue, ready_issue]},
-        comments_by_issue={(repo.full_name, 7): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     rework_service = MagicMock(spec=ReworkService)
@@ -279,7 +287,7 @@ def test_rework_reuses_existing_branch_and_pull_request() -> None:
     linked_pr = _pull_request(101, issue_number=7, head_ref=actual_pr_head)
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 7): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     write_client = MagicMock(spec=GitHubWriteClient)
@@ -321,7 +329,7 @@ def test_rework_uses_implementer_runner() -> None:
     linked_pr = _pull_request(101, issue_number=7, head_ref="devbot/myrepo-7-fix-bug")
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 7): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     implementer_runner = MagicMock()
@@ -389,7 +397,7 @@ def test_reviewer_runner_is_not_used_for_implementation() -> None:
     linked_pr = _pull_request(102, issue_number=9, head_ref="devbot/myrepo-9-fix-bug")
     rework_github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 9): [comment]},
+        comments_by_issue={(repo.full_name, 102): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     rework_reviewer = MagicMock()
@@ -429,7 +437,7 @@ def test_successful_polled_rework_returns_to_review() -> None:
     linked_pr = _pull_request(101, issue_number=7)
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 7): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     rework_service = MagicMock(spec=ReworkService)
@@ -485,7 +493,7 @@ def test_rework_polling_dry_run_has_no_side_effects() -> None:
     linked_pr = _pull_request(101, issue_number=7, head_ref="devbot/myrepo-7-fix-bug")
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 7): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     write_client = MagicMock(spec=GitHubWriteClient)
@@ -533,7 +541,7 @@ def test_failed_polled_rework_moves_to_blocked_with_reason() -> None:
     linked_pr = _pull_request(101, issue_number=9)
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 9): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [linked_pr]},
     )
     rework_service = MagicMock(spec=ReworkService)
@@ -567,7 +575,7 @@ def test_review_issue_without_linked_pull_request_is_reported_as_error() -> None
     unrelated_pr = _pull_request(101, issue_number=999)
     github_client = FakeGitHubClient(
         {repo.full_name: [review_issue]},
-        comments_by_issue={(repo.full_name, 7): [comment]},
+        comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [unrelated_pr]},
     )
     rework_service = MagicMock(spec=ReworkService)
@@ -891,3 +899,227 @@ def test_iteration_picks_oldest_among_equal_priority_across_repos() -> None:
 
     assert result.task is not None
     assert (result.task.repository, result.task.number) == (repo_b.full_name, 2)
+
+
+# --- Task 012: role-based polling orchestration ----------------------------
+
+
+def test_ready_issue_triggers_implement_job() -> None:
+    """CP-012-1: a `devbot:ready` Issue is scheduled and run as an
+    IMPLEMENT job through `implementer_runner`."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    ready_issue = _issue(repo.full_name, 7, labels=["devbot:ready"], title="Fix bug")
+    github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="ok"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_COMPLETED
+    implementer_runner.run.assert_called_once()
+
+
+def test_unreviewed_pr_head_triggers_review_job() -> None:
+    """CP-012-2: a `devbot:review` Issue whose linked PR head has no
+    auto-review marker yet is scheduled and run as a REVIEW job."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    linked_pr = _pull_request(101, issue_number=7, head_sha="sha-1")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    review_service.process.return_value = MagicMock(
+        status="MERGE READY", issue_state=TaskState.REVIEW, message="reviewed: MERGE READY"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REVIEWED
+    review_service.process.assert_called_once()
+    called_repository, called_issue, called_pr = review_service.process.call_args.args
+    assert called_repository == repo
+    assert called_issue == review_issue
+    assert called_pr == linked_pr
+
+
+def test_new_pr_head_triggers_review_again() -> None:
+    """CP-012-4: a PR head with a marker for its *previous* head SHA still
+    gets reviewed once the head moves to a new, unmarked SHA."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    linked_pr = _pull_request(101, issue_number=7, head_sha="sha-2")
+    old_marker_comment = _comment(
+        comment_id=99, body=f"# Review Summary\n\n{build_review_marker('sha-1')}"
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 101): [old_marker_comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    review_service.process.return_value = MagicMock(
+        status="MERGE READY", issue_state=TaskState.REVIEW, message="reviewed: MERGE READY"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REVIEWED
+    review_service.process.assert_called_once()
+
+
+def test_already_reviewed_head_is_not_reviewed_again() -> None:
+    """CP-012-3 (orchestration level): a PR head that already has a marker
+    for its *current* head SHA produces no REVIEW candidate."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    linked_pr = _pull_request(101, issue_number=7, head_sha="sha-1")
+    marker_comment = _comment(
+        comment_id=99, body=f"# Review Summary\n\n{build_review_marker('sha-1')}"
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 101): [marker_comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
+    review_service.process.assert_not_called()
+
+
+def test_failed_job_releases_concurrency_slot() -> None:
+    """CP-012-13: a failing job in one repository does not prevent another
+    repository's job from completing in the same cycle - the failure
+    doesn't leak or hold a concurrency slot hostage."""
+    repo_a = _repo("repo-a")
+    repo_b = _repo("repo-b")
+    config = _config([repo_a, repo_b], max_concurrent_jobs=2)
+    failing_issue = _issue(repo_a.full_name, 1, labels=["devbot:ready"], title="Fails")
+    succeeding_issue = _issue(repo_b.full_name, 1, labels=["devbot:ready"], title="Succeeds")
+    github_client = FakeGitHubClient(
+        {repo_a.full_name: [failing_issue], repo_b.full_name: [succeeding_issue]}
+    )
+    implementer_runner = MagicMock()
+
+    def _run(repository, prompt):
+        if repository.full_name == repo_a.full_name:
+            raise RuntimeError("agent crashed")
+        return AgentRunResult(executed=True, dry_run=False, message="ok")
+
+    implementer_runner.run.side_effect = _run
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    results = service.run_cycle()
+
+    results_by_repo = {result.task.repository: result for result in results}
+    assert results_by_repo[repo_a.full_name].status is PollingStatus.AGENT_FAILED
+    assert results_by_repo[repo_b.full_name].status is PollingStatus.AGENT_COMPLETED
+
+
+def test_parallel_cycle_runs_jobs_for_different_repositories() -> None:
+    """CP-012-11 (orchestration level): with `max_concurrent_jobs=2`, one
+    cycle runs a ready job in each of two different repositories."""
+    repo_a = _repo("repo-a")
+    repo_b = _repo("repo-b")
+    config = _config([repo_a, repo_b], max_concurrent_jobs=2)
+    issue_a = _issue(repo_a.full_name, 1, labels=["devbot:ready"], title="A")
+    issue_b = _issue(repo_b.full_name, 1, labels=["devbot:ready"], title="B")
+    github_client = FakeGitHubClient({repo_a.full_name: [issue_a], repo_b.full_name: [issue_b]})
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="ok"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    results = service.run_cycle()
+
+    assert len(results) == 2
+    assert {result.status for result in results} == {PollingStatus.AGENT_COMPLETED}
+    assert implementer_runner.run.call_count == 2
+
+
+def test_repository_error_during_candidate_collection_does_not_block_other_repositories() -> None:
+    """A PR-lookup failure while gathering one repository's candidates is
+    surfaced as its own error result but must not prevent a different
+    repository's independent job from running in the same cycle."""
+    repo_a = _repo("repo-a")
+    repo_b = _repo("repo-b")
+    config = _config([repo_a, repo_b], max_concurrent_jobs=2)
+    review_issue = _issue(repo_a.full_name, 1, labels=["devbot:review"], title="Broken")
+    ready_issue = _issue(repo_b.full_name, 1, labels=["devbot:ready"], title="Fine")
+    github_client = FakeGitHubClient(
+        {repo_a.full_name: [review_issue], repo_b.full_name: [ready_issue]},
+        error=None,
+    )
+
+    def _list_pull_requests(repository, **_kwargs):
+        if repository.full_name == repo_a.full_name:
+            raise RuntimeError("network exploded")
+        return []
+
+    github_client.list_pull_requests = _list_pull_requests  # type: ignore[method-assign]
+    rework_service = MagicMock()
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="ok"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    results = service.run_cycle()
+
+    results_by_repo = {result.task.repository: result for result in results}
+    assert results_by_repo[repo_a.full_name].status is PollingStatus.ITERATION_ERROR
+    assert results_by_repo[repo_b.full_name].status is PollingStatus.AGENT_COMPLETED

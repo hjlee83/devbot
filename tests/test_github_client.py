@@ -123,10 +123,12 @@ def test_list_issue_comments_follows_pagination_and_parses_reactions() -> None:
     assert first_call.args[0].endswith("/repos/someone/myrepo/issues/42/comments")
 
 
-def _pull_request(number: int, *, head_ref: str, body: str = "") -> dict:
+def _pull_request(
+    number: int, *, head_ref: str, head_sha: str = "deadbeef", body: str = ""
+) -> dict:
     return {
         "number": number,
-        "head": {"ref": head_ref},
+        "head": {"ref": head_ref, "sha": head_sha},
         "body": body,
         "html_url": f"https://github.com/someone/myrepo/pull/{number}",
     }
@@ -149,6 +151,7 @@ def test_list_pull_requests_follows_pagination_and_parses_head_ref() -> None:
 
     assert [pr.number for pr in pull_requests] == [1, 2, 3]
     assert pull_requests[0].head_ref == "devbot/myrepo-1-fix"
+    assert pull_requests[0].head_sha == "deadbeef"
     assert pull_requests[0].body == "Closes #1"
     assert session.get.call_count == 2
     first_call = session.get.call_args_list[0]
