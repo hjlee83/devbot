@@ -37,4 +37,4 @@ jobs:
           # guarantees no write/commit/push/PR path runs here regardless
           # of DRY_RUN, matching Task 009's smoke verification command.
           WORKSPACE_ROOT: ${{ runner.temp }}
-          GITHUB_TOKEN: ci-placeholder-token
+          GITHUB_TOKEN: ${{ github.token }}
