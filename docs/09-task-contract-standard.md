@@ -110,9 +110,9 @@ Evidence가 누락되거나 실제 변경 사항과 맞지 않으면 리뷰는 �
 - 단일 Task 추적 정책이나 AGENTS.md 운영 정책을 위반한다.
 
 위 Review Gate는 구현 관여 여부와 관계없이 모든 리뷰어에게 예외 없이 적용되는 기본
-기준이다. 구현에 관여한 리뷰어는 여기에 더해 자신이 만든 변경에 대해 더 엄격한 Evidence
-기준을 적용한다. 특히 PR Evidence와 Result가 실제 diff, 테스트, 검증 결과를 빠짐없이
-증명하는지 확인한다.
+기준이다. 구현에 관여했는지, 어떤 Agent가 Reviewer 역할을 맡았는지에 따라 기준을 완화하거나
+강화하지 않는다. 모든 Reviewer는 PR Evidence와 Result가 실제 diff, 테스트, 검증 결과를
+빠짐없이 증명하는지 같은 strict gate를 적용한다.
 
 ## 변경 관리
 

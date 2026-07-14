@@ -5,21 +5,21 @@
 리뷰 역할의 `MERGE READY` / `REQUEST CHANGES` 판단 기준을 메모리나 특정
 대화 맥락이 아니라 저장소 문서, 자동 리뷰 프롬프트, 테스트로 고정한다.
 
-리뷰어가 GPT, Codex, Claude, DeepSeek 등 어떤 Agent로 교체되더라도 동일한
-검증 게이트를 적용해야 하며, 코드와 테스트가 통과해도 PR Evidence, Result,
+리뷰어가 어떤 Agent로 교체되더라도 동일한 검증 게이트를 적용해야 하며,
+코드와 테스트가 통과해도 PR Evidence, Result,
 Task 계약, CI, 운영 정책 중 하나라도 불일치하면 `REQUEST CHANGES`를 내야 한다.
 
 ## 배경
 
 Task 014 리뷰 과정에서 다음 문제가 확인됐다.
 
-- 구현자는 Codex, 리뷰어는 GPT 역할로 분리했지만 같은 대화 맥락에서 리뷰 기준이
+- Implementer와 Reviewer 역할을 분리했지만 같은 대화 맥락에서 리뷰 기준이
   느슨해질 수 있었다.
 - PR 제목/본문이 실제 구현 결과와 맞지 않는 상태에서도 기능 blocker가 없다는
   이유로 `MERGE READY`가 게시될 수 있었다.
 - 이 기준을 대화 메모리에만 남기면 다른 리뷰 Agent로 교체될 때 다시 흔들릴 수 있다.
 - DevBot의 자동 리뷰 프롬프트는 AGENTS.md 리뷰 SOP를 따르라고 하지만, PR Evidence
-  불일치나 구현 관여 리뷰어의 엄격성 같은 기준을 충분히 구체적으로 강제하지 않는다.
+  불일치나 모든 Reviewer에게 동일하게 적용되는 strict gate를 충분히 구체적으로 강제하지 않는다.
 
 ## Dependencies
 
@@ -41,7 +41,7 @@ Task 014 리뷰 과정에서 다음 문제가 확인됐다.
      `REQUEST CHANGES`로 처리한다.
    - dry-run 실패, sandbox 제한, 수동 개입, 브랜치 혼선 같은 caveat가 있으면
      merge 판단 영향이 명시되어야 한다.
-   - 구현 과정에 관여한 Agent가 리뷰할 경우 evidence 기준을 더 엄격히 적용한다.
+   - 구현 관여 여부나 특정 Agent 종류에 따라 기준을 완화하거나 강화하지 않고 모든 Reviewer가 같은 strict gate를 적용한다.
 2. `docs/09-task-contract-standard.md`에 PR Evidence와 Review Gate 표준을 추가한다.
    - Task 하나는 브랜치 하나와 PR 하나로 추적한다.
    - `-impl`, 계약 전용 PR 같은 별도 브랜치/PR 분리는 기본값이 아니다.
@@ -55,7 +55,7 @@ Task 014 리뷰 과정에서 다음 문제가 확인됐다.
 4. 자동 리뷰 프롬프트 테스트를 추가/수정한다.
    - PR Evidence 불일치가 `REQUEST CHANGES` 조건으로 프롬프트에 포함되는지 검증한다.
    - Task 하나 = 브랜치 하나 = PR 하나 정책이 프롬프트 또는 문서에 포함되는지 검증한다.
-   - 구현 관여 리뷰어는 evidence를 더 엄격하게 본다는 기준이 포함되는지 검증한다.
+   - 모든 Reviewer가 구현 관여 여부와 무관하게 같은 strict gate를 적용한다는 기준이 포함되는지 검증한다.
 5. `docs/00-roadmap.md`에 Task 015를 추가한다.
 6. 구현 결과를 `results/015-review-gate-standardization.md`에 기록한다.
 
@@ -96,10 +96,10 @@ CI, 운영 정책을 함께 검증하라고 지시해야 한다.
 자동 리뷰 프롬프트는 검증 게이트 중 하나라도 불일치하면 `MERGE READY`가 아니라
 `REQUEST CHANGES`를 출력하라고 명시해야 한다.
 
-### CP-015-6: 구현 관여 리뷰어 엄격성
+### CP-015-6: 모든 Reviewer 동일 strict gate
 
-문서 또는 프롬프트에는 구현 과정에 관여한 Agent가 리뷰할 경우 evidence 기준을 더
-엄격히 적용해야 한다는 규칙이 포함되어야 한다.
+문서 또는 프롬프트에는 구현 관여 여부나 특정 Agent 종류와 무관하게 모든 Reviewer가
+같은 strict gate를 적용한다는 규칙이 포함되어야 한다.
 
 ### CP-015-7: Result 문서 일치
 
@@ -117,7 +117,7 @@ Task 014의 `review -> rework` 상태 전이는 회귀하지 않아야 한다.
 - `test_task_contract_standard_documents_single_task_branch_pr_policy`
 - `test_review_prompt_requires_contract_result_pr_ci_alignment`
 - `test_review_prompt_requires_request_changes_for_any_gate_mismatch`
-- `test_review_prompt_mentions_stricter_evidence_for_involved_reviewer`
+- `test_review_prompt_applies_same_strict_gate_to_all_reviewers`
 - `test_review_status_parsing_still_requires_exactly_one_status`
 
 ## 검증 명령

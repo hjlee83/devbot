@@ -86,7 +86,8 @@ def test_agents_review_gate_requires_request_changes_for_evidence_mismatch() -> 
     assert "운영 정책" in agents_text
     assert "하나라도 만족하지 않으면" in agents_text
     assert "`REQUEST CHANGES`" in agents_text
-    assert "구현에 관여한 리뷰어" in agents_text
+    assert "모든 리뷰어에게 예외 없이 적용" in agents_text
+    assert "기준을 완화하거나" in agents_text
 
 
 def test_task_contract_standard_documents_single_task_branch_pr_policy() -> None:
@@ -121,11 +122,13 @@ def test_review_prompt_requires_request_changes_for_any_gate_mismatch() -> None:
     assert "최신성" in prompt
 
 
-def test_review_prompt_mentions_stricter_evidence_for_involved_reviewer() -> None:
+def test_review_prompt_applies_same_strict_gate_to_all_reviewers() -> None:
     prompt = build_review_prompt(_repo(), _issue(), _pull_request())
 
-    assert "구현에 관여한 리뷰어" in prompt
-    assert "더 엄격하게" in prompt
+    assert "구현 관여 여부" in prompt
+    assert "특정 Agent 종류" in prompt
+    assert "기준을 완화하거나 강화하지 말고" in prompt
+    assert "모든 Reviewer" in prompt
     assert "실제 diff" in prompt
     assert "검증 결과" in prompt
 
