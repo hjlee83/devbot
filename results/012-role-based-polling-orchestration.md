@@ -219,3 +219,17 @@
 - 실제 GitHub 저장소 + 실제 Claude/Codex CLI가 설치된 환경에서 전체
   ready → review → 자동 리뷰 → REQUEST CHANGES → rework → 재리뷰 →
   MERGE READY 릴레이를 1회 수동 재검증.
+
+## Improvement Suggestions
+
+- reviewer stdout을 PR에 그대로 게시하기 전에 최소한의 형식 정리(코드펜스
+  누락 보정, 과도한 로그 라인 제거)를 거치면 PR 가독성이 좋아진다.
+- marker 게시 후 상태 전환 실패(부분 성공)를 사람이 수동으로 복구하는
+  대신, 다음 폴링 사이클이 "댓글은 있는데 라벨은 working"인 상태를 감지해
+  자동으로 `review`로 재정렬하는 회복 경로를 후속 Task로 고려할 만하다.
+- `REQUEST CHANGES`/`MERGE READY` 판정을 리터럴 문자열 포함 여부가 아니라
+  `## 상태` 섹션만 파싱하도록 좁히면, 리뷰 본문 다른 곳에서 예시로 두
+  단어를 언급하는 경우의 오탐 가능성을 더 줄일 수 있다.
+- `MAX_CONCURRENT_JOBS`가 2 이상일 때 실제 병렬 실행이 CPU/메모리에 주는
+  영향을 실제 Agent CLI로 측정해두면, 운영 환경에서 값을 얼마나 올려도
+  안전한지 판단할 근거가 생긴다.
