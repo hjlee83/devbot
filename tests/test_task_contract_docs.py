@@ -128,3 +128,24 @@ def test_task_017_result_doc_exists() -> None:
     assert RESULT_DOC.is_file(), f"{RESULT_DOC} 가 존재해야 한다 (CP-017-10)"
     text = RESULT_DOC.read_text(encoding="utf-8")
     assert text.strip()
+
+
+def test_task_017_rework_label_is_consistent_with_decision_log() -> None:
+    """PR #33 REQUEST CHANGES: devbot:rework를 devbot:working의 하위 개념처럼
+    설명하면 docs/07-decisions.md의 기존 ADR과 충돌한다. 프로토콜 문서는
+    devbot:rework를 devbot:working과 별개인 안정 상태로, ADR과 일치하게
+    문서화해야 한다.
+    """
+    protocol_text = PROTOCOL_DOC.read_text(encoding="utf-8")
+    decisions_text = Path("docs/07-decisions.md").read_text(encoding="utf-8")
+
+    assert "devbot:rework" in protocol_text
+    assert "별개의 안정 상태" in protocol_text or "별도 안정 상태" in protocol_text
+    assert "docs/07-decisions.md" in protocol_text
+
+    # devbot:working의 하위/sub-phase처럼 서술하는 표현이 남아있으면 안 된다.
+    assert "working의 review-phase 대기에 해당하는" not in protocol_text
+
+    # 기존 ADR("Rework is a separate stable Issue state")이 여전히 그대로
+    # 유지되고 있는지 확인해 두 문서가 같은 정의를 가리키는지 고정한다.
+    assert "Rework is a separate stable Issue state" in decisions_text

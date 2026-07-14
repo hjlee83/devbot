@@ -59,12 +59,16 @@
 - CP-017-9: `test_task_017_roadmap_updated`
 - CP-017-10: `test_task_017_result_doc_exists` (이 Result 문서 자체가 확정된 marker
   형식/상태 카드 예시/후속 구현 범위를 기록)
+- 회귀(PR #33 리뷰 반영): `test_task_017_rework_label_is_consistent_with_decision_log`
+  — `devbot:rework`가 `docs/07-decisions.md` ADR과 일치하게 별개 안정 상태로
+  문서화되는지 고정 (아래 "리뷰 피드백 반영" 참고)
 
 ## 검증 결과
 
 - `uv sync`: 통과 (Resolved 15 packages, Checked 14 packages)
 - `uv run ruff check .`: 통과 (`All checks passed!`)
-- `uv run pytest`: 통과, 255 passed (Task 017 신규 테스트 6개 포함, 기존 249개 회귀 없음)
+- `uv run pytest`: 통과, 256 passed (Task 017 신규 테스트 7개 포함, 기존 249개 회귀 없음;
+  리뷰 반영 회귀 테스트 1개 포함)
 - `uv run devbot --once --dry-run`: 문서 전용 변경(Task 계약상 선택 검증)이므로 실행하지
   않았다. `src/devbot/**` 런타임 코드는 변경하지 않았다.
 
@@ -88,6 +92,33 @@
   `devbot:blocked`/`devbot:manual-action` 상태의 Status Card 예시는 포함하지
   않았다. 라벨 의미(3절)는 정의했지만, 이 두 상태의 전용 카드 예시는 후속
   문서 보강 대상이다.
+
+## 리뷰 피드백 반영 (PR #33, head `d725a7e`)
+
+`hjlee83`의 `REQUEST CHANGES` 리뷰(Blocker)를 반영했다.
+
+- **지적 내용**: `docs/10-github-status-timeline.md`의 상태 라벨 표(3절)가
+  `devbot:rework`를 누락하고, 뒤이은 설명 문장이 `devbot:rework`를
+  `devbot:working`의 review-phase 대기에 해당하는 것처럼 서술해
+  `docs/07-decisions.md`의 2026-07-14 ADR("Rework is a separate stable Issue
+  state")과 `src/devbot/issue_state.py`의 실제 상태 머신(`devbot:rework`는
+  `devbot:working`과 별개인 독립 라벨)과 충돌했다.
+- **수정**: 상태 라벨 표에 `devbot:rework` 행을 추가하고, ADR과 동일하게
+  "`devbot:working`과는 별개의 안정 상태이며 REQUEST CHANGES 이후 구현자의
+  rework 착수를 기다리는 대기 상태(`Wait implementer` 구간과 대응)"로
+  정정했다. 표 아래 요약 문장도 `docs/07-decisions.md`/`docs/03-state-machine.md`/
+  `src/devbot/issue_state.py`의 기존 정의를 그대로 참조하도록 고쳤다.
+- **회귀 테스트 추가**: 리뷰의 Warning(“정적 테스트가 라벨 의미 충돌을 잡지
+  못한다”)을 반영해 `test_task_017_rework_label_is_consistent_with_decision_log`를
+  추가했다. `devbot:rework`가 별개 안정 상태로 문서화되어 있는지, ADR 문구가
+  그대로 유지되는지, "working의 review-phase 대기에 해당하는" 같은 잘못된
+  표현이 재도입되지 않는지를 고정한다.
+- **CP-017-2 영향 없음**: Task 계약의 CP-017-2는 `devbot:rework`를 필수
+  목록에 넣지 않았으므로(`ready`/`working`/`review`/`manual-action`/`blocked`/
+  `done` 6개만 필수), 이번 수정은 CP-017-2를 축소하지 않고 기존 6개 정의를
+  그대로 유지한 채 `devbot:rework` 행만 추가했다.
+- **검증**: `uv run ruff check .` 통과, `uv run pytest` 256 passed(신규
+  회귀 테스트 1개 포함, 기존 255개 회귀 없음).
 
 ## Improvement Suggestions
 

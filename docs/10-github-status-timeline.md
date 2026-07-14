@@ -51,15 +51,17 @@ DevBot은 Issue에 아래 `devbot:*` 라벨 중 정확히 하나를 부착한다
 | 라벨 | 의미 |
 |---|---|
 | `devbot:ready` | 작업 대기. 아직 아무도 Issue를 claim하지 않았다. |
-| `devbot:working` | active work 진행 중. dev phase와 review phase를 모두 표현하므로, 지금 진행 중인 것이 dev인지 review인지는 이 라벨만으로는 구분할 수 없고 반드시 comment의 timeline marker(`phase` 필드, 4절)로 구분해야 한다. |
+| `devbot:working` | active work 진행 중. dev phase(구현/수정 실행)와 review phase(자동 리뷰 실행)를 모두 표현하므로, 지금 진행 중인 것이 dev인지 review인지는 이 라벨만으로는 구분할 수 없고 반드시 comment의 timeline marker(`phase` 필드, 4절)로 구분해야 한다. |
 | `devbot:review` | 리뷰 대기 또는 `MERGE READY` 결과를 받아 사람의 Merge를 기다리는 중. |
+| `devbot:rework` | `devbot:working`과는 별개의 안정 상태. 리뷰가 `REQUEST CHANGES`를 남긴 뒤, 구현자가 rework를 claim해 다시 `devbot:working`으로 전이하기 전까지의 대기 상태다("PR feedback waiting for implementer changes", `docs/07-decisions.md` 2026-07-14 결정). 이 대기 구간은 6.3절의 `Wait implementer` 구간과 대응한다. |
 | `devbot:manual-action` | 사람 조치 필요. GitHub metadata 작업, 외부 검증, 또는 Agent의 대화형 승인 대기 때문에 자동 rework 대상에서 제외됨. |
 | `devbot:blocked` | 자동화 실패. 사람이 원인을 확인하고 `devbot:ready`/`devbot:review`/`devbot:rework` 중 하나로 되돌려야 재개된다. |
 | `devbot:done` | 완료. PR이 Merge되어 Issue가 닫혔다. |
 
-이 문서는 라벨 자체를 추가/삭제하지 않는다(Task 017 제외 범위). `devbot:rework`
-(Task 014)는 위 6개 상태 중 `devbot:working`의 review-phase 대기에 해당하는 별도
-안정 상태이며, 라벨 자체의 의미는 `docs/03-state-machine.md`가 정의한 그대로 유지된다.
+이 문서는 라벨 자체를 추가/삭제하지 않는다(Task 017 제외 범위). 위 7개 라벨의 의미와
+전이는 `docs/07-decisions.md`(2026-07-14 "Rework is a separate stable Issue state"
+결정), `docs/03-state-machine.md`, `src/devbot/issue_state.py`의 기존 정의와
+일치하며, 이 문서는 그 정의를 상태 질문 응답 관점에서 재설명할 뿐 바꾸지 않는다.
 
 ---
 
