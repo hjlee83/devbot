@@ -75,3 +75,10 @@
       업데이트한다. Agent가 대화형 승인을 요구한 경우 delivery로 진행하지 않고,
       Issue에 연결된 open PR이 있으면 delivery는 새 `devbot/devbot-*` branch가
       아니라 해당 PR의 head branch를 사용해야 한다.
+- [x] Task 017: GitHub status timeline protocol. DevBot의 현재 상태를 VPS나
+      로컬 로그가 아니라 GitHub Issue/PR/label/comment/check/commit 기준으로
+      일관되게 요약할 수 있도록 상태 타임라인 규격을 문서화한다. Queue, Dev,
+      Wait reviewer, Review, Wait implementer 구간의 시작 시간·종료 시간·소요
+      시간을 모두 표시하고, 사람이 읽는 상태 카드와 기계용 hidden marker 형식을
+      분리해 정의한다(`docs/10-github-status-timeline.md`). marker 자동 기록,
+      `devbot status` CLI, Dashboard/UI는 후속 Task로 남긴다.
