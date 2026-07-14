@@ -1075,6 +1075,91 @@ class PollingService:
                 status=PollingStatus.AGENT_COMPLETED, task=selected, message=delivery_result.message
             )
 
+        if delivery_result.message == "no_repository_changes":
+            if linked_pull_request is not None:
+                # Nothing new to commit, but the Issue already has an open
+                # PR carrying an implementation that just passed
+                # verification again - review can safely resume on that
+                # PR's existing (unchanged) head.
+                try:
+                    self.state_writer.mark_for_review(
+                        repository,
+                        issue,
+                        job_type=JobType.IMPLEMENT,
+                        reason=(
+                            "구현 검증은 통과했지만 신규 repository 변경이 없어 "
+                            f"기존 연결 PR #{linked_pull_request.number}을 유지한 채 review로 복귀"
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001 - must not crash the loop
+                    self.logger.error(
+                        "Review 전환 실패 (%s #%d): %s", selected.repository, selected.number, exc
+                    )
+                    return PollingResult(
+                        status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                    )
+                self.logger.info("Delivery 완료(변경 없음), 기존 PR 유지하며 review로 전환")
+                return PollingResult(
+                    status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
+                )
+
+            # No linked PR and nothing was committed: moving to `review`
+            # would leave the Issue there with no PR to actually review -
+            # the exact "automation silently advances without a real
+            # delivery" failure Task 016 exists to close, just via the
+            # no-op path instead of approval-required.
+            reason = (
+                "구현 검증은 통과했지만 신규 repository 변경도 연결된 PR도 없어 "
+                f"review로 전환하지 않고 manual-action으로 표시함: {delivery_result.message}"
+            )
+            self.logger.error(
+                "변경/PR 없이 review 전환을 막고 manual-action 처리 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                delivery_result.message,
+            )
+            try:
+                self.state_writer.require_manual_action(  # type: ignore[union-attr]
+                    repository, issue, reason, job_type=JobType.IMPLEMENT
+                )
+            except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
+                self.logger.error(
+                    "Manual action 처리 실패 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    exc,
+                )
+                return PollingResult(
+                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                )
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
+            )
+
+        if not delivery_result.pushed or delivery_result.pull_request is None:
+            # e.g. `delivery_branch_invalid`: verification passed, but the
+            # actual push/PR never happened. Never let this silently
+            # advance to `review` - block it like any other delivery
+            # failure instead.
+            self.logger.error(
+                "Push/PR 없이 delivery 종료, blocked 처리 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                delivery_result.message,
+            )
+            block_failure = self._block(
+                repository,
+                issue,
+                f"Delivery 실패: {delivery_result.message}",
+                selected,
+                job_type=JobType.IMPLEMENT,
+            )
+            if block_failure is not None:
+                return block_failure
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
+            )
+
         try:
             self.state_writer.mark_for_review(
                 repository, issue, job_type=JobType.IMPLEMENT, reason="구현 성공"

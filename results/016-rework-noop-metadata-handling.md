@@ -11,6 +11,11 @@
 - `devbot.agents.base`에 `is_approval_required_output()`을 추가하고 IMPLEMENT job(`_run_claimed_implement_job`)에 연결해, Agent output이 대화형 승인 대기로 끝나면(`needs your approval`, `should i proceed`, `approval required` 등) delivery(commit/push/PR)를 실행하지 않고 `devbot:manual-action`으로 전환하도록 했다.
 - `DeliveryService.deliver()`에 `linked_pull_request` 파라미터를 추가했다. Issue에 연결된 open PR이 있으면 새 `devbot/devbot-<issue>-...` branch를 생성/push하지 않고 그 PR의 head branch를 재사용하며, PR을 새로 열지 않고 기존 PR에 댓글만 남긴다. IMPLEMENT job은 delivery 호출 전에 `list_pull_requests` + `find_linked_pull_request`로 linked PR을 best-effort 조회해 이 branch를 넘긴다(조회 실패 시 기존처럼 신규 branch명으로 진행, job을 실패시키지 않음).
 - `DeliveryService.deliver()`에 `has_changes`/`branch_exists` 게이트를 추가했다. clean workspace면 `commit`을 호출하지 않고 `no_repository_changes`로 종료하고(rework 경로와 동일한 보호를 implement 경로에도 적용), push 대상 local branch가 없으면 `git push`를 실행하기 전에 `delivery_branch_invalid`로 종료해 `src refspec ... does not match any`가 사후 `DeliveryError`로 새는 경로를 없앴다. push는 commit이 실제로 성공한 뒤에만 실행된다.
+- `PollingService._run_claimed_implement_job()`의 delivery 결과 처리를 명시적으로 분기했다. 기존에는 `verification.passed`와 `dry_run`만 확인하고 나머지는 무조건 `mark_for_review`를 호출해, `delivery_branch_invalid`(commit은 됐지만 push/PR 없음)나 linked PR 없는 `no_repository_changes`(변경도 PR도 없음)까지 `devbot:review`로 잘못 전환될 수 있었다. 이제:
+  - `no_repository_changes`이면서 linked PR이 있으면: 기존 PR을 유지한 채 `devbot:review`로 복귀(의도된 재검증 케이스).
+  - `no_repository_changes`이면서 linked PR이 없으면: `devbot:manual-action`으로 전환(변경도 PR도 없는데 review로 보내지 않음).
+  - 그 외 `pushed=False` 또는 `pull_request is None`(예: `delivery_branch_invalid`)이면: `devbot:blocked`로 전환.
+  - `pushed=True`이고 `pull_request`가 있을 때만 기존처럼 `devbot:review`로 전환.
 
 ## 수정 파일
 
@@ -46,14 +51,14 @@
 - CP-016-8: 이 Result 문서
 - CP-016-9: `test_approval_required_agent_output_skips_delivery`
 - CP-016-10: `test_delivery_uses_linked_pr_head_branch`, `test_ready_implement_reuses_linked_pr_branch`
-- CP-016-11: `test_delivery_rejects_missing_local_branch_before_push`, `test_local_branch_exists_uses_show_ref`
-- CP-016-12: `test_delivery_does_not_push_when_commit_created_no_changes`
+- CP-016-11: `test_delivery_rejects_missing_local_branch_before_push`, `test_local_branch_exists_uses_show_ref`, `test_implement_delivery_branch_invalid_does_not_mark_review`
+- CP-016-12: `test_delivery_does_not_push_when_commit_created_no_changes`, `test_implement_no_repository_changes_without_pr_does_not_mark_review`, `test_implement_no_repository_changes_with_linked_pr_marks_review`
 
 ## 검증 결과
 
 - `uv sync`: 통과
 - `uv run ruff check .`: 통과
-- `uv run pytest`: 통과, 246 passed (CP-016-9~12 신규 테스트 6개 포함, 기존 240개 회귀 없음)
+- `uv run pytest`: 통과, 249 passed (CP-016-9~12 신규/보강 테스트 9개 포함, 기존 240개 회귀 없음)
 - `uv run devbot --once --dry-run`: `DEVBOT_LOCK_FILE=/tmp/devbot-task016-fix.lock`로 실행. 이번 환경에서는 `api.github.com` 접근이 가능해 정상적으로 관리 저장소를 조회했고 `no_ready_task`로 정상 종료했다(이전 라운드에서 기록된 네트워크 차단은 이번 실행에서는 재현되지 않았다).
 
 ## TODO
@@ -68,6 +73,7 @@
 - `is_approval_required_output()`도 휴리스틱 문자열 매칭이다(`needs your approval`, `should i proceed`, `approval required` 등). Agent가 다른 표현으로 승인을 요청하면 여전히 delivery로 새어나갈 수 있다.
 - linked PR 재사용은 `list_pull_requests` + `find_linked_pull_request`(PR body의 `Closes #N`) 조회에 의존한다. 조회가 실패하면(네트워크 오류 등) IMPLEMENT job은 안전하게 기존 동작(신규 branch명 생성)으로 폴백하지만, 그 경우 CP-016-10이 막으려던 branch 불일치가 다시 발생할 수 있다 - 이 job은 실패시키지 않고 경고 로그만 남기는 trade-off다.
 - delivery의 `branch_exists` 검사는 실제로 체크아웃된 branch가 `target_branch`와 일치하는지까지는 검증하지 않는다(단일 checkout 구조의 기존 제약, Task 016 Risk 섹션에 이미 명시됨). 이는 이번 Task의 범위(Worktree Manager 제외)를 벗어난다.
+- `no_repository_changes` + linked PR 케이스는 "기존 PR 내용이 이미 이번 검증을 통과했다"는 전제로 review에 복귀한다. linked PR의 head가 이번 Agent 실행 이전과 동일한지는 별도로 재확인하지 않으므로, 그 전제가 깨지면(예: PR head가 예상과 다른 상태) review 재진입이 부적절할 수 있다.
 
 ## Improvement Suggestions
 
