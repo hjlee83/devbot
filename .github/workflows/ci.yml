@@ -31,15 +31,15 @@ jobs:
         run: uv run pytest
 
       - name: uv run devbot --once --dry-run
-        run: uv run devbot --once --dry-run
+        run: |
+          cat > config/repositories.yaml <<'EOF'
+          repositories:
+            - owner: hjlee83
+              repo: devbot
+              enabled: false
+              default_branch: main
+          EOF
+          uv run devbot --once --dry-run
         env:
-          # No .env is committed; devbot requires WORKSPACE_ROOT and
-          # GITHUB_TOKEN to start. config/repositories.yaml ships its
-          # sample repository disabled, so no repository path needs to
-          # actually exist and no real GitHub API call is ever made.
-          # --once is required here: bare `uv run devbot` runs the
-          # continuous polling loop and would never return. --dry-run
-          # guarantees no write/commit/push/PR path runs here regardless
-          # of DRY_RUN, matching Task 009's smoke verification command.
           WORKSPACE_ROOT: ${{ runner.temp }}
           GITHUB_TOKEN: ${{ github.token }}
