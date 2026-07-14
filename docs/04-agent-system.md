@@ -41,7 +41,7 @@ Resolution order for each role (`load_config`, see `devbot.config`):
 An agent name that resolves to anything other than `codex`/`claude` fails
 config loading with a `ConfigError` — never a silent fallback.
 
-## Automatic review relay (Task 012)
+## Automatic review relay and state machine (Task 014)
 
 `PollingService.run_cycle()` (see `devbot.polling`) turns `devbot:ready` /
 `devbot:review` Issues into scheduled `Job`s of type `IMPLEMENT`, `REWORK`,
@@ -53,9 +53,12 @@ time, regardless of concurrency.
 
 - A `devbot:review` Issue's linked PR is a `REVIEW` candidate whenever its
   *current* head commit SHA has no auto-review marker comment yet
-  (`devbot.review.has_review_marker_for_head`), and a `REWORK` candidate
-  whenever it has an unprocessed `@devbot` comment (Task 010) — REWORK
-  always outranks REVIEW for the same Issue.
+  (`devbot.review.has_review_marker_for_head`).
+- A `devbot:rework` Issue is a `REWORK` candidate only when its linked PR
+  has an unprocessed `@devbot` comment. `review` and `rework` are separate
+  stable states: review waits for reviewer/merge, rework waits for
+  implementer changes. REWORK still outranks REVIEW and IMPLEMENT in the
+  scheduler.
 - `ReviewService.process()` runs `reviewer_runner`, requires the reviewer's
   output to contain exactly one of the literal strings `MERGE READY` /
   `REQUEST CHANGES` (`AGENTS.md` section 10's `# Review Summary` format —
@@ -67,14 +70,30 @@ time, regardless of concurrency.
   ```
 
   On `REQUEST CHANGES`, the same posted comment also contains a literal
-  `@devbot` mention — no separate mechanism exists for this; the *existing*
-  Task 010 rework path detects it on the next cycle. `MERGE READY` never
-  contains that mention, so it never triggers rework. Both rework and
-  review detection now read the **linked PR's** comments (not the tracked
-  Issue's own comments) — see the `devbot.polling` module docstring.
+  `@devbot` mention and the Issue moves to `devbot:rework`; the rework path
+  detects that comment on the next cycle. `MERGE READY` never contains that
+  mention and the Issue remains `devbot:review`. Both rework and review
+  detection read the **linked PR's** comments (not the tracked Issue's own
+  comments) — see the `devbot.polling` module docstring.
 - Automatic Merge and automatic Issue Close are out of scope for every
   Task through 012; `MERGE READY` leaves the Issue in `devbot:review` for
   a human to merge.
+
+Allowed state transitions are enforced by `IssueStateWriter`:
+
+```text
+ready  -> working -> review
+review -> working -> review
+review -> working -> rework
+rework -> working -> review
+working -> ready|review|rework   # preflight restore to the claimed state
+working -> blocked               # execution, verification, delivery, or unexpected failure
+```
+
+Every successful state write removes all other `devbot:*` state labels
+before adding the target state, so an Issue ends with exactly one state
+label. Concurrent in-process claims for the same repository/Issue are
+rejected before any Agent is run.
 
 The target repository's root `AGENTS.md` is the project-specific source of truth.
 DevBot does not duplicate those rules into its own repository-specific configuration.

@@ -1,15 +1,18 @@
 # Beta Runbook
 
-Task 009 wires Task 001-008's pieces into one flow. Task 010 adds the
-`review`-state rework branch: polled `@devbot` PR feedback reworks the
-existing branch/PR automatically. Task 011 adds a second Agent role
+Task 009 wires Task 001-008's pieces into one flow. Task 010 adds PR
+feedback rework: polled `@devbot` PR feedback reworks the existing
+branch/PR automatically. Task 011 adds a second Agent role
 (reviewer) alongside the implementer. Task 012 turns all of this into a
 per-repository job scheduler (`PollingService.run_cycle()`, see
 `src/devbot/polling.py`) that also actually *runs* the reviewer role, so
 the full ready -> review -> merge relay needs no manual trigger at any
 step except the final Merge. Task 013 adds structured operational
 logging (`src/devbot/observability.py`) so an operator can answer "why did
-(or didn't) the daemon pick up this Issue" from logs alone. This is a
+(or didn't) the daemon pick up this Issue" from logs alone. Task 014 adds
+the explicit `devbot:rework` state and hardens failure recovery so no
+failure path should leave an Issue permanently stuck in `devbot:working`.
+This is a
 manual walkthrough for confirming the flow against a real target
 repository, plus the operational checklist for running DevBot beyond a
 single smoke test.
@@ -27,33 +30,36 @@ Any devbot:working Issue in this repository? --yes--> no candidate this cycle
 no
  |
  v
+Any devbot:rework Issue in this repository?
+ |
+ +--yes--> linked PR has an unprocessed @devbot comment?
+ |          |
+ |          +--yes--> REWORK job (reuses the EXISTING branch/PR, reacts
+ |          |          "eyes" when done) -> devbot:review -> reviewer
+ |          |          re-reviews the new head
+ |          |
+ |          +--no --> no candidate this cycle; remains devbot:rework
+ |
+no rework Issue in this repository
+ |
+ v
 Any devbot:review Issue in this repository?
  |
- +--yes--> its linked PR has an unprocessed @devbot comment?
+ +--yes--> linked PR's current head SHA has no auto-review marker yet?
  |          |
- |          +--yes--> REWORK job (Task 010, unchanged mechanics -
- |          |          reuses the EXISTING branch/PR, reacts "eyes" when
- |          |          done) -> review -> reviewer re-reviews the new head
+ |          +--yes--> REVIEW job:
+ |          |          reviewer_runner runs, posts `# Review Summary` +
+ |          |          `<!-- devbot:auto-review head=... -->` marker.
+ |          |            REQUEST CHANGES -> posted comment contains
+ |          |            "@devbot" and Issue becomes devbot:rework.
+ |          |            MERGE READY -> stays devbot:review, waiting on
+ |          |            a human Merge.
  |          |
- |          +--no --> that PR's current head SHA has no auto-review
- |                     marker yet?
- |                      |
- |                      +--yes--> REVIEW job (Task 012):
- |                      |          reviewer_runner runs, posts
- |                      |          `# Review Summary` + a
- |                      |          `<!-- devbot:auto-review head=... -->`
- |                      |          marker back to the PR.
- |                      |            REQUEST CHANGES -> same comment also
- |                      |            contains "@devbot", so next cycle's
- |                      |            rework branch above picks it up.
- |                      |            MERGE READY -> stays `devbot:review`,
- |                      |            waiting on a human Merge.
- |                      |
- |                      +--no --> fully caught up, no candidate this cycle
+ |          +--no --> fully caught up, no candidate this cycle
  |
- |  (a devbot:review Issue in this repository - rework OR review OR
- |   neither - always blocks a fresh `ready` implementation from
- |   starting in the SAME repository this cycle)
+ |  (a devbot:rework or devbot:review Issue in this repository always
+ |   blocks a fresh `ready` implementation from starting in the SAME
+ |   repository this cycle)
  |
  no review Issue in this repository
  |
@@ -153,11 +159,11 @@ repo's Git history.
 - [ ] Start with `DRY_RUN=true` (or `--dry-run`) in any new environment
       and confirm the full flow's log output looks right before flipping
       to `DRY_RUN=false`.
-- [ ] `review`-state Issues are polled every iteration for both an
-      unprocessed `@devbot` PR comment (Task 010 rework) and an unreviewed
-      PR head commit (Task 012 auto-review) — no manual trigger needed for
-      either. Each *repository* contributes at most one candidate per
-      cycle (rework outranks review outranks a fresh `ready`
+- [ ] `rework`-state Issues are polled every iteration for unprocessed
+      `@devbot` PR comments, and `review`-state Issues are polled for an
+      unreviewed PR head commit — no manual trigger needed for either.
+      Each *repository* contributes at most one candidate per cycle
+      (rework outranks review outranks a fresh `ready`
       implementation); a repository with multiple eligible Issues defers
       the rest to the next cycle, but a slow/stuck repository no longer
       blocks other repositories the way the pre-Task-012 global gate did.
@@ -174,6 +180,15 @@ repo's Git history.
       `devbot:blocked`, the blocking comment names the reviewer failure
       (missing/failed Agent CLI, or a Review Summary that didn't contain
       exactly one of `MERGE READY`/`REQUEST CHANGES`).
+- [ ] If a `devbot:rework` Issue looks stuck, check the linked PR for an
+      unprocessed `@devbot` comment. A processed comment has an `eyes`
+      reaction. If no unprocessed comment exists, either add the missing
+      feedback comment or manually move the Issue back to `devbot:review`
+      after confirming the PR head is ready for review.
+- [ ] If an Issue is `devbot:blocked`, read the blocking comment first.
+      After manual remediation, remove `devbot:blocked` and add the
+      appropriate stable label (`devbot:ready`, `devbot:review`, or
+      `devbot:rework`) based on the point where the workflow should resume.
 
 ## 운영 진단 절차 (Task 013)
 

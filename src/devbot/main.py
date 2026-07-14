@@ -129,7 +129,9 @@ def main(
                 config.implementer_agent, dry_run=config.dry_run
             )
             reviewer_runner = build_agent_runner(config.reviewer_agent, dry_run=config.dry_run)
-            state_writer = IssueStateWriter(client=write_client, dry_run=config.dry_run)
+            state_writer = IssueStateWriter(
+                client=write_client, dry_run=config.dry_run, logger=logger
+            )
             polling_service = PollingService(
                 config=config,
                 github_client=GitHubClient(config.github_token),

@@ -16,3 +16,16 @@ DevBot knows an `AgentRunner` interface. Codex is the first implementation, not 
 ## 2026-07-13 — Contract and quality gates are authored before implementation
 The coordinating GPT writes Task contracts and checkpoint expectations.
 The implementing AI writes code and tests, then opens a PR with evidence.
+
+## 2026-07-14 — Rework is a separate stable Issue state
+Use `devbot:rework` to represent PR feedback waiting for implementer
+changes. `devbot:review` now means reviewer or human merge wait only.
+`REQUEST CHANGES` moves `review -> working -> rework`; successful rework
+moves `rework -> working -> review`.
+
+## 2026-07-14 — Working must be transient
+Any claim that reaches `devbot:working` must either restore the previous
+stable state when preflight fails before Agent execution, or move to
+`devbot:blocked` with a reason after execution, verification, delivery, or
+unexpected failure. State writes normalize all `devbot:*` labels to one
+state label and reject competing in-process claims for the same Issue.

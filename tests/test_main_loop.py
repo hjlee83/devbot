@@ -167,6 +167,7 @@ def test_startup_log_contains_runtime_configuration(
     with (
         caplog.at_level(logging.INFO, logger="devbot"),
         patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle,
+        patch.dict(os.environ, {"IMPLEMENTER_AGENT": "", "REVIEWER_AGENT": ""}, clear=False),
     ):
         mock_run_cycle.return_value = [PollingResult(status=PollingStatus.NO_READY_TASK)]
         main(["--once", "--dry-run"], env_path=env_path, repositories_path=repositories_path)
