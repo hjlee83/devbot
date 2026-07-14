@@ -55,7 +55,7 @@ def _service(
 ) -> tuple[ReviewService, MagicMock, MagicMock, MagicMock]:
     reviewer_runner = reviewer_runner or MagicMock()
     state_writer = state_writer or MagicMock(spec=IssueStateWriter)
-    state_writer.request_changes.return_value = _issue(labels=("devbot:working",))
+    state_writer.claim.return_value = _issue(labels=("devbot:working",))
     write_client = write_client or MagicMock(spec=GitHubWriteClient)
     service = ReviewService(
         state_writer=state_writer,
@@ -92,43 +92,46 @@ def test_no_marker_comments_means_not_yet_reviewed() -> None:
 # --- CP-012-5 / CP-012-6: REQUEST CHANGES vs MERGE READY -----------------
 
 
-def test_request_changes_review_comment_triggers_rework() -> None:
-    """CP-012-5: a REQUEST CHANGES Review Summary's posted comment contains
-    the literal `@devbot` mention, so the existing Task 010 rework path
-    picks it up on the next cycle."""
+def test_request_changes_moves_issue_from_review_to_rework() -> None:
+    """CP-014-2: REQUEST CHANGES moves the Issue from review claim to the
+    explicit `devbot:rework` state."""
     reviewer_runner = MagicMock()
     reviewer_runner.run.return_value = AgentRunResult(
         executed=True,
         dry_run=False,
         message="# Review Summary\n\n## 상태\n\n- REQUEST CHANGES\n\n블로커가 있습니다.",
     )
-    service, _, _, write_client = _service(reviewer_runner=reviewer_runner)
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
 
     result = _process(service)
 
     assert result.status == "REQUEST CHANGES"
-    assert result.issue_state is TaskState.REVIEW
+    assert result.issue_state is TaskState.REWORK
+    state_writer.send_to_rework.assert_called_once()
+    state_writer.mark_for_review.assert_not_called()
     write_client.create_comment.assert_called_once()
     _, _, posted_body = write_client.create_comment.call_args.args
     assert "@devbot" in posted_body
     assert build_review_marker(HEAD_SHA) in posted_body
 
 
-def test_merge_ready_review_comment_does_not_trigger_rework() -> None:
-    """CP-012-6: a MERGE READY Review Summary's posted comment must not
-    contain `@devbot` - it must never accidentally trigger rework."""
+def test_merge_ready_keeps_issue_in_review_state() -> None:
+    """CP-014-2: MERGE READY keeps the Issue in `devbot:review` and does
+    not create a rework trigger."""
     reviewer_runner = MagicMock()
     reviewer_runner.run.return_value = AgentRunResult(
         executed=True,
         dry_run=False,
         message="# Review Summary\n\n## 상태\n\n- MERGE READY\n\n문제 없습니다.",
     )
-    service, _, _, write_client = _service(reviewer_runner=reviewer_runner)
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
 
     result = _process(service)
 
     assert result.status == "MERGE READY"
     assert result.issue_state is TaskState.REVIEW
+    state_writer.mark_for_review.assert_called_once()
+    state_writer.send_to_rework.assert_not_called()
     _, _, posted_body = write_client.create_comment.call_args.args
     assert "@devbot" not in posted_body
     assert build_review_marker(HEAD_SHA) in posted_body
@@ -211,7 +214,7 @@ def test_review_polling_dry_run_has_no_side_effects() -> None:
 
     assert result.issue_state is TaskState.REVIEW
     reviewer_runner.run.assert_not_called()
-    state_writer.request_changes.assert_not_called()
+    state_writer.claim.assert_not_called()
     state_writer.block.assert_not_called()
     state_writer.mark_for_review.assert_not_called()
     write_client.create_comment.assert_not_called()
@@ -229,7 +232,7 @@ def test_successful_review_claims_and_returns_issue_to_review() -> None:
 
     result = _process(service)
 
-    state_writer.request_changes.assert_called_once()
+    state_writer.claim.assert_called_once()
     state_writer.mark_for_review.assert_called_once()
     assert result.issue_state is TaskState.REVIEW
 
@@ -264,17 +267,14 @@ def test_state_transition_failure_after_posting_comment_is_not_silently_lost() -
         executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
     )
     state_writer = MagicMock(spec=IssueStateWriter)
-    state_writer.request_changes.return_value = _issue(labels=("devbot:working",))
+    state_writer.claim.return_value = _issue(labels=("devbot:working",))
     state_writer.mark_for_review.side_effect = RuntimeError("GitHub API 오류")
     service, _, _, write_client = _service(
         reviewer_runner=reviewer_runner, state_writer=state_writer
     )
 
-    try:
-        _process(service)
-        raised = False
-    except RuntimeError:
-        raised = True
+    result = _process(service)
 
-    assert raised is True
+    assert result.issue_state is TaskState.BLOCKED
+    state_writer.block.assert_called_once()
     write_client.create_comment.assert_called_once()

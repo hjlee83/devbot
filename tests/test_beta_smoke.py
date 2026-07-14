@@ -179,7 +179,10 @@ def test_select_ready_issue() -> None:
 
     assert result.task is not None
     assert (result.task.repository, result.task.number) == (repo.full_name, 7)
-    state_writer.claim.assert_called_once_with(repo, issue)
+    state_writer.claim.assert_called_once()
+    claim_args, claim_kwargs = state_writer.claim.call_args
+    assert claim_args == (repo, issue)
+    assert claim_kwargs["job_type"].value == "implement"
 
 
 def test_agent_runner_called() -> None:
@@ -258,9 +261,10 @@ def test_delivery_after_verification() -> None:
 
     state_writer = MagicMock(spec=IssueStateWriter)
     state_writer.claim.return_value = working_issue
-    state_writer.mark_for_review.side_effect = lambda repository, issue_arg: call_order.append(
-        "mark_for_review"
-    )
+    def _mark_for_review(repository, issue_arg, **_kwargs):
+        call_order.append("mark_for_review")
+
+    state_writer.mark_for_review.side_effect = _mark_for_review
 
     def _run_agent(repository, prompt):
         call_order.append("agent")
@@ -461,7 +465,11 @@ def test_move_to_review() -> None:
 
     result = service.run_once()
 
-    state_writer.mark_for_review.assert_called_once_with(repo, working_issue)
+    state_writer.mark_for_review.assert_called_once()
+    review_args, review_kwargs = state_writer.mark_for_review.call_args
+    assert review_args == (repo, working_issue)
+    assert review_kwargs["job_type"].value == "implement"
+    assert review_kwargs["reason"] == "구현 성공"
     assert result.status is PollingStatus.DELIVERED
 
 

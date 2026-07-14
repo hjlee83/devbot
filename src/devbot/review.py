@@ -208,16 +208,32 @@ class ReviewService:
         # state instead of staying `devbot:review` - Task 010's rework
         # detection still keys off the `@devbot` mention in the posted
         # comment above, unchanged.
-        if status == _REQUEST_CHANGES:
-            self.state_writer.send_to_rework(
-                repository, working_issue, job_type=JobType.REVIEW, reason="REQUEST CHANGES 게시 완료"
+        try:
+            if status == _REQUEST_CHANGES:
+                self.state_writer.send_to_rework(
+                    repository,
+                    working_issue,
+                    job_type=JobType.REVIEW,
+                    reason="REQUEST CHANGES 게시 완료",
+                )
+                issue_state = TaskState.REWORK
+            else:
+                self.state_writer.mark_for_review(
+                    repository,
+                    working_issue,
+                    job_type=JobType.REVIEW,
+                    reason="MERGE READY 게시 완료",
+                )
+                issue_state = TaskState.REVIEW
+        except Exception as exc:  # noqa: BLE001 - visible comment already posted; block the claim
+            reason = f"리뷰 결과 게시 후 상태 전이 실패: {exc!r}"
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
+            return ReviewResult(
+                triggered=True,
+                status=status,
+                issue_state=TaskState.BLOCKED,
+                message="blocked: review state transition failed",
             )
-            issue_state = TaskState.REWORK
-        else:
-            self.state_writer.mark_for_review(
-                repository, working_issue, job_type=JobType.REVIEW, reason="MERGE READY 게시 완료"
-            )
-            issue_state = TaskState.REVIEW
 
         return ReviewResult(
             triggered=True,

@@ -51,9 +51,10 @@ def _service(
     commit: MagicMock | None = None,
     push: MagicMock | None = None,
     current_branch=None,
-) -> tuple[ReworkService, MagicMock, MagicMock]:
+) -> tuple[ReworkService, IssueStateWriter | MagicMock, MagicMock]:
     state_writer = state_writer or MagicMock(spec=IssueStateWriter)
-    state_writer.claim.return_value = _issue(labels=("devbot:working",))
+    if isinstance(state_writer, MagicMock):
+        state_writer.claim.return_value = _issue(labels=("devbot:working",))
     write_client = write_client or MagicMock(spec=GitHubWriteClient)
     service = ReworkService(
         state_writer=state_writer,
@@ -259,8 +260,10 @@ def test_execution_failure_moves_issue_to_blocked_with_reason() -> None:
     result = service.process(repository, _issue(), BRANCH, [_comment()])
 
     assert result.issue_state == TaskState.BLOCKED
-    write_client.set_labels.assert_called_once_with(
-        repository, _issue().number, ["devbot:blocked"]
+    assert write_client.set_labels.call_args_list[-1].args == (
+        repository,
+        _issue().number,
+        ["devbot:blocked"],
     )
     posted_reason = write_client.create_comment.call_args.args[2]
     assert "AssertionError: boom" in posted_reason

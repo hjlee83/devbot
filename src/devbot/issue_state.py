@@ -257,7 +257,9 @@ class IssueStateWriter:
         """Move a `working` Issue to `review`: after a successful
         implementation, a successful rework, or a `MERGE READY` automatic
         review."""
-        return self._transition(repository, issue, TaskState.REVIEW, job_type=job_type, reason=reason)
+        return self._transition(
+            repository, issue, TaskState.REVIEW, job_type=job_type, reason=reason
+        )
 
     def send_to_rework(
         self,
@@ -269,4 +271,6 @@ class IssueStateWriter:
     ) -> GitHubIssue:
         """Move a `working` Issue to `rework`: an automatic review posted
         `REQUEST CHANGES` (CP-014-2)."""
-        return self._transition(repository, issue, TaskState.REWORK, job_type=job_type, reason=reason)
+        return self._transition(
+            repository, issue, TaskState.REWORK, job_type=job_type, reason=reason
+        )

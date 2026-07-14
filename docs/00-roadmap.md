@@ -55,7 +55,7 @@
       (`src/devbot/observability.py`)로 Secret·Authorization 노출과 로깅
       예외로 인한 Job 실행 중단을 모두 방지했다. Task 012의 자동화·우선순위·
       concurrency 동작은 변경하지 않았다.
-- [ ] Task 014: workflow state machine hardening. `devbot:rework` 상태를
+- [x] Task 014: workflow state machine hardening. `devbot:rework` 상태를
       도입해 리뷰 대기와 수정 대기를 분리하고, claim 이후 사전 검증 실패·
       실행 실패·예상하지 못한 예외에서도 Issue가 `devbot:working`에 영구
       정체되지 않도록 이전 안정 상태 복구 또는 `devbot:blocked` 전이를

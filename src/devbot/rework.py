@@ -244,9 +244,25 @@ class ReworkService:
                 message="blocked: commit/push/reaction failed",
             )
 
-        self.state_writer.mark_for_review(
-            repository, working_issue, job_type=JobType.REWORK, reason="rework 성공"
-        )
+        try:
+            self.state_writer.mark_for_review(
+                repository, working_issue, job_type=JobType.REWORK, reason="rework 성공"
+            )
+        except Exception as exc:  # noqa: BLE001 - commit/push already happened; block the claim
+            reason = f"rework 성공 후 review 상태 전이 실패: {exc!r}"
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=verification,
+                issue_state=TaskState.BLOCKED,
+                code_changed=True,
+                verification_passed=True,
+                committed=True,
+                pushed=True,
+                pr_reused=True,
+                message="blocked: review transition failed",
+            )
 
         return ReworkResult(
             triggered=True,

@@ -22,7 +22,7 @@ def _task(
     )
 
 
-def test_rework_job_has_highest_priority() -> None:
+def test_state_machine_preserves_job_priority_and_concurrency() -> None:
     """CP-012-7: a REWORK candidate is selected over REVIEW/IMPLEMENT
     candidates even when it loses on every secondary ordering axis
     (priority label, age, Issue number) - job type dominates."""

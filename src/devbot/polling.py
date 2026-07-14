@@ -517,7 +517,10 @@ class PollingService:
                             issue_number=ready_task.number,
                             reason=ExclusionReason.ISSUE_BUSY,
                             job_type=JobType.IMPLEMENT,
-                            detail="저장소에 devbot:rework 또는 devbot:review Issue가 워크스페이스를 점유 중",
+                            detail=(
+                                "저장소에 devbot:rework 또는 devbot:review Issue가 "
+                                "워크스페이스를 점유 중"
+                            ),
                         ),
                     )
                 continue
@@ -679,7 +682,8 @@ class PollingService:
                 for task in tasks
             ):
                 self.logger.info(
-                    "이미 진행 중인(working/review/rework) Issue가 있어 새 작업을 선택하지 않습니다."
+                    "이미 진행 중인(working/review/rework) Issue가 있어 "
+                    "새 작업을 선택하지 않습니다."
                 )
                 results = [PollingResult(status=PollingStatus.SKIPPED_ACTIVE_TASK)]
             else:
@@ -749,7 +753,10 @@ class PollingService:
             return self._run_claimed_implement_job(repository, selected, issue, cycle_id)
         except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working` behind
             self.logger.error(
-                "예상하지 못한 예외로 Job 중단 (%s #%d): %s", selected.repository, selected.number, exc
+                "예상하지 못한 예외로 Job 중단 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
             )
             block_failure = self._block(
                 repository,
@@ -947,8 +954,17 @@ class PollingService:
             self.logger.error(
                 "Delivery 실패 (%s #%d): %s", selected.repository, selected.number, exc
             )
+            block_failure = self._block(
+                repository,
+                issue,
+                f"Delivery 실패: {exc!r}",
+                selected,
+                job_type=JobType.IMPLEMENT,
+            )
+            if block_failure is not None:
+                return block_failure
             return PollingResult(
-                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                status=PollingStatus.BLOCKED, task=selected, message=str(exc)
             )
         finally:
             observability.log_stage(
