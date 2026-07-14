@@ -61,8 +61,10 @@
       정체되지 않도록 이전 안정 상태 복구 또는 `devbot:blocked` 전이를
       보장한다. 상태 라벨 단일성, 경쟁 claim 방지, 동일 피드백 중복 방지,
       기존 우선순위와 concurrency 회귀 방지를 포함한다.
-- [ ] Task 015: review gate standardization. 리뷰어가 어떤 Agent로 바뀌어도
+- [x] Task 015: review gate standardization. 리뷰어가 어떤 Agent로 바뀌어도
       동일한 `MERGE READY` / `REQUEST CHANGES` 기준을 적용하도록
       `AGENTS.md`, Task 계약 표준, 자동 리뷰 프롬프트, 테스트에 엄격한 검증
       게이트를 고정한다. PR Evidence, Result, CI, Task 계약, 운영 정책이
-      하나라도 불일치하면 `REQUEST CHANGES`로 판단한다.
+      하나라도 불일치하면 `REQUEST CHANGES`로 판단하며, 이 기준은 구현 관여
+      여부와 관계없이 모든 리뷰어에게 기본으로 적용되고 구현 관여 리뷰어는
+      추가로 더 엄격하게 evidence를 확인한다.
