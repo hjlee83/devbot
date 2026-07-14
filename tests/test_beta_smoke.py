@@ -475,6 +475,7 @@ def test_reuse_existing_pr() -> None:
         created_at=datetime(2026, 1, 2),
         reactions={},
     )
+    branch = generate_branch_name(repo, 3, "Add feature")
     rework_service = ReworkService(
         state_writer=state_writer,
         write_client=write_client,
@@ -482,8 +483,8 @@ def test_reuse_existing_pr() -> None:
         run_verification=lambda repository: VerificationResult(passed=True),
         commit=MagicMock(),
         push=MagicMock(),
+        current_branch=lambda repository: branch,
     )
-    branch = generate_branch_name(repo, 3, "Add feature")
 
     rework_result = rework_service.process(repo, review_issue, branch, [comment])
 

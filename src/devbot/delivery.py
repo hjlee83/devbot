@@ -112,6 +112,24 @@ def push_task_branch(repository: RepositoryConfig, branch: str) -> None:
     _run_git(repository, "push", "origin", f"{branch}:{branch}")
 
 
+def current_git_branch(repository: RepositoryConfig) -> str:
+    """Return the branch currently checked out in `repository.local_path`
+    (the literal string `"HEAD"` if the checkout is detached)."""
+    completed = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(repository.local_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise DeliveryError(
+            f"git rev-parse --abbrev-ref HEAD failed in {repository.local_path}: "
+            f"{completed.stderr or completed.stdout}"
+        )
+    return completed.stdout.strip()
+
+
 def build_pr_body(issue: GitHubIssue, checkpoint_evidence: Sequence[CheckpointEvidence]) -> str:
     """Render a PR body that closes the Issue and lists every checkpoint's
     test-name mapping and result."""
@@ -131,6 +149,7 @@ def build_pr_body(issue: GitHubIssue, checkpoint_evidence: Sequence[CheckpointEv
 RunVerificationFn = Callable[[RepositoryConfig], VerificationResult]
 CommitFn = Callable[[RepositoryConfig, str], None]
 PushFn = Callable[[RepositoryConfig, str], None]
+CurrentBranchFn = Callable[[RepositoryConfig], str]
 
 
 @dataclass

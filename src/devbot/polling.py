@@ -17,6 +17,7 @@ caller that doesn't need the write path working unchanged.
 from __future__ import annotations
 
 import logging
+import re
 import signal
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -25,7 +26,7 @@ from enum import Enum
 
 from devbot.agents.base import AgentRunner
 from devbot.delivery import DeliveryService
-from devbot.github_client import GitHubClient, GitHubIssue
+from devbot.github_client import GitHubClient, GitHubIssue, PullRequest
 from devbot.issue_state import IssueStateWriter
 from devbot.models import (
     DevBotConfig,
@@ -36,6 +37,7 @@ from devbot.models import (
     TaskState,
 )
 from devbot.queue import has_active_task, select_global_ready_task
+from devbot.rework import ReworkService, find_unprocessed_devbot_comments
 from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
@@ -58,6 +60,7 @@ class PollingStatus(Enum):
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
     DELIVERED = "delivered"
+    REWORKED = "reworked"
     BLOCKED = "blocked"
     ITERATION_ERROR = "iteration_error"
 
@@ -103,6 +106,29 @@ def issue_to_task(issue: GitHubIssue) -> IssueTask | None:
     )
 
 
+_CLOSING_KEYWORD_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)\b", re.IGNORECASE
+)
+
+
+def find_linked_pull_request(
+    issue: GitHubIssue, pull_requests: Iterable[PullRequest]
+) -> PullRequest | None:
+    """Return the open PR that closes `issue`, identified the same way
+    GitHub's own "Development" linking does: a closing keyword (`Closes
+    #N`, `Fixes #N`, `Resolves #N`, ...) referencing the Issue's number in
+    the PR body. `delivery.build_pr_body()` always writes `Closes #N`, so
+    every PR DevBot itself opens is found this way; this also finds a
+    manually-opened PR that uses the same convention."""
+    for pull_request in pull_requests:
+        referenced_numbers = {
+            int(match) for match in _CLOSING_KEYWORD_RE.findall(pull_request.body)
+        }
+        if issue.number in referenced_numbers:
+            return pull_request
+    return None
+
+
 SelectTaskFn = Callable[[Iterable[IssueTask], Iterable[RepositoryConfig]], IssueTask | None]
 EnsureWorkspaceFn = Callable[[RepositoryConfig], None]
 BuildPromptFn = Callable[[RepositoryConfig, GitHubIssue, Sequence[IssueComment]], str]
@@ -128,6 +154,7 @@ class PollingService:
     build_prompt: BuildPromptFn = field(default=build_agent_prompt)
     state_writer: IssueStateWriter | None = None
     delivery: DeliveryService | None = None
+    rework_service: ReworkService | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
     def _block(
@@ -174,6 +201,11 @@ class PollingService:
             return PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))
 
         if has_active_task(tasks):
+            review_tasks = [task for task in tasks if task.state == TaskState.REVIEW]
+            working_exists = any(task.state == TaskState.WORKING for task in tasks)
+            if not working_exists and review_tasks and self.rework_service is not None:
+                return self._process_review_task(repositories, issues_by_key, review_tasks[0])
+
             self.logger.info(
                 "이미 진행 중인(working/review) Issue가 있어 새 작업을 선택하지 않습니다."
             )
@@ -227,7 +259,7 @@ class PollingService:
 
         try:
             agent_result = self.agent_runner.run(repository, prompt)
-        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+        except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): %s", selected.repository, selected.number, exc
             )
@@ -313,6 +345,100 @@ class PollingService:
         self.logger.info("Delivery 완료, review로 전환: %s", delivery_result.message)
         return PollingResult(
             status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
+        )
+
+    def _process_review_task(
+        self,
+        repositories: Sequence[RepositoryConfig],
+        issues_by_key: dict[tuple[str, int], GitHubIssue],
+        selected: IssueTask,
+    ) -> PollingResult:
+        self.logger.info(
+            "Review Issue 확인: %s #%d (%s)", selected.repository, selected.number, selected.title
+        )
+        repository = next(repo for repo in repositories if repo.full_name == selected.repository)
+
+        try:
+            self.ensure_workspace_ready(repository)
+        except WorkspaceValidationError as exc:
+            self.logger.error(
+                "워크스페이스 검증 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.WORKSPACE_INVALID, task=selected, message=str(exc)
+            )
+
+        issue = issues_by_key[(selected.repository, selected.number)]
+        try:
+            comments = self.github_client.list_issue_comments(repository, issue.number)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "Review 댓글 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        if not find_unprocessed_devbot_comments(comments):
+            self.logger.info("처리할 @devbot review 댓글이 없습니다.")
+            return PollingResult(
+                status=PollingStatus.SKIPPED_ACTIVE_TASK,
+                task=selected,
+                message="no unprocessed @devbot comments",
+            )
+
+        try:
+            pull_requests = self.github_client.list_pull_requests(repository)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "PR 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        linked_pull_request = find_linked_pull_request(issue, pull_requests)
+        if linked_pull_request is None:
+            self.logger.error(
+                "review Issue에 연결된 PR을 찾지 못했습니다 (%s #%d)",
+                selected.repository,
+                selected.number,
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR,
+                task=selected,
+                message=f"No linked pull request found for Issue #{issue.number}",
+            )
+
+        try:
+            rework_result = self.rework_service.process(  # type: ignore[union-attr]
+                repository, issue, linked_pull_request.head_ref, comments
+            )
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "Rework 처리 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
+        if not rework_result.triggered:
+            self.logger.info("처리할 @devbot review 댓글이 없습니다.")
+            return PollingResult(
+                status=PollingStatus.SKIPPED_ACTIVE_TASK,
+                task=selected,
+                message=rework_result.message,
+            )
+
+        if rework_result.issue_state is TaskState.BLOCKED:
+            self.logger.error("Rework 실패로 blocked 처리: %s", rework_result.message)
+            return PollingResult(
+                status=PollingStatus.BLOCKED, task=selected, message=rework_result.message
+            )
+
+        self.logger.info("Rework 완료: %s", rework_result.message)
+        return PollingResult(
+            status=PollingStatus.REWORKED, task=selected, message=rework_result.message
         )
 
 

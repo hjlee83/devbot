@@ -31,14 +31,16 @@ uv run devbot --once --dry-run   # same, but force dry-run regardless of DRY_RUN
 uv run devbot                    # continuous polling until SIGINT/SIGTERM
 ```
 
-Each iteration: skip if any repository has a `devbot:working`/`devbot:review`
-Issue, otherwise select the highest-priority (then oldest) `devbot:ready`
-Issue across every enabled repository, validate its local Git workspace,
-claim it (`ready` -> `working`), and hand it to the configured
-`AgentRunner`. On success, verify (`uv run ruff check .` then `uv run
-pytest` in the target repository), commit, push the task branch, open a
-PR, and move the Issue to `review`. On agent or verification failure, move
-the Issue to `blocked` with the failure as a comment. `DRY_RUN=true` (the
+Each iteration: if any repository has a `devbot:working` Issue, skip. If a
+`devbot:review` Issue has an unprocessed `@devbot` PR comment, rework it
+on the *existing* branch/PR (no new branch or PR); if it has none, wait.
+Otherwise select the highest-priority (then oldest) `devbot:ready` Issue
+across every enabled repository, validate its local Git workspace, claim
+it (`ready` -> `working`), and hand it to the configured `AgentRunner`. On
+success, verify (`uv run ruff check .` then `uv run pytest` in the target
+repository), commit, push the task branch, open a PR, and move the Issue
+to `review`. On agent or verification failure (either path), move the
+Issue to `blocked` with the failure as a comment. `DRY_RUN=true` (the
 default; `--dry-run` forces it) still runs verification but performs no
 agent process, Git write, or GitHub write. See
 `docs/08-beta-runbook.md` for a walkthrough and an operational checklist.

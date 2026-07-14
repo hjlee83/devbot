@@ -4,9 +4,13 @@ from unittest.mock import MagicMock, patch
 
 from devbot.agents.base import AgentRunResult
 from devbot.agents.codex import CodexRunner
-from devbot.github_client import GitHubIssue
-from devbot.models import DevBotConfig, RepositoryConfig
+from devbot.delivery import VerificationResult
+from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
+from devbot.github_write_client import GitHubWriteClient
+from devbot.issue_state import IssueStateWriter
+from devbot.models import DevBotConfig, RepositoryConfig, TaskState
 from devbot.polling import PollingService, PollingStatus
+from devbot.rework import ReworkService
 from devbot.workspace import WorkspaceValidationError
 
 
@@ -16,16 +20,30 @@ class FakeGitHubClient:
     def __init__(
         self,
         issues_by_repo: dict[str, list[GitHubIssue]] | None = None,
+        comments_by_issue: dict[tuple[str, int], list[PullRequestComment]] | None = None,
+        pull_requests_by_repo: dict[str, list[PullRequest]] | None = None,
         *,
         error: Exception | None = None,
     ) -> None:
         self._issues_by_repo = issues_by_repo or {}
+        self._comments_by_issue = comments_by_issue or {}
+        self._pull_requests_by_repo = pull_requests_by_repo or {}
         self._error = error
 
     def list_issues(self, repository: RepositoryConfig, *, state: str = "open", **_kwargs: object):
         if self._error is not None:
             raise self._error
         return self._issues_by_repo.get(repository.full_name, [])
+
+    def list_issue_comments(self, repository: RepositoryConfig, issue_number: int):
+        if self._error is not None:
+            raise self._error
+        return self._comments_by_issue.get((repository.full_name, issue_number), [])
+
+    def list_pull_requests(self, repository: RepositoryConfig, **_kwargs: object):
+        if self._error is not None:
+            raise self._error
+        return self._pull_requests_by_repo.get(repository.full_name, [])
 
 
 def _repo(name: str, *, enabled: bool = True) -> RepositoryConfig:
@@ -52,6 +70,32 @@ def _issue(
         state=state,
         labels=tuple(labels),
         created_at=created_at or datetime(2026, 1, 1),
+    )
+
+
+def _pull_request(
+    number: int, *, issue_number: int, head_ref: str = "devbot/existing-branch"
+) -> PullRequest:
+    return PullRequest(
+        number=number,
+        head_ref=head_ref,
+        body=f"Closes #{issue_number}",
+        html_url=f"https://github.com/someone/myrepo/pull/{number}",
+    )
+
+
+def _comment(
+    *,
+    comment_id: int = 1,
+    body: str = "@devbot please update this",
+    reactions: dict[str, int] | None = None,
+) -> PullRequestComment:
+    return PullRequestComment(
+        id=comment_id,
+        author="reviewer",
+        body=body,
+        created_at=datetime(2026, 1, 2),
+        reactions=reactions or {},
     )
 
 
@@ -100,6 +144,349 @@ def test_iteration_skips_when_review_task_exists() -> None:
 
     assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
     agent_runner.run.assert_not_called()
+
+
+def test_processed_review_comment_is_not_reworked_again() -> None:
+    """CP-010-4: a comment already marked processed (an `eyes` reaction)
+    must not trigger another rework cycle. Uses a *real* `ReworkService`
+    (not a mock) so `find_unprocessed_devbot_comments`'s actual filtering
+    is what's under test, not just the polling glue around a canned
+    result."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 1, labels=["devbot:review"])
+    processed_comment = _comment(reactions={"eyes": 1})
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 1): [processed_comment]},
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    rework_service = ReworkService(
+        state_writer=state_writer, write_client=write_client, apply_changes=MagicMock()
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
+    write_client.set_labels.assert_not_called()
+
+
+def test_polling_detects_unprocessed_devbot_review_comment() -> None:
+    """CP-010-1: a `review` Issue's unprocessed `@devbot` comment is
+    detected and handed to `ReworkService.process()` along with the
+    Issue's actual linked PR's head branch (looked up via
+    `list_pull_requests`, not recomputed)."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=3)
+    linked_pr = _pull_request(101, issue_number=7, head_ref="devbot/myrepo-7-fix-bug")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    rework_service.process.return_value = MagicMock(
+        triggered=True, issue_state=TaskState.REVIEW, message="reworked"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REWORKED
+    rework_service.process.assert_called_once()
+    (
+        called_repository,
+        called_issue,
+        called_branch,
+        called_comments,
+    ) = rework_service.process.call_args.args
+    assert called_repository == repo
+    assert called_issue == review_issue
+    assert called_branch == "devbot/myrepo-7-fix-bug"
+    assert called_comments == [comment]
+
+
+def test_rework_is_prioritized_over_ready_task() -> None:
+    """CP-010-2: when a `review` Issue with an unprocessed `@devbot`
+    comment and a `ready` Issue are both available, rework runs and the
+    `ready` Issue is never even selected."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    ready_issue = _issue(repo.full_name, 8, labels=["devbot:ready"], title="New feature")
+    comment = _comment(comment_id=3)
+    linked_pr = _pull_request(101, issue_number=7)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue, ready_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    rework_service.process.return_value = MagicMock(
+        triggered=True, issue_state=TaskState.REVIEW, message="reworked"
+    )
+    agent_runner = MagicMock()
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REWORKED
+    rework_service.process.assert_called_once()
+    agent_runner.run.assert_not_called()
+
+
+def test_rework_reuses_existing_branch_and_pull_request() -> None:
+    """CP-010-3: the polled path identifies the Issue's *actual* linked PR
+    (via `list_pull_requests` + `find_linked_pull_request`, matched on the
+    `Closes #N` convention) and reuses its real head branch - not a
+    recomputed/guessed name - and never opens a new pull request. The
+    linked PR's head branch is deliberately different from what
+    `generate_branch_name` would produce, so this only passes if the real
+    lookup (not a naive recompute) is what's driving `push`."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=3)
+    actual_pr_head = "devbot/myrepo-7-renamed-branch"
+    linked_pr = _pull_request(101, issue_number=7, head_ref=actual_pr_head)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    push = MagicMock()
+    rework_service = ReworkService(
+        state_writer=state_writer,
+        write_client=write_client,
+        apply_changes=MagicMock(),
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=MagicMock(),
+        push=push,
+        current_branch=lambda repository: actual_pr_head,
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REWORKED
+    push.assert_called_once_with(repo, actual_pr_head)
+    write_client.create_pull_request.assert_not_called()
+
+
+def test_successful_polled_rework_returns_to_review() -> None:
+    """CP-010-5: a rework whose resulting `issue_state` is `review` is
+    reported as `PollingStatus.REWORKED`."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=3)
+    linked_pr = _pull_request(101, issue_number=7)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    rework_service.process.return_value = MagicMock(
+        triggered=True, issue_state=TaskState.REVIEW, message="reworked"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REWORKED
+    assert result.message == "reworked"
+
+
+def test_ready_polling_still_runs_when_no_rework_exists() -> None:
+    """CP-010-7: with `rework_service` configured but no `review` Issues
+    at all, ordinary `ready` selection runs exactly as before Task 010."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    ready_issue = _issue(repo.full_name, 7, labels=["devbot:ready"], title="Fix bug")
+    github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
+    rework_service = MagicMock(spec=ReworkService)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_COMPLETED
+    rework_service.process.assert_not_called()
+    agent_runner.run.assert_called_once()
+
+
+def test_rework_polling_dry_run_has_no_side_effects() -> None:
+    """CP-010-8: a dry-run rework triggered through the polling loop makes
+    no GitHub write and no commit/push."""
+    repo = _repo("myrepo")
+    config = _config([repo], dry_run=True)
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=3)
+    linked_pr = _pull_request(101, issue_number=7, head_ref="devbot/myrepo-7-fix-bug")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=True)
+    commit = MagicMock()
+    push = MagicMock()
+    rework_service = ReworkService(
+        state_writer=state_writer,
+        write_client=write_client,
+        apply_changes=MagicMock(),
+        dry_run=True,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=commit,
+        push=push,
+        current_branch=lambda repository: "devbot/myrepo-7-fix-bug",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    service.run_once()
+
+    write_client.set_labels.assert_not_called()
+    write_client.create_comment.assert_not_called()
+    write_client.add_reaction_to_comment.assert_not_called()
+    write_client.create_pull_request.assert_not_called()
+    commit.assert_not_called()
+    push.assert_not_called()
+
+
+def test_failed_polled_rework_moves_to_blocked_with_reason() -> None:
+    """CP-010-6: the polling layer must key off the structured
+    `issue_state` field, not a magic `message == "blocked"` string - so a
+    rework blocked for any reason (branch mismatch, Agent failure,
+    verification failure, ...) reports `PollingStatus.BLOCKED` with the
+    reason in `message`."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 9, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=5)
+    linked_pr = _pull_request(101, issue_number=9)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 9): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    rework_service.process.return_value = MagicMock(
+        triggered=True, issue_state=TaskState.BLOCKED, message="blocked: branch mismatch"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    assert result.message == "blocked: branch mismatch"
+
+
+def test_review_issue_without_linked_pull_request_is_reported_as_error() -> None:
+    """A `review` Issue with an unprocessed `@devbot` comment but no PR
+    whose body references it (an anomalous data-integrity state - a real
+    `review` Issue should always have one, opened by `DeliveryService`)
+    must not silently guess a branch name; it's reported as a structured
+    failure instead."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=3)
+    unrelated_pr = _pull_request(101, issue_number=999)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+        pull_requests_by_repo={repo.full_name: [unrelated_pr]},
+    )
+    rework_service = MagicMock(spec=ReworkService)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.ITERATION_ERROR
+    rework_service.process.assert_not_called()
+
+
+def test_working_issue_blocks_rework_even_when_review_exists() -> None:
+    repo = _repo("myrepo")
+    config = _config([repo])
+    working_issue = _issue(repo.full_name, 1, labels=["devbot:working"])
+    review_issue = _issue(repo.full_name, 2, labels=["devbot:review"])
+    github_client = FakeGitHubClient({repo.full_name: [working_issue, review_issue]})
+    rework_service = MagicMock(spec=ReworkService)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=MagicMock(),
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
+    rework_service.process.assert_not_called()
 
 
 def test_iteration_selects_one_ready_issue() -> None:
@@ -234,6 +621,30 @@ def test_iteration_reports_agent_failure() -> None:
     github_client = FakeGitHubClient({repo.full_name: [issue]})
     agent_runner = MagicMock()
     agent_runner.run.side_effect = RuntimeError("agent crashed")
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        agent_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_FAILED
+    assert result.task is not None
+
+
+def test_iteration_reports_agent_keyboard_interrupt_as_failure() -> None:
+    """A `KeyboardInterrupt` raised while the Agent is running must be
+    treated the same as any other Agent failure - reported and (when the
+    write path is wired up) blocked - never left to crash the polling
+    loop uncaught."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 5, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    agent_runner = MagicMock()
+    agent_runner.run.side_effect = KeyboardInterrupt()
     service = PollingService(
         config=config,
         github_client=github_client,

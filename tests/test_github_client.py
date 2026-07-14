@@ -123,6 +123,39 @@ def test_list_issue_comments_follows_pagination_and_parses_reactions() -> None:
     assert first_call.args[0].endswith("/repos/someone/myrepo/issues/42/comments")
 
 
+def _pull_request(number: int, *, head_ref: str, body: str = "") -> dict:
+    return {
+        "number": number,
+        "head": {"ref": head_ref},
+        "body": body,
+        "html_url": f"https://github.com/someone/myrepo/pull/{number}",
+    }
+
+
+def test_list_pull_requests_follows_pagination_and_parses_head_ref() -> None:
+    session = MagicMock()
+    page_1 = [
+        _pull_request(1, head_ref="devbot/myrepo-1-fix", body="Closes #1"),
+        _pull_request(2, head_ref="devbot/myrepo-2-fix", body="Closes #2"),
+    ]
+    page_2 = [_pull_request(3, head_ref="devbot/myrepo-3-fix", body="Closes #3")]
+    session.get.side_effect = [
+        _mock_response(json_data=page_1),
+        _mock_response(json_data=page_2),
+    ]
+    client = GitHubClient("token123", session=session)
+
+    pull_requests = client.list_pull_requests(_repository(), per_page=2)
+
+    assert [pr.number for pr in pull_requests] == [1, 2, 3]
+    assert pull_requests[0].head_ref == "devbot/myrepo-1-fix"
+    assert pull_requests[0].body == "Closes #1"
+    assert session.get.call_count == 2
+    first_call = session.get.call_args_list[0]
+    assert first_call.args[0].endswith("/repos/someone/myrepo/pulls")
+    assert first_call.kwargs["params"]["state"] == "open"
+
+
 def test_github_error_is_translated() -> None:
     session = MagicMock()
     session.get.return_value = _mock_response(
@@ -155,7 +188,12 @@ def test_github_generic_error_is_translated() -> None:
 
 
 def test_client_exposes_read_operations_only() -> None:
-    allowed_public_methods = {"get_authenticated_user", "list_issues", "list_issue_comments"}
+    allowed_public_methods = {
+        "get_authenticated_user",
+        "list_issues",
+        "list_issue_comments",
+        "list_pull_requests",
+    }
     forbidden_names = {
         "create_issue",
         "update_issue",
