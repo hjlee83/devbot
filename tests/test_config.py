@@ -101,6 +101,93 @@ def test_empty_default_agent_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         load_config(env_path=env_path, repositories_path=repositories_path)
 
 
+def test_config_rejects_unknown_implementer_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CP-011-7: an unrecognized IMPLEMENTER_AGENT fails config loading -
+    it must not silently fall back to a default Runner.
+
+    Set via `monkeypatch.setenv` (not the `.env` file) so pytest reverts it
+    after the test - `load_dotenv(..., override=False)` never clears a
+    value once it lands in the real process environment, and every later
+    test in the session would otherwise inherit this bogus agent name."""
+    monkeypatch.setenv("IMPLEMENTER_AGENT", "gpt5")
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    with pytest.raises(ConfigError, match="IMPLEMENTER_AGENT"):
+        load_config(env_path=env_path, repositories_path=repositories_path)
+
+
+def test_config_rejects_unknown_reviewer_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CP-011-8: an unrecognized REVIEWER_AGENT fails config loading - it
+    must not silently fall back to a default Runner."""
+    monkeypatch.setenv("REVIEWER_AGENT", "gemini")
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    with pytest.raises(ConfigError, match="REVIEWER_AGENT"):
+        load_config(env_path=env_path, repositories_path=repositories_path)
+
+
+def test_role_agents_default_to_claude_and_codex_when_nothing_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A brand new deployment with no DEFAULT_AGENT and no role-specific
+    env vars at all gets implementer=claude, reviewer=codex."""
+    monkeypatch.delenv("DEFAULT_AGENT", raising=False)
+    monkeypatch.delenv("IMPLEMENTER_AGENT", raising=False)
+    monkeypatch.delenv("REVIEWER_AGENT", raising=False)
+    workspace_root = tmp_path / "workspace"
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\n", encoding="utf-8"
+    )
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.implementer_agent == "claude"
+    assert config.reviewer_agent == "codex"
+
+
+def test_role_agents_fall_back_to_default_agent_for_existing_deployments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CP-011 회귀 방지: DEFAULT_AGENT만 설정된 기존 배포는 역할별 설정 없이
+    두 역할 모두 DEFAULT_AGENT 값을 그대로 쓴다."""
+    monkeypatch.delenv("IMPLEMENTER_AGENT", raising=False)
+    monkeypatch.delenv("REVIEWER_AGENT", raising=False)
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root, DEFAULT_AGENT="codex")
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.default_agent == "codex"
+    assert config.implementer_agent == "codex"
+    assert config.reviewer_agent == "codex"
+
+
+def test_role_agents_can_be_set_independently_of_default_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IMPLEMENTER_AGENT", "claude")
+    monkeypatch.setenv("REVIEWER_AGENT", "codex")
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.implementer_agent == "claude"
+    assert config.reviewer_agent == "codex"
+
+
 def test_invalid_repository_enabled_value_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

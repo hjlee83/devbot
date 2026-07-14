@@ -67,6 +67,8 @@ def _config(repositories: list[RepositoryConfig], **overrides: object) -> DevBot
         "poll_interval_seconds": 60,
         "lock_file": Path("/tmp/devbot.lock"),
         "default_agent": "codex",
+        "implementer_agent": "codex",
+        "reviewer_agent": "codex",
         "max_concurrent_jobs": 1,
         "dry_run": True,
         "github_token": "test-token",
@@ -108,7 +110,7 @@ def test_dry_run_has_no_side_effect() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=CodexRunner(dry_run=True),
+        implementer_runner=CodexRunner(dry_run=True),
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -137,7 +139,7 @@ def test_skip_when_working_exists() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         state_writer=state_writer,
         delivery=delivery,
     )
@@ -167,7 +169,7 @@ def test_select_ready_issue() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -195,7 +197,7 @@ def test_agent_runner_called() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -243,7 +245,7 @@ def test_delivery_after_verification() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -280,7 +282,7 @@ def test_stop_delivery_when_failed() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -314,7 +316,7 @@ def test_block_failure_after_agent_exception_is_reported_without_crashing() -> N
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -355,7 +357,7 @@ def test_block_failure_after_verification_failure_is_reported_without_crashing()
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -387,7 +389,7 @@ def test_mark_for_review_failure_is_reported_without_crashing() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -415,7 +417,7 @@ def test_move_to_review() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -454,7 +456,7 @@ def test_reuse_existing_pr() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,

@@ -26,6 +26,8 @@ def _config(repositories: list[RepositoryConfig]) -> DevBotConfig:
         poll_interval_seconds=60,
         lock_file=Path("/tmp/devbot.lock"),
         default_agent="codex",
+        implementer_agent="codex",
+        reviewer_agent="codex",
         max_concurrent_jobs=1,
         dry_run=True,
         github_token="test-token",
@@ -97,7 +99,7 @@ def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> No
     assert exit_code == 0
     _, kwargs = mock_service_cls.call_args
     assert kwargs["config"].dry_run is True
-    assert kwargs["agent_runner"].dry_run is True
+    assert kwargs["implementer_runner"].dry_run is True
     assert kwargs["state_writer"].dry_run is True
     assert kwargs["delivery"].dry_run is True
     assert kwargs["rework_service"].dry_run is True
@@ -120,7 +122,7 @@ def test_cli_constructs_rework_service(tmp_path: Path) -> None:
 def test_continuous_loop_uses_configured_poll_interval() -> None:
     config = _config([_repo("myrepo")])
     service = PollingService(
-        config=config, github_client=_EmptyGitHubClient(), agent_runner=MagicMock()
+        config=config, github_client=_EmptyGitHubClient(), implementer_runner=MagicMock()
     )
 
     class _StopLoop(Exception):
@@ -141,7 +143,7 @@ def test_continuous_loop_uses_configured_poll_interval() -> None:
 def test_shutdown_signal_stops_loop_gracefully() -> None:
     config = _config([_repo("myrepo")])
     service = PollingService(
-        config=config, github_client=_EmptyGitHubClient(), agent_runner=MagicMock()
+        config=config, github_client=_EmptyGitHubClient(), implementer_runner=MagicMock()
     )
     run_once_spy = MagicMock(side_effect=service.run_once)
     service.run_once = run_once_spy  # type: ignore[method-assign]

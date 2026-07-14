@@ -22,6 +22,13 @@
 - [x] Task 010: ReworkService wired into the polling loop (`review`-state
       Issues' unprocessed `@devbot` PR comments are now detected and
       reworked automatically, reusing the existing branch/PR)
+- [x] Task 011: `ClaudeRunner` added and Agent execution split into
+      implementer/reviewer roles (default implementer=`claude`,
+      reviewer=`codex`; unset role config falls back to the legacy
+      `DEFAULT_AGENT`). Both the ready-Issue path and Task 010's rework
+      path run through `implementer_runner`; `reviewer_runner` is
+      constructed and injected but not yet invoked anywhere (automatic
+      review execution is a later Task).
 
 ## Phase 3 — Operations
 - [ ] macOS launchd

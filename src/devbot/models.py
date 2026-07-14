@@ -50,6 +50,8 @@ class DevBotConfig:
     poll_interval_seconds: int
     lock_file: Path
     default_agent: str
+    implementer_agent: str
+    reviewer_agent: str
     max_concurrent_jobs: int
     dry_run: bool
     github_token: str
