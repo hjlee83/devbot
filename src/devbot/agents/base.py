@@ -26,6 +26,25 @@ class AgentRunResult:
     message: str
     returncode: int | None = None
 
+    @property
+    def failed(self) -> bool:
+        """True for a genuine execution failure that callers must treat as
+        `AGENT_FAILED`/`blocked`, not let flow through to delivery/verify/
+        commit/push.
+
+        A dry-run's `executed=False` is an intentional no-op, never a
+        failure. Everything else that didn't execute (`executed=False`,
+        e.g. `ClaudeRunner` reporting a missing CLI or a timeout - see
+        `devbot.agents.claude`) *is* a failure even though it has no
+        `returncode` to check (`returncode is None` alone is not
+        sufficient - it's also the correct value for a real exit code of
+        0's sibling case: no process ever ran). A nonzero `returncode` from
+        an execution that did run is always a failure.
+        """
+        if self.dry_run:
+            return False
+        return not self.executed or self.returncode not in (None, 0)
+
 
 class AgentRunner(ABC):
     """Runs a coding agent against a checked-out repository."""

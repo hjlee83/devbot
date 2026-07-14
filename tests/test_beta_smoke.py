@@ -67,6 +67,8 @@ def _config(repositories: list[RepositoryConfig], **overrides: object) -> DevBot
         "poll_interval_seconds": 60,
         "lock_file": Path("/tmp/devbot.lock"),
         "default_agent": "codex",
+        "implementer_agent": "codex",
+        "reviewer_agent": "codex",
         "max_concurrent_jobs": 1,
         "dry_run": True,
         "github_token": "test-token",
@@ -108,7 +110,7 @@ def test_dry_run_has_no_side_effect() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=CodexRunner(dry_run=True),
+        implementer_runner=CodexRunner(dry_run=True),
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -137,7 +139,7 @@ def test_skip_when_working_exists() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         state_writer=state_writer,
         delivery=delivery,
     )
@@ -167,7 +169,7 @@ def test_select_ready_issue() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -195,7 +197,7 @@ def test_agent_runner_called() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -208,6 +210,42 @@ def test_agent_runner_called() -> None:
     assert called_repository == repo
     assert "Unique Title XYZ" in called_prompt
     assert "#9" in called_prompt
+
+
+def test_unexecuted_non_dry_run_agent_result_blocks_before_delivery() -> None:
+    """Regression: `ClaudeRunner` reports a missing CLI or a timeout as
+    `AgentRunResult(executed=False, dry_run=False, returncode=None)` (see
+    `devbot.agents.claude`). Before `AgentRunResult.failed` existed, the
+    ready-task path only checked `returncode not in (None, 0)`, which let
+    this exact shape slip through as if the agent had succeeded and
+    proceed straight to delivery."""
+    repo = _repo()
+    config = _config([repo], dry_run=False)
+    issue = _issue(repo.full_name, 3, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    working_issue = _issue(repo.full_name, 3, labels=["devbot:working"])
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.claim.return_value = working_issue
+    delivery = MagicMock(spec=DeliveryService)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(
+        executed=False, dry_run=False, message="Claude CLI가 설치되어 있지 않습니다."
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_FAILED
+    state_writer.block.assert_called_once()
+    delivery.deliver.assert_not_called()
+    state_writer.mark_for_review.assert_not_called()
 
 
 def test_delivery_after_verification() -> None:
@@ -243,7 +281,7 @@ def test_delivery_after_verification() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -280,7 +318,7 @@ def test_stop_delivery_when_failed() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -314,7 +352,7 @@ def test_block_failure_after_agent_exception_is_reported_without_crashing() -> N
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -355,7 +393,7 @@ def test_block_failure_after_verification_failure_is_reported_without_crashing()
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -387,7 +425,7 @@ def test_mark_for_review_failure_is_reported_without_crashing() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -415,7 +453,7 @@ def test_move_to_review() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
@@ -454,7 +492,7 @@ def test_reuse_existing_pr() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,

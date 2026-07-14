@@ -148,7 +148,8 @@ class PollingService:
 
     config: DevBotConfig
     github_client: GitHubClient
-    agent_runner: AgentRunner
+    implementer_runner: AgentRunner
+    reviewer_runner: AgentRunner | None = None
     select_task: SelectTaskFn = field(default=select_global_ready_task)
     ensure_workspace_ready: EnsureWorkspaceFn = field(default=ensure_git_workspace_ready)
     build_prompt: BuildPromptFn = field(default=build_agent_prompt)
@@ -223,9 +224,7 @@ class PollingService:
             "Issue 선택: %s #%d (%s)", selected.repository, selected.number, selected.title
         )
 
-        repository = next(
-            repo for repo in repositories if repo.full_name == selected.repository
-        )
+        repository = next(repo for repo in repositories if repo.full_name == selected.repository)
 
         try:
             self.ensure_workspace_ready(repository)
@@ -254,11 +253,13 @@ class PollingService:
         prompt = self.build_prompt(repository, issue, [])
 
         self.logger.info(
-            "AgentRunner 실행: agent=%s dry_run=%s", self.config.default_agent, self.config.dry_run
+            "AgentRunner 실행: implementer=%s dry_run=%s",
+            self.config.implementer_agent,
+            self.config.dry_run,
         )
 
         try:
-            agent_result = self.agent_runner.run(repository, prompt)
+            agent_result = self.implementer_runner.run(repository, prompt)
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -271,10 +272,9 @@ class PollingService:
                     return block_failure
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=str(exc))
 
-        if agent_result.returncode not in (None, 0):
+        if agent_result.failed:
             message = (
-                agent_result.message
-                or f"AgentRunner exited with code {agent_result.returncode}"
+                agent_result.message or f"AgentRunner exited with code {agent_result.returncode}"
             )
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): 종료 코드 %s",

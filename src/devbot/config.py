@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from devbot.agents import KNOWN_AGENT_NAMES
 from devbot.models import DevBotConfig, RepositoryConfig
 
 DEFAULT_REPOSITORIES_PATH = Path("config/repositories.yaml")
@@ -24,6 +25,13 @@ _DEFAULTS: dict[str, str] = {
     "MAX_CONCURRENT_JOBS": "1",
     "DRY_RUN": "true",
 }
+
+# Fallback used only when neither a role-specific agent nor the legacy
+# DEFAULT_AGENT is configured at all (a brand new deployment). Existing
+# deployments that already set DEFAULT_AGENT keep using that value for both
+# roles - see `_resolve_role_agent`.
+_DEFAULT_IMPLEMENTER_AGENT = "claude"
+_DEFAULT_REVIEWER_AGENT = "codex"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -59,6 +67,22 @@ def _parse_int(name: str, value: str) -> int:
         raise ConfigError(f"{name} must be an integer, got: {value!r}") from exc
 
 
+def _resolve_role_agent(
+    role_env_name: str, raw_default_agent: str | None, built_in_default: str
+) -> str:
+    """Resolve one role's agent name: explicit role env var, else the
+    legacy `DEFAULT_AGENT` (unset-role-config compatibility with existing
+    single-agent deployments), else the role's own built-in default."""
+    raw_role_value = os.environ.get(role_env_name)
+    return raw_role_value or raw_default_agent or built_in_default
+
+
+def _require_known_agent(name: str, value: str) -> str:
+    if value not in KNOWN_AGENT_NAMES:
+        raise ConfigError(f"{name} must be one of {sorted(KNOWN_AGENT_NAMES)}, got: {value!r}")
+    return value
+
+
 def _parse_repository_enabled(value: object, index: int) -> bool:
     if isinstance(value, bool):
         return value
@@ -84,9 +108,7 @@ def _load_repositories(
 
     raw_repositories = raw.get("repositories")
     if not isinstance(raw_repositories, list) or not raw_repositories:
-        raise ConfigError(
-            f"{repositories_path} must define a non-empty 'repositories' list"
-        )
+        raise ConfigError(f"{repositories_path} must define a non-empty 'repositories' list")
 
     repositories: list[RepositoryConfig] = []
     for index, entry in enumerate(raw_repositories):
@@ -141,6 +163,20 @@ def load_config(
     default_agent = _require_nonempty("DEFAULT_AGENT", _get_env("DEFAULT_AGENT"))
     dry_run = _parse_bool("DRY_RUN", _get_env("DRY_RUN"))
 
+    # `os.environ.get` (not `_get_env`) here so an *unset* DEFAULT_AGENT is
+    # distinguishable from one explicitly set to its own package default -
+    # only an unset DEFAULT_AGENT falls through to the role's built-in
+    # default below.
+    raw_default_agent = os.environ.get("DEFAULT_AGENT")
+    implementer_agent = _require_known_agent(
+        "IMPLEMENTER_AGENT",
+        _resolve_role_agent("IMPLEMENTER_AGENT", raw_default_agent, _DEFAULT_IMPLEMENTER_AGENT),
+    )
+    reviewer_agent = _require_known_agent(
+        "REVIEWER_AGENT",
+        _resolve_role_agent("REVIEWER_AGENT", raw_default_agent, _DEFAULT_REVIEWER_AGENT),
+    )
+
     resolved_repositories_path = (
         Path(repositories_path) if repositories_path is not None else DEFAULT_REPOSITORIES_PATH
     )
@@ -151,6 +187,8 @@ def load_config(
         poll_interval_seconds=poll_interval_seconds,
         lock_file=lock_file,
         default_agent=default_agent,
+        implementer_agent=implementer_agent,
+        reviewer_agent=reviewer_agent,
         max_concurrent_jobs=max_concurrent_jobs,
         dry_run=dry_run,
         github_token=github_token,

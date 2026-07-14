@@ -105,6 +105,8 @@ def _config(repositories: list[RepositoryConfig], **overrides: object) -> DevBot
         "poll_interval_seconds": 60,
         "lock_file": Path("/tmp/devbot.lock"),
         "default_agent": "codex",
+        "implementer_agent": "codex",
+        "reviewer_agent": "codex",
         "max_concurrent_jobs": 1,
         "dry_run": True,
         "github_token": "test-token",
@@ -124,7 +126,9 @@ def test_iteration_skips_when_working_task_exists() -> None:
     working_issue = _issue(repo.full_name, 1, labels=["devbot:working"])
     github_client = FakeGitHubClient({repo.full_name: [working_issue]})
     agent_runner = MagicMock()
-    service = PollingService(config=config, github_client=github_client, agent_runner=agent_runner)
+    service = PollingService(
+        config=config, github_client=github_client, implementer_runner=agent_runner
+    )
 
     result = service.run_once()
 
@@ -138,7 +142,9 @@ def test_iteration_skips_when_review_task_exists() -> None:
     review_issue = _issue(repo.full_name, 1, labels=["devbot:review"])
     github_client = FakeGitHubClient({repo.full_name: [review_issue]})
     agent_runner = MagicMock()
-    service = PollingService(config=config, github_client=github_client, agent_runner=agent_runner)
+    service = PollingService(
+        config=config, github_client=github_client, implementer_runner=agent_runner
+    )
 
     result = service.run_once()
 
@@ -168,7 +174,7 @@ def test_processed_review_comment_is_not_reworked_again() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -201,7 +207,7 @@ def test_polling_detects_unprocessed_devbot_review_comment() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -245,7 +251,7 @@ def test_rework_is_prioritized_over_ready_task() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -291,7 +297,7 @@ def test_rework_reuses_existing_branch_and_pull_request() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -301,6 +307,116 @@ def test_rework_reuses_existing_branch_and_pull_request() -> None:
     assert result.status is PollingStatus.REWORKED
     push.assert_called_once_with(repo, actual_pr_head)
     write_client.create_pull_request.assert_not_called()
+
+
+def test_rework_uses_implementer_runner() -> None:
+    """CP-011-2: Task 010's rework path applies Agent changes through
+    `implementer_runner` - the same role used for ready-task
+    implementation - never through the separately configured
+    `reviewer_runner`."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=3)
+    linked_pr = _pull_request(101, issue_number=7, head_ref="devbot/myrepo-7-fix-bug")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 7): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    implementer_runner = MagicMock()
+    reviewer_runner = MagicMock()
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    rework_service = ReworkService(
+        state_writer=state_writer,
+        write_client=write_client,
+        apply_changes=lambda repository, issue, comment: implementer_runner.run(
+            repository, "prompt"
+        ),
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=MagicMock(),
+        push=MagicMock(),
+        current_branch=lambda repository: "devbot/myrepo-7-fix-bug",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        reviewer_runner=reviewer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REWORKED
+    implementer_runner.run.assert_called_once()
+    reviewer_runner.run.assert_not_called()
+
+
+def test_reviewer_runner_is_not_used_for_implementation() -> None:
+    """CP-011-3: `reviewer_runner` is injected (Task 011 scope: config +
+    construction + injection only) but never invoked for implementation
+    work, in either the ready-task path or the Task 010 rework path.
+    Automatic review execution stays out of this Task's scope."""
+    repo = _repo("myrepo")
+
+    ready_config = _config([repo])
+    ready_issue = _issue(repo.full_name, 7, labels=["devbot:ready"], title="Fix bug")
+    ready_github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
+    ready_implementer = MagicMock()
+    ready_implementer.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="ok"
+    )
+    ready_reviewer = MagicMock()
+    ready_service = PollingService(
+        config=ready_config,
+        github_client=ready_github_client,
+        implementer_runner=ready_implementer,
+        reviewer_runner=ready_reviewer,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    ready_service.run_once()
+
+    ready_reviewer.run.assert_not_called()
+    assert ready_reviewer.method_calls == []
+
+    rework_config = _config([repo])
+    review_issue = _issue(repo.full_name, 9, labels=["devbot:review"], title="Fix bug")
+    comment = _comment(comment_id=5)
+    linked_pr = _pull_request(102, issue_number=9, head_ref="devbot/myrepo-9-fix-bug")
+    rework_github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        comments_by_issue={(repo.full_name, 9): [comment]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    rework_reviewer = MagicMock()
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    rework_service = ReworkService(
+        state_writer=state_writer,
+        write_client=write_client,
+        apply_changes=MagicMock(),
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=MagicMock(),
+        push=MagicMock(),
+        current_branch=lambda repository: "devbot/myrepo-9-fix-bug",
+    )
+    rework_polling_service = PollingService(
+        config=rework_config,
+        github_client=rework_github_client,
+        implementer_runner=MagicMock(),
+        reviewer_runner=rework_reviewer,
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=rework_service,
+    )
+
+    rework_polling_service.run_once()
+
+    rework_reviewer.run.assert_not_called()
+    assert rework_reviewer.method_calls == []
 
 
 def test_successful_polled_rework_returns_to_review() -> None:
@@ -323,7 +439,7 @@ def test_successful_polled_rework_returns_to_review() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -347,7 +463,7 @@ def test_ready_polling_still_runs_when_no_rework_exists() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -389,7 +505,7 @@ def test_rework_polling_dry_run_has_no_side_effects() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -427,7 +543,7 @@ def test_failed_polled_rework_moves_to_blocked_with_reason() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -458,7 +574,7 @@ def test_review_issue_without_linked_pull_request_is_reported_as_error() -> None
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
         rework_service=rework_service,
     )
@@ -479,7 +595,7 @@ def test_working_issue_blocks_rework_even_when_review_exists() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=MagicMock(),
+        implementer_runner=MagicMock(),
         rework_service=rework_service,
     )
 
@@ -499,7 +615,7 @@ def test_iteration_selects_one_ready_issue() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
     )
 
@@ -515,7 +631,9 @@ def test_iteration_handles_empty_queue() -> None:
     config = _config([repo])
     github_client = FakeGitHubClient({repo.full_name: []})
     agent_runner = MagicMock()
-    service = PollingService(config=config, github_client=github_client, agent_runner=agent_runner)
+    service = PollingService(
+        config=config, github_client=github_client, implementer_runner=agent_runner
+    )
 
     result = service.run_once()
 
@@ -527,7 +645,9 @@ def test_iteration_with_zero_repositories_returns_no_ready_task() -> None:
     config = _config([])
     github_client = FakeGitHubClient({})
     agent_runner = MagicMock()
-    service = PollingService(config=config, github_client=github_client, agent_runner=agent_runner)
+    service = PollingService(
+        config=config, github_client=github_client, implementer_runner=agent_runner
+    )
 
     result = service.run_once()
 
@@ -540,7 +660,9 @@ def test_issue_without_devbot_label_is_ignored() -> None:
     unrelated = _issue(repo.full_name, 100, labels=["bug"])
     github_client = FakeGitHubClient({repo.full_name: [unrelated]})
     agent_runner = MagicMock()
-    service = PollingService(config=config, github_client=github_client, agent_runner=agent_runner)
+    service = PollingService(
+        config=config, github_client=github_client, implementer_runner=agent_runner
+    )
 
     result = service.run_once()
 
@@ -559,7 +681,7 @@ def test_iteration_validates_selected_workspace() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=ensure_workspace_ready,
     )
     service.run_once()
@@ -580,7 +702,7 @@ def test_iteration_reports_workspace_validation_failure() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_raise,
     )
 
@@ -601,7 +723,7 @@ def test_iteration_invokes_agent_with_selected_task() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
     )
 
@@ -614,6 +736,33 @@ def test_iteration_invokes_agent_with_selected_task() -> None:
     assert "#9" in called_prompt
 
 
+def test_ready_task_uses_implementer_runner() -> None:
+    """CP-011-1: a ready Issue's initial implementation run executes
+    through `implementer_runner`, not `reviewer_runner`."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 7, labels=["devbot:ready"], title="Fix bug")
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="ok"
+    )
+    reviewer_runner = MagicMock()
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        reviewer_runner=reviewer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_COMPLETED
+    implementer_runner.run.assert_called_once()
+    reviewer_runner.run.assert_not_called()
+
+
 def test_iteration_reports_agent_failure() -> None:
     repo = _repo("myrepo")
     config = _config([repo])
@@ -624,7 +773,7 @@ def test_iteration_reports_agent_failure() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
     )
 
@@ -648,7 +797,7 @@ def test_iteration_reports_agent_keyboard_interrupt_as_failure() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
     )
 
@@ -672,7 +821,7 @@ def test_iteration_reports_nonzero_agent_returncode_as_failure() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
     )
 
@@ -691,7 +840,7 @@ def test_iteration_dry_run_has_no_external_side_effects() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=CodexRunner(dry_run=True),
+        implementer_runner=CodexRunner(dry_run=True),
         ensure_workspace_ready=_no_op_workspace_check,
     )
 
@@ -707,7 +856,9 @@ def test_iteration_error_is_reported_without_state_corruption() -> None:
     config = _config([repo])
     github_client = FakeGitHubClient(error=RuntimeError("network exploded"))
     agent_runner = MagicMock()
-    service = PollingService(config=config, github_client=github_client, agent_runner=agent_runner)
+    service = PollingService(
+        config=config, github_client=github_client, implementer_runner=agent_runner
+    )
 
     first = service.run_once()
     second = service.run_once()
@@ -732,7 +883,7 @@ def test_iteration_picks_oldest_among_equal_priority_across_repos() -> None:
     service = PollingService(
         config=config,
         github_client=github_client,
-        agent_runner=agent_runner,
+        implementer_runner=agent_runner,
         ensure_workspace_ready=_no_op_workspace_check,
     )
 

@@ -21,7 +21,8 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from devbot.agents.codex import CodexRunner
+from devbot.agents import build_agent_runner
+from devbot.agents.base import AgentRunner
 from devbot.config import ConfigError, load_config
 from devbot.delivery import DeliveryService
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequestComment
@@ -44,7 +45,7 @@ _FAILURE_STATUSES = {
 
 
 def _apply_rework_changes(
-    agent_runner: CodexRunner,
+    implementer_runner: AgentRunner,
     repository: RepositoryConfig,
     issue: GitHubIssue,
     comment: PullRequestComment,
@@ -54,8 +55,8 @@ def _apply_rework_changes(
         issue,
         [IssueComment(author=comment.author, body=comment.body)],
     )
-    result = agent_runner.run(repository, prompt)
-    if result.returncode not in (None, 0):
+    result = implementer_runner.run(repository, prompt)
+    if result.failed:
         message = result.message or f"AgentRunner exited with code {result.returncode}"
         raise RuntimeError(message)
 
@@ -104,20 +105,30 @@ def main(
 
     try:
         with ProcessLock(config.lock_file):
+            logger.info(
+                "실행 구성: implementer=%s reviewer=%s dry_run=%s",
+                config.implementer_agent,
+                config.reviewer_agent,
+                config.dry_run,
+            )
             write_client = GitHubWriteClient(config.github_token)
-            agent_runner = CodexRunner(dry_run=config.dry_run)
+            implementer_runner = build_agent_runner(
+                config.implementer_agent, dry_run=config.dry_run
+            )
+            reviewer_runner = build_agent_runner(config.reviewer_agent, dry_run=config.dry_run)
             state_writer = IssueStateWriter(client=write_client, dry_run=config.dry_run)
             polling_service = PollingService(
                 config=config,
                 github_client=GitHubClient(config.github_token),
-                agent_runner=agent_runner,
+                implementer_runner=implementer_runner,
+                reviewer_runner=reviewer_runner,
                 state_writer=state_writer,
                 delivery=DeliveryService(client=write_client, dry_run=config.dry_run),
                 rework_service=ReworkService(
                     state_writer=state_writer,
                     write_client=write_client,
                     apply_changes=lambda repository, issue, comment: _apply_rework_changes(
-                        agent_runner, repository, issue, comment
+                        implementer_runner, repository, issue, comment
                     ),
                     dry_run=config.dry_run,
                 ),

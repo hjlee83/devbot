@@ -19,6 +19,11 @@ cp .env.example .env
 # checkouts) and GITHUB_TOKEN (read access to those repositories)
 ```
 
+`UV_CACHE_DIR` defaults to `.uv-cache` in `.env.example` and the bundled
+verification scripts. Keeping the `uv` cache inside the repository avoids
+permission errors in sandboxed review/agent environments that cannot read
+or write `~/.cache/uv`.
+
 Edit `config/repositories.yaml` to list the repositories DevBot manages.
 `local_path` for each repository is derived as `WORKSPACE_ROOT / repo`.
 Only `enabled: true` repositories are validated and managed.
