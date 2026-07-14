@@ -66,5 +66,4 @@
       `AGENTS.md`, Task 계약 표준, 자동 리뷰 프롬프트, 테스트에 엄격한 검증
       게이트를 고정한다. PR Evidence, Result, CI, Task 계약, 운영 정책이
       하나라도 불일치하면 `REQUEST CHANGES`로 판단하며, 이 기준은 구현 관여
-      여부와 관계없이 모든 리뷰어에게 기본으로 적용되고 구현 관여 리뷰어는
-      추가로 더 엄격하게 evidence를 확인한다.
+      여부나 특정 Agent 종류와 관계없이 모든 Reviewer에게 동일하게 적용된다.
