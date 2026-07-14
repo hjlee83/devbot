@@ -72,4 +72,6 @@
       중 무엇을 요구하는지 구분하고, `nothing to commit`을 DeliveryError로
       처리해 `devbot:blocked` 루프를 만드는 문제를 제거한다. metadata-only
       요청은 commit 경로로 보내지 않고, 실제 파일 변경 rework는 기존처럼 PR을
-      업데이트한다.
+      업데이트한다. Agent가 대화형 승인을 요구한 경우 delivery로 진행하지 않고,
+      Issue에 연결된 open PR이 있으면 delivery는 새 `devbot/devbot-*` branch가
+      아니라 해당 PR의 head branch를 사용해야 한다.
