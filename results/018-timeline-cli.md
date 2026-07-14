@@ -52,6 +52,9 @@
 - `tests/test_timeline.py` (신규)
 - `tests/test_github_client.py`
 - `tests/test_github_write_client.py`
+- `docs/00-roadmap.md`
+- `tasks/018-timeline-cli.md` (2차 리뷰 반영: 누락된 필수 항목 8개 보강, 아래
+  "2차 리뷰 피드백 반영" 참고)
 - `results/018-timeline-cli.md` (신규, 이 문서)
 
 ## Checkpoint별 테스트
@@ -178,6 +181,36 @@ uv run devbot timeline status --issue 34
     바뀌지 않았다 — 오히려 이번 수정이 그 요구를 실제로 충족시킨다.
 - **검증**: `uv run ruff check .` 통과, `uv run pytest` 272 passed(신규 회귀
   테스트 2개 포함, 기존 270개 회귀 없음).
+
+## 2차 리뷰 피드백 반영 (PR #35, `hjlee83` REQUEST CHANGES, head `c941f55` 재리뷰)
+
+이전 두 Blocker는 해결되었다고 확인된 재리뷰에서, 계약/Issue metadata 정합성
+관점의 새 Blocker 2개가 나왔다.
+
+- **Blocker 1 — Task 계약서가 `docs/09-task-contract-standard.md` 필수 14개
+  항목을 충족하지 않음**: `tasks/018-timeline-cli.md`에는 배경, Dependencies,
+  Files Expected to Change, Risk, Rollback Strategy, Reviewer Focus,
+  Definition of Done, Result 문서 경로가 없었다. 대조해 보니 지적이 정확했다.
+  - **수정**: 위 8개 섹션을 `tasks/018-timeline-cli.md`에 추가했다. 기존
+    Goal/Branch·PR Policy/Scope/Out of Scope/Required Checkpoints/Required
+    Tests/Verification Gate는 문구 하나 바꾸지 않았다 - CP-018 12개, 필수
+    테스트 12개 이름 모두 그대로다(`docs/09`의 "구현 결과에 맞추기 위해
+    Task를 사후에 축소하거나 품질 게이트를 삭제해서는 안 된다" 원칙 준수).
+    새로 추가한 섹션 내용은 이미 완료된 구현·검증 결과를 그대로 옮겨 적은
+    것이라(Files Expected to Change = 실제 diff 파일 목록, Risk/Rollback
+    Strategy = 이번 rework에서 실제로 겪은 위험과 대응) 사후 정당화가 아니라
+    사실 기록이다.
+- **Blocker 2 — 실행용 Issue #34 metadata 누락**: Issue #34 본문에 Task 계약
+  경로와 Branch는 있었지만 Pull Request 번호와 Result 문서 경로가 없어
+  `docs/09`의 단일 Task 추적 정책과 어긋났다.
+  - **수정**: Issue #34 본문에 `Pull Request: #35`와
+    `Result 문서: results/018-timeline-cli.md` 두 줄만 추가했다. 라벨
+    (`devbot:manual-action`)은 손대지 않았다 - 사용자 지시("Issue #34는
+    devbot:manual-action 상태이므로 라벨을 변경하지 마세요")를 그대로
+    지켰고, `gh issue edit --body-file`은 라벨에 영향을 주지 않는다.
+- **검증**: `uv run ruff check .` 통과, `uv run pytest` 272 passed(코드 변경
+  없음 - 이번 rework는 `tasks/018-timeline-cli.md`, Issue #34 본문, 이
+  Result 문서만 수정했다).
 
 ## Improvement Suggestions
 
