@@ -56,7 +56,7 @@ def _apply_rework_changes(
         [IssueComment(author=comment.author, body=comment.body)],
     )
     result = implementer_runner.run(repository, prompt)
-    if result.returncode not in (None, 0):
+    if result.failed:
         message = result.message or f"AgentRunner exited with code {result.returncode}"
         raise RuntimeError(message)
 

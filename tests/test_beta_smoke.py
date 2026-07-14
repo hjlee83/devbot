@@ -212,6 +212,42 @@ def test_agent_runner_called() -> None:
     assert "#9" in called_prompt
 
 
+def test_unexecuted_non_dry_run_agent_result_blocks_before_delivery() -> None:
+    """Regression: `ClaudeRunner` reports a missing CLI or a timeout as
+    `AgentRunResult(executed=False, dry_run=False, returncode=None)` (see
+    `devbot.agents.claude`). Before `AgentRunResult.failed` existed, the
+    ready-task path only checked `returncode not in (None, 0)`, which let
+    this exact shape slip through as if the agent had succeeded and
+    proceed straight to delivery."""
+    repo = _repo()
+    config = _config([repo], dry_run=False)
+    issue = _issue(repo.full_name, 3, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    working_issue = _issue(repo.full_name, 3, labels=["devbot:working"])
+    state_writer = MagicMock(spec=IssueStateWriter)
+    state_writer.claim.return_value = working_issue
+    delivery = MagicMock(spec=DeliveryService)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(
+        executed=False, dry_run=False, message="Claude CLI가 설치되어 있지 않습니다."
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_FAILED
+    state_writer.block.assert_called_once()
+    delivery.deliver.assert_not_called()
+    state_writer.mark_for_review.assert_not_called()
+
+
 def test_delivery_after_verification() -> None:
     call_order: list[str] = []
     repo = _repo()

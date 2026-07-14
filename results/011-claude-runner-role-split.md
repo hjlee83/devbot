@@ -110,13 +110,43 @@
   (기존 `DEFAULT_AGENT=codex` 단일 배포 회귀 방지 — CP-011 Definition of
   Done 항목), `test_role_agents_can_be_set_independently_of_default_agent`.
 
+## 1차 리뷰 반영 (2026-07-14)
+
+리뷰에서 blocker로 지적된 내용: `ClaudeRunner`가 CLI 미설치/timeout을
+`AgentRunResult(executed=False, dry_run=False, returncode=None)`로 구조화해
+반환하지만, 호출부(`polling.py`의 ready 경로, `main.py`의
+`_apply_rework_changes`)는 `returncode not in (None, 0)`만 실패로 판정하고
+있었다. `returncode=None`은 이 조건을 통과하므로, dry-run의 정상적인
+"실행 안 함"(`executed=False, dry_run=True`)과 진짜 실행 실패
+(`executed=False, dry_run=False`)가 같은 `None` returncode로 뭉뚱그려져
+후자도 성공처럼 delivery/commit/push까지 흘러갈 수 있는 실제 버그였다.
+
+수정: `AgentRunResult`에 `failed` property를 추가해 판정 로직을
+데이터클래스 자체에 통합했다 — `dry_run=True`면 항상 `False`(의도된
+no-op), 그 외에는 `not executed or returncode not in (None, 0)`이면
+`True`. `polling.py`의 `if agent_result.returncode not in (None, 0):`와
+`main.py`의 `if result.returncode not in (None, 0):`를 모두
+`if ....failed:`로 교체했다.
+
+신규 회귀 테스트:
+- `tests/test_agents_base.py`(신규): `AgentRunResult.failed`의 Happy/
+  Failure/Boundary 4가지 조합(dry-run no-op, 정상 실행, nonzero 실행,
+  `executed=False, dry_run=False, returncode=None`).
+- `tests/test_beta_smoke.py::test_unexecuted_non_dry_run_agent_result_blocks_before_delivery` —
+  ready 경로 전체 흐름(full flow)에서 이 결과가 `AGENT_FAILED` + blocked
+  전환으로 이어지고 `delivery.deliver()`가 호출되지 않음을 확인.
+- `tests/test_main_loop.py::test_apply_rework_changes_raises_when_agent_result_is_unexecuted_and_not_dry_run` —
+  rework 경로에서 `_apply_rework_changes()`가 예외를 던져
+  `ReworkService.process()`가 검증/commit/push로 진행하지 않고 blocked로
+  이어짐을 확인.
+
 ## 검증 결과
 
 | Command | Result |
 |---|---|
 | `uv sync` | PASS |
 | `uv run ruff check .` | PASS |
-| `uv run pytest` | PASS, 136 passed |
+| `uv run pytest` | PASS, 142 passed |
 | `uv run devbot --once --dry-run` | PASS, `no_ready_task`; 시작 로그에 `실행 구성: implementer=claude reviewer=codex dry_run=True` 출력 확인 |
 
 ## 회귀 확인
@@ -126,8 +156,8 @@
   기존 `DEFAULT_AGENT=codex`만 있는 배포는 `test_role_agents_fall_back_to_default_agent_for_existing_deployments`가
   증명하듯 양쪽 역할 모두 그대로 `codex`가 된다.
 - `PollingService.agent_runner` → `implementer_runner` 필드명 변경은
-  전체 스위트(136 passed)로 동작 동일함을 확인했다. 변경은 기계적
-  리네임뿐이며 로직은 바꾸지 않았다.
+  전체 스위트로 동작 동일함을 확인했다. 변경은 기계적 리네임뿐이며
+  로직은 바꾸지 않았다.
 - `.env` 테스트 격리: `IMPLEMENTER_AGENT`/`REVIEWER_AGENT`를 검증하는
   신규 config 테스트는 `monkeypatch.setenv`로 값을 주입한다(`.env` 파일에
   적으면 `load_dotenv(..., override=False)`가 프로세스 환경에 영구

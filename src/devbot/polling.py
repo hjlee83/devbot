@@ -272,7 +272,7 @@ class PollingService:
                     return block_failure
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=str(exc))
 
-        if agent_result.returncode not in (None, 0):
+        if agent_result.failed:
             message = (
                 agent_result.message or f"AgentRunner exited with code {agent_result.returncode}"
             )

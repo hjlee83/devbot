@@ -7,9 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from devbot.github_client import GitHubIssue
+from devbot.agents.base import AgentRunResult
+from devbot.github_client import GitHubIssue, PullRequestComment
 from devbot.lock import ProcessLock
-from devbot.main import main
+from devbot.main import _apply_rework_changes, main
 from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.polling import PollingResult, PollingService, PollingStatus, run_forever
 
@@ -247,3 +248,36 @@ def test_main_loop_respects_process_lock(tmp_path: Path) -> None:
         held_lock.release()
 
     assert exit_code == 1
+
+
+def test_apply_rework_changes_raises_when_agent_result_is_unexecuted_and_not_dry_run() -> None:
+    """Same regression as the ready-task path (see
+    `tests/test_beta_smoke.py::test_unexecuted_non_dry_run_agent_result_blocks_before_delivery`),
+    for Task 010's rework path: `ClaudeRunner` reporting a missing CLI or a
+    timeout as `executed=False, dry_run=False, returncode=None` must raise
+    - so `ReworkService.process()` blocks the Issue - not be treated as a
+    successful agent apply that proceeds to verification/commit/push."""
+    repo = _repo("myrepo")
+    issue = GitHubIssue(
+        repository=repo.full_name,
+        number=7,
+        title="Fix bug",
+        body="",
+        state="open",
+        labels=("devbot:review",),
+        created_at=datetime(2026, 1, 1),
+    )
+    comment = PullRequestComment(
+        id=1,
+        author="reviewer",
+        body="@devbot please fix",
+        created_at=datetime(2026, 1, 2),
+        reactions={},
+    )
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(
+        executed=False, dry_run=False, message="Claude CLI가 설치되어 있지 않습니다."
+    )
+
+    with pytest.raises(RuntimeError, match="Claude CLI"):
+        _apply_rework_changes(implementer_runner, repo, issue, comment)
