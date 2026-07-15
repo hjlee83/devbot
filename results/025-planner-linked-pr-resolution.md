@@ -12,11 +12,13 @@
   fallback branch 생성을 유지한다.
 - host-managed workspace 문서에 Planner PR 해석 우선순위와 mismatch 거부
   규칙을 기록했다.
+- Roadmap에 Task 025 완료 범위와 Planner-linked PR hardening 동작을 기록했다.
 
 ## 수정 파일
 
 - `src/devbot/polling.py`
 - `src/devbot/worktree.py`
+- `docs/00-roadmap.md`
 - `tests/test_polling.py`
 - `tests/test_worktree.py`
 - `tests/test_planner.py`
@@ -37,7 +39,7 @@
 | CP-025-8 | `test_planner_pr_template_includes_execution_issue_closing_link` |
 | CP-025-9 | `test_planner_pr_resolution_diagnostics` |
 | CP-025-10 | `test_existing_workflows_compatible_with_planner_pr_resolution` 및 전체 pytest |
-| CP-025-11 | 이 Result 문서와 `docs/13-host-managed-workspace-preparation.md` |
+| CP-025-11 | 이 Result 문서, `docs/13-host-managed-workspace-preparation.md`, `docs/00-roadmap.md` |
 
 ## 검증 결과
 
@@ -70,8 +72,10 @@
 
 - `Pull Request: #<number>` metadata는 Planner Issue 형식에 의존한다. 수동
   Issue가 같은 문구를 잘못 포함하면 Planner Issue처럼 fallback이 차단된다.
-- GitHub PR 목록 조회 실패는 기존 best-effort 경로와 동일하게 fallback을
-  허용한다. 명시 PR이 실제로 있는지 확인하려면 PR 목록 조회가 성공해야 한다.
+- GitHub PR 목록 조회가 실패하면 명시 PR 존재 여부를 확정할 수 없으므로
+  기존 best-effort 경고 경로는 `None`을 반환한다. 다만 Issue 본문에
+  `Pull Request: #<number>` metadata가 있으면 그 직후 보수적으로 workspace
+  preparation failure로 중단하고 fallback branch 생성을 막는다.
 
 ## Improvement Suggestions
 
