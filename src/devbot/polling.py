@@ -55,11 +55,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from devbot import observability
-from devbot.agents.base import AgentRunner, is_approval_required_output, is_session_limit_output
-from devbot.delivery import DeliveryService
+from devbot.agent_outcome import classify_agent_outcome
+from devbot.agents.base import AgentRunner, is_session_limit_output
+from devbot.delivery import DeliveryService, branch_has_implementation_evidence
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.issue_state import ClaimConflictError, IssueStateWriter
 from devbot.models import (
+    AgentOutcome,
     CandidateExclusion,
     DevBotConfig,
     ExclusionReason,
@@ -87,6 +89,20 @@ _STATE_LABEL_PREFIX = "devbot:"
 _PRIORITY_LABEL_PREFIX = "priority:"
 
 _LOGGER_NAME = "devbot"
+
+# Task 021 Scope §6: outcomes that require operator action rather than an
+# automatic retry, and must never proceed to delivery. `AGENT_FAILED` and
+# `SESSION_LIMIT` are handled by their own branches (matching their
+# existing, distinct `devbot:blocked` message formats) - every other
+# non-completed outcome shares this one manual-action branch.
+_MANUAL_ACTION_OUTCOMES = frozenset(
+    {
+        AgentOutcome.APPROVAL_REQUIRED,
+        AgentOutcome.NETWORK_BLOCKED,
+        AgentOutcome.REPOSITORY_LOCKED,
+        AgentOutcome.IMPLEMENTATION_SKIPPED,
+    }
+)
 
 
 class PollingStatus(Enum):
@@ -250,6 +266,7 @@ def find_linked_pull_request(
 
 EnsureWorkspaceFn = Callable[[RepositoryConfig], None]
 BuildPromptFn = Callable[[RepositoryConfig, GitHubIssue, Sequence[IssueComment]], str]
+HasImplementationEvidenceFn = Callable[[RepositoryConfig, str, str], bool]
 
 IssuesByKey = dict[tuple[str, int], GitHubIssue]
 
@@ -272,6 +289,9 @@ class PollingService:
     reviewer_runner: AgentRunner | None = None
     ensure_workspace_ready: EnsureWorkspaceFn = field(default=ensure_git_workspace_ready)
     build_prompt: BuildPromptFn = field(default=build_agent_prompt)
+    has_implementation_evidence: HasImplementationEvidenceFn = field(
+        default=branch_has_implementation_evidence
+    )
     state_writer: IssueStateWriter | None = None
     delivery: DeliveryService | None = None
     rework_service: ReworkService | None = None
@@ -1069,7 +1089,20 @@ class PollingService:
                 start=agent_start,
             )
 
-        if agent_result.failed:
+        # Task 021 CP-021-1: classify the run into one explicit
+        # `AgentOutcome` before deciding anything else. This replaces the
+        # old two-step "check `.failed`, then separately check
+        # `is_approval_required_output`" chain - blocking text patterns
+        # (approval/session-limit/network/lock/skip) are checked *before*
+        # `.failed` deliberately, since a genuine block can arrive from a
+        # process that still exited 0 (CP-021-3/4/5's "even though the
+        # process itself may have exited 0").
+        classification = classify_agent_outcome(agent_result)
+        self.logger.info(
+            "실행 결과: %s (agent_outcome=%s)", agent_result.message, classification.outcome.value
+        )
+
+        if classification.outcome is AgentOutcome.AGENT_FAILED:
             message = (
                 agent_result.message or f"AgentRunner exited with code {agent_result.returncode}"
             )
@@ -1097,21 +1130,42 @@ class PollingService:
                 return block_failure
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=message)
 
-        self.logger.info("실행 결과: %s", agent_result.message)
+        if classification.outcome is AgentOutcome.SESSION_LIMIT:
+            # Task 021 CP-021-3: classified independently of
+            # `AgentRunResult.failed` - a session/usage-limit message can
+            # arrive even from a process that exited 0, which the old
+            # `.failed`-gated check never saw. Still resolves to
+            # `devbot:blocked` (docs/07-decisions.md, 2026-07-15 "Agent
+            # session-limit failures get a distinct block reason, not a new
+            # state") with the same recovery hint, never retried.
+            block_reason = session_limit_block_reason(
+                "Agent 실행 결과가 세션/사용량 제한으로 분류되어 delivery를 실행하지 않음: "
+                f"{agent_result.message}"
+            )
+            block_failure = self._block(
+                repository, issue, block_reason, selected, job_type=JobType.IMPLEMENT
+            )
+            if block_failure is not None:
+                return block_failure
+            return PollingResult(
+                status=PollingStatus.BLOCKED,
+                task=selected,
+                message=f"session_limit: {agent_result.message}",
+            )
 
-        if is_approval_required_output(agent_result.message):
-            # CP-016-9: the Agent process may have exited 0 having done
-            # nothing but ask a question it can't answer itself (e.g. a
-            # read-only command paused on interactive confirmation) - that
-            # is not a completed change, so delivery must not run. This
-            # needs a human, not a `blocked` retry loop, so it goes to
-            # `manual-action` like Task 016's other non-committable cases.
+        if classification.outcome in _MANUAL_ACTION_OUTCOMES:
+            # approval_required (CP-016-9) / network_blocked /
+            # repository_locked / implementation_skipped (Task 021 Scope
+            # §6): the Agent process may have exited 0 having done nothing
+            # committable - delivery must not run. This needs operator
+            # action, not a `blocked` retry loop.
             reason = (
-                "Agent output이 승인 대기 상태로 종료되어 delivery를 실행하지 않음 "
-                f"(approval_required): {agent_result.message}"
+                f"Agent 실행 결과가 {classification.outcome.value}로 분류되어 delivery를 실행하지 "
+                f"않음: {classification.matched_reason}"
             )
             self.logger.error(
-                "Agent output이 승인이 필요한 상태입니다 (%s #%d): %s",
+                "Agent 실행 결과가 %s입니다 (%s #%d): %s",
+                classification.outcome.value,
                 selected.repository,
                 selected.number,
                 agent_result.message,
@@ -1133,9 +1187,36 @@ class PollingService:
             return PollingResult(
                 status=PollingStatus.BLOCKED,
                 task=selected,
-                message=f"approval_required: {agent_result.message}",
+                message=f"{classification.outcome.value}: {agent_result.message}",
             )
 
+        if classification.outcome is AgentOutcome.UNKNOWN:
+            # Task 021 CP-021-11: a run that neither failed nor matched any
+            # recognized signal is not implicit success - "safe failure
+            # state, never implicit success" (Scope §6).
+            reason = (
+                "Agent 실행 결과를 분류할 수 없어(unknown) delivery를 실행하지 않고 blocked "
+                f"처리함: {classification.matched_reason}"
+            )
+            block_failure = self._block(
+                repository, issue, reason, selected, job_type=JobType.IMPLEMENT
+            )
+            if block_failure is not None:
+                return block_failure
+            return PollingResult(
+                status=PollingStatus.BLOCKED,
+                task=selected,
+                message=f"unknown: {agent_result.message}",
+            )
+
+        # classification.outcome is IMPLEMENTATION_COMPLETED (an executed,
+        # non-failed run matching no blocking pattern, or DevBot's own
+        # dry-run pipeline preview) - proceed to delivery. This alone is
+        # still not proof of a completed implementation (CP-021-11):
+        # delivery's own commit/push evidence - or, for a reused PR with
+        # nothing new to commit, evidence beyond its pre-existing
+        # contract-only commit (see the `no_repository_changes` branch
+        # below) - is what actually gates `devbot:review`.
         linked_pull_request = self._find_linked_pull_request_best_effort(
             repository, selected, issue
         )
@@ -1208,11 +1289,21 @@ class PollingService:
             )
 
         if delivery_result.message == "no_repository_changes":
-            if linked_pull_request is not None:
-                # Nothing new to commit, but the Issue already has an open
-                # PR carrying an implementation that just passed
-                # verification again - review can safely resume on that
-                # PR's existing (unchanged) head.
+            # Task 021 Scope §7/§8: a linked PR's mere existence is not
+            # proof implementation completed - a contract-only PR (just the
+            # Task-contract-authoring commit, e.g. Issue #41's motivating
+            # incident) must not satisfy it either. Only resume review when
+            # the PR's own branch carries git history evidence beyond that
+            # pre-existing contract-only commit.
+            has_evidence = linked_pull_request is not None and self.has_implementation_evidence(
+                repository, linked_pull_request.head_ref, repository.default_branch
+            )
+            if has_evidence:
+                assert linked_pull_request is not None  # narrows for type-checking
+                # Nothing new to commit, but the reused PR's branch already
+                # carries commits beyond its pre-existing contract-only
+                # commit - review can safely resume on that PR's existing
+                # (unchanged) head.
                 try:
                     self.state_writer.mark_for_review(
                         repository,
@@ -1235,17 +1326,27 @@ class PollingService:
                     status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
                 )
 
-            # No linked PR and nothing was committed: moving to `review`
-            # would leave the Issue there with no PR to actually review -
-            # the exact "automation silently advances without a real
-            # delivery" failure Task 016 exists to close, just via the
-            # no-op path instead of approval-required.
-            reason = (
-                "구현 검증은 통과했지만 신규 repository 변경도 연결된 PR도 없어 "
-                f"review로 전환하지 않고 manual-action으로 표시함: {delivery_result.message}"
-            )
+            # No linked PR, or a linked PR with no implementation evidence
+            # beyond its pre-existing contract-only commit: moving to
+            # `review` would leave the Issue there with nothing actually
+            # implemented behind it - the exact "automation silently
+            # advances without a real delivery" failure Task 016 first
+            # closed for the no-linked-PR case, and Task 021 now closes for
+            # the linked-but-contract-only-PR case too.
+            if linked_pull_request is not None:
+                reason = (
+                    "구현 검증은 통과했지만 신규 repository 변경이 없고 "
+                    f"연결 PR #{linked_pull_request.number}에도 계약(contract) 커밋 이외의 "
+                    f"구현 증거가 없어 review로 전환하지 않고 manual-action으로 표시함: "
+                    f"{delivery_result.message}"
+                )
+            else:
+                reason = (
+                    "구현 검증은 통과했지만 신규 repository 변경도 연결된 PR도 없어 "
+                    f"review로 전환하지 않고 manual-action으로 표시함: {delivery_result.message}"
+                )
             self.logger.error(
-                "변경/PR 없이 review 전환을 막고 manual-action 처리 (%s #%d): %s",
+                "변경/구현 증거 없이 review 전환을 막고 manual-action 처리 (%s #%d): %s",
                 selected.repository,
                 selected.number,
                 delivery_result.message,

@@ -39,3 +39,15 @@ transition above is unchanged. `docs/11-daemon-reliability.md` documents
 the failure-category taxonomy, retry policy, and the declarative recovery
 mapping (`FailureCategory` -> `RESTORE`/`BLOCKED`) layered on top of these
 same transitions for diagnostics and operator guidance.
+
+## Agent outcome classification (Task 021)
+No new state or label is introduced by Task 021 either - `WORKING`'s
+"On success, create PR and move Issue to `review`" step now requires an
+explicit `implementation_completed` `AgentOutcome` before delivery even
+runs, and (when delivery finds nothing new to commit against a reused
+linked PR) implementation evidence beyond that PR's pre-existing
+Task-contract-authoring commit before actually moving to `review`. A
+linked PR's mere existence is never itself that evidence. See
+`docs/04-agent-system.md`'s "Agent outcome classification" section and
+`docs/07-decisions.md`'s 2026-07-15 "Agent outcome classification closes
+the contract-only-PR false-review path" entry.
