@@ -54,9 +54,14 @@ CP-022-10까지 전부 구현했다. Planner-owned contract-first
   각각 별도 오류로 보고한다. 같은 Branch/PR을 재사용하는 것(계속 작업)은
   중복으로 판정하지 않는다.
 - **누락 Evidence 감지 (CP-022-8)**: `validate_workspace_evidence()`가
-  Checkpoint 없음, Validation Gate 없음, Result 경로 없음, 실행용 Issue
-  cross-link 없음, PR cross-link 없음을 각각 독립된 오류 메시지로
-  보고한다.
+  계약서 파일 누락(`contract_file_check` - 기본값
+  `contract_file_exists()`가 현재 작업 트리에서 `contract_path`가 실제
+  파일인지 직접 확인, GitHub 소스 등으로 주입 가능), Checkpoint 없음,
+  Validation Gate 없음, Result 경로 없음, 실행용 Issue cross-link 없음,
+  PR cross-link 없음을 각각 독립된 오류 메시지로 보고한다. (아래 "PR #42
+  REQUEST CHANGES 대응" 절 참고 - 최초 구현은 "missing contract file"을
+  helper가 아니라 호출자 책임으로 문서화해 계약(Scope 6절)과
+  불일치했다.)
 - **기존 워크플로 호환성 (CP-022-9)**: `devbot.planner`는
   `devbot.polling` / `devbot.scheduler` / `devbot.review` /
   `devbot.rework` / `devbot.delivery` / `devbot.timeline` /
@@ -83,10 +88,10 @@ CP-022-10까지 전부 구현했다. Planner-owned contract-first
   `PlannerValidationResult`, `canonical_branch_name()`,
   `canonical_contract_path()`, `canonical_result_path()`,
   `canonical_pr_title()`, `canonical_issue_title()`,
-  `validate_naming_and_numbering()`, `validate_workspace_evidence()`,
-  `find_duplicate_workspaces()`, `validate_planner_workspace()`,
-  `render_execution_issue_body()`, `render_pr_body()`,
-  `resolve_review_entry()`, `ReviewEntryContext`,
+  `contract_file_exists()`, `validate_naming_and_numbering()`,
+  `validate_workspace_evidence()`, `find_duplicate_workspaces()`,
+  `validate_planner_workspace()`, `render_execution_issue_body()`,
+  `render_pr_body()`, `resolve_review_entry()`, `ReviewEntryContext`,
   `REQUIRED_REVIEW_SOURCES`, 4개 역할 책임 튜플
 - `tests/test_planner.py` - CP-022-1~9 필수 테스트 9개
 
@@ -101,6 +106,40 @@ CP-022-10까지 전부 구현했다. Planner-owned contract-first
 - `docs/00-roadmap.md` - Task 021(기존에 누락되어 있던 항목, 이번에
   정합성을 위해 함께 채움)과 Task 022 항목 추가.
 
+## PR #42 REQUEST CHANGES 대응 (CP-022-8)
+
+자동 리뷰(`hjlee83`, head `7def271`)가 `REQUEST CHANGES`를 반환했다.
+지적 사항: Task 022 계약 Scope 6절("Planner checklist and validation")은
+validation helper가 최소 `missing contract file`을 감지해야 한다고
+명시하는데, 최초 구현의 `validate_workspace_evidence()`는 Checkpoint/
+Validation Gate/Result 경로/Issue·PR cross-link만 검사했고 계약서 파일
+자체의 존재 여부는 검사하지 않았다. `docs/12-planner-workflow.md`도
+"계약서 파일 누락 여부는 호출자가 확인한다"고 적어 helper 책임 범위
+밖으로 명시적으로 밀어냈는데, 이는 계약과 정면으로 불일치했다 - 리뷰
+지적이 정확했다.
+
+수정 내용:
+- `src/devbot/planner.py`에 `contract_file_exists(contract_path: str) ->
+  bool`(기본: `Path(contract_path).is_file()`)을 추가하고,
+  `validate_workspace_evidence()`/`validate_planner_workspace()`에
+  `contract_file_check: Callable[[str], bool] = contract_file_exists`
+  키워드 인자로 주입했다(Task 021의 `branch_has_implementation_evidence`
+  주입 패턴과 동일한 설계). 기본 동작은 현재 작업 트리에서 실제 파일
+  존재를 확인하고, 없으면 `"missing contract file: '<path>'"` 오류를
+  추가한다. 주입 가능하게 만든 이유는 GitHub에서 읽은 계약서 존재 여부
+  등 로컬 파일시스템이 아닌 소스로도 검증할 수 있게 하기 위함이다.
+- `tests/test_planner.py::test_planner_contract_missing_evidence`에
+  `contract_file_exists()` 자체의 happy/failure path, 존재하지 않는
+  계약서 경로에 대한 `validate_workspace_evidence()`/
+  `validate_planner_workspace()` 실패 경로, `contract_file_check` 주입
+  boundary(강제 True/강제 False) 케이스를 추가했다. 테스트 **이름**은
+  그대로 유지했다 - 계약의 필수 테스트 이름 목록에는 없는 세부
+  검증이므로 AGENTS.md "필수 테스트 이름은 변경하지 않는다" 규칙과
+  충돌하지 않는다.
+- `docs/12-planner-workflow.md` 7절에서 "호출자가 확인" 문구를 제거하고,
+  helper가 기본적으로 로컬 파일시스템을 직접 확인하며 필요 시 주입할 수
+  있다고 정정했다.
+
 ## Checkpoint별 테스트
 
 | Checkpoint | 테스트 |
@@ -112,7 +151,7 @@ CP-022-10까지 전부 구현했다. Planner-owned contract-first
 | CP-022-5 PR 계약 템플릿 | `test_planner_pr_contract_template` |
 | CP-022-6 최소 리뷰 진입 계약 | `test_minimal_review_entry_contract` |
 | CP-022-7 중복 작업공간 방지 | `test_duplicate_task_workspace_rejected` |
-| CP-022-8 누락 Evidence 감지 | `test_planner_contract_missing_evidence` |
+| CP-022-8 누락 Evidence 감지(계약서 파일 누락 포함) | `test_planner_contract_missing_evidence` |
 | CP-022-9 기존 워크플로 호환성 | `test_existing_workflows_compatible_with_planner_standard` |
 | CP-022-10 Result/문서 | 이 문서 + PR #42 본문 |
 
@@ -127,7 +166,9 @@ uv run ruff check .
   All checks passed!
 
 uv run pytest
-  342 passed (신규 9개: tests/test_planner.py — 기존 333개 전부 회귀 없음)
+  342 passed (신규 assertion 포함 tests/test_planner.py 9개 - CP-022-8
+  테스트에 계약서 파일 누락 실패 경로 추가, 테스트 개수 자체는 동일 -
+  기존 333개 전부 회귀 없음)
 
 uv run devbot --dry-run doctor
   safe_to_start: yes
@@ -138,10 +179,10 @@ uv run devbot --dry-run doctor
 uv run devbot --once --dry-run
   (실제 hjlee83/devbot 배포 설정 · 실제 GitHub 인증/조회로 실행, 종료 코드 0)
   DevBot 시작: version=0.1.0 implementer=claude reviewer=codex dry_run=True ...
-  Queue Summary: manual-action=1 (Issue #43 자신 - 실제 devbot:manual-action
-    라벨과 일치, 이전 실행의 승인 대기 코멘트 때문)
-  cycle 종료: 결과=no_ready_task
-  1회 실행 완료: no_ready_task
+  Queue Summary: review=1 (Issue #43 자신 - REQUEST CHANGES 리뷰 이후
+    devbot:review 라벨로 전환된 실제 상태와 일치)
+  cycle 종료: 결과=no_ready_task (선택 0/1, 직전 head는 이미 자동 리뷰됨)
+  1회 실행 완료: skipped_active_task
 ```
 
 ### 수동 검증 (계약 Validation Gate "Manual verification" 항목)
@@ -164,6 +205,13 @@ uv run devbot --once --dry-run
   "missing Checkpoints", "missing Validation Gate", "missing Result
   path", "missing execution Issue cross-link", "missing Pull Request
   cross-link" 5개 오류가 각각 독립적으로 보고됨을 확인했다.
+- **계약서 파일 누락 감지 (REQUEST CHANGES 반영)**: 실제 존재하는
+  `tasks/022-planner-workflow-standard.md`는
+  `contract_file_exists()`가 `True`를 반환하고, 존재하지 않는 경로
+  (`tasks/999-nonexistent.md`)는 `False`를 반환함을 확인했다. 존재하지
+  않는 계약서 경로를 가진 작업공간을 `validate_planner_workspace()`에
+  통과시키면 `is_valid=False`와 `"missing contract file: '...'"` 오류가
+  보고됨을 확인했다.
 - **`Review PR #<number>.` 해석**: `resolve_review_entry("Review PR
   #42.")`가 `pr_number=42`와 함께 `AGENTS.md`,
   `docs/09-task-contract-standard.md`(Review Gate), 연결된 Task 계약서,
@@ -180,13 +228,19 @@ Agent Failover, 자동 Merge는 계약의 명시적 제외 범위이며 후속 T
 
 ## 위험 요소
 
-- `devbot.planner`는 GitHub API를 직접 호출하지 않는 순수 헬퍼다 - 호출자
-  (Planner 역할을 맡은 사람이나 Agent)가 실제 GitHub의 Branch/PR
-  목록을 `KnownWorkspace`로 변환해 넘겨야 중복 감지가 동작한다. 이
-  변환 자체를 자동화하는 것(예: `gh api`로 Branch/PR 목록을 조회해
-  `KnownWorkspace` 리스트를 만드는 CLI)은 이번 Task의 "Planner 모델
-  자동 실행"/"Dashboard/UI" 제외 범위와 맞닿아 있어 의도적으로 범위
-  밖에 남겼다. 후속 Task에서 다룰 수 있다.
+- `devbot.planner`는 GitHub API를 직접 호출하지 않는 순수 헬퍼다(계약서
+  파일 존재 확인만 로컬 파일시스템을 직접 읽는다) - 호출자(Planner
+  역할을 맡은 사람이나 Agent)가 실제 GitHub의 Branch/PR 목록을
+  `KnownWorkspace`로 변환해 넘겨야 중복 감지가 동작한다. 이 변환 자체를
+  자동화하는 것(예: `gh api`로 Branch/PR 목록을 조회해 `KnownWorkspace`
+  리스트를 만드는 CLI)은 이번 Task의 "Planner 모델 자동 실행"/
+  "Dashboard/UI" 제외 범위와 맞닿아 있어 의도적으로 범위 밖에 남겼다.
+  후속 Task에서 다룰 수 있다.
+- `contract_file_exists()`의 기본 구현은 현재 작업 디렉터리 기준
+  상대경로(`Path(contract_path).is_file()`)로 계약서를 찾는다. Planner
+  helper를 저장소 루트가 아닌 다른 작업 디렉터리에서 호출하면 실제
+  계약서가 있어도 `missing contract file`로 오탐할 수 있다 - 호출자가
+  저장소 루트에서 호출하거나 `contract_file_check`를 주입해야 한다.
 - `render_execution_issue_body()` / `render_pr_body()`는 정적 문자열
   템플릿이다. `docs/09-task-contract-standard.md`의 "PR Evidence 필수
   항목"(Checkpoint별 대응 테스트, 실행한 검증 명령과 결과 등)까지 자동

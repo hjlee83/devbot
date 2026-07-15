@@ -173,10 +173,15 @@ Planner가 생성하는 PR Evidence는 최소 다음을 포함해야 한다
 ## 7. Planner 체크리스트와 검증 (Validation)
 
 `devbot.planner.validate_planner_workspace(workspace, *,
-known_workspaces=())`가 아래를 한 번에 검증해 `PlannerValidationResult`
+known_workspaces=(), contract_file_check=contract_file_exists)`가 아래를
+한 번에 검증해 `PlannerValidationResult`
 (`errors: tuple[str, ...]`, `is_valid: bool`)를 반환한다.
 
-- 계약서 파일 누락 여부 (호출자가 `contract_path` 존재 여부를 확인)
+- 계약서 파일 누락 (`validate_workspace_evidence`) - 기본값
+  `contract_file_exists()`가 현재 작업 트리에서 `contract_path`가 실제
+  파일인지 직접 확인한다. `contract_file_check`를 주입하면 GitHub에서
+  읽은 계약서 존재 여부 등 로컬 파일시스템이 아닌 다른 소스로도 검증할
+  수 있다.
 - Branch/PR/Issue cross-link 누락 (`validate_workspace_evidence`)
 - 같은 Task 번호에 대한 중복 Branch 또는 PR (`find_duplicate_workspaces`)
 - Validation Gate 누락 (`validate_workspace_evidence`)
@@ -184,9 +189,9 @@ known_workspaces=())`가 아래를 한 번에 검증해 `PlannerValidationResult
 - Task 번호 또는 slug 불일치 (`validate_naming_and_numbering`)
 
 이 모듈은 순수 함수/데이터클래스로만 구성되며 GitHub API를 직접
-호출하지 않는다 - 호출자(Planner 역할을 수행하는 사람 또는 Agent)가
-GitHub에서 읽은 Branch/PR 목록을 `KnownWorkspace` 목록으로 변환해
-전달한다.
+호출하지 않는다 - 계약서 파일 존재 확인만 로컬 파일시스템을 직접 읽고,
+그 외(Branch/PR 목록 등)는 호출자(Planner 역할을 수행하는 사람 또는
+Agent)가 GitHub에서 읽어 `KnownWorkspace` 목록으로 변환해 전달한다.
 
 ---
 

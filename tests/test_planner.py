@@ -23,6 +23,7 @@ from devbot.planner import (
     canonical_issue_title,
     canonical_pr_title,
     canonical_result_path,
+    contract_file_exists,
     find_duplicate_workspaces,
     render_execution_issue_body,
     render_pr_body,
@@ -286,6 +287,33 @@ def test_planner_contract_missing_evidence() -> None:
     only_missing_issue = replace(SAMPLE_WORKSPACE, issue_number=None)
     errors = validate_workspace_evidence(only_missing_issue)
     assert errors == ["missing execution Issue cross-link"]
+
+    # Failure path (Task 022 Scope §6: "missing contract file" is its own,
+    # separate detection item from cross-links): the contract file itself
+    # does not exist in the working tree.
+    assert contract_file_exists("tasks/022-planner-workflow-standard.md")
+    assert not contract_file_exists("tasks/022-does-not-exist.md")
+    assert not contract_file_exists("")
+
+    missing_contract = replace(SAMPLE_WORKSPACE, contract_path="tasks/022-does-not-exist.md")
+    errors = validate_workspace_evidence(missing_contract)
+    assert any("missing contract file" in error for error in errors)
+    assert "tasks/022-does-not-exist.md" in errors[0]
+
+    result = validate_planner_workspace(missing_contract)
+    assert not result.is_valid
+    assert any("missing contract file" in error for error in result.errors)
+
+    # Boundary: an injected contract_file_check overrides the default
+    # filesystem lookup - useful when the contract was read from GitHub
+    # rather than a local checkout.
+    assert validate_workspace_evidence(
+        missing_contract, contract_file_check=lambda _path: True
+    ) == []
+    forced_missing = validate_workspace_evidence(
+        SAMPLE_WORKSPACE, contract_file_check=lambda _path: False
+    )
+    assert any("missing contract file" in error for error in forced_missing)
 
 
 def test_existing_workflows_compatible_with_planner_standard() -> None:

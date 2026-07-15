@@ -16,8 +16,9 @@ Task's "Out of scope" (automatic Planner model execution).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Role responsibilities (docs/12-planner-workflow.md section 1)
@@ -154,11 +155,29 @@ def validate_naming_and_numbering(workspace: PlannerWorkspace) -> list[str]:
     return errors
 
 
-def validate_workspace_evidence(workspace: PlannerWorkspace) -> list[str]:
-    """Detect missing Checkpoints, Validation Gate, Result path, or
-    cross-links (CP-022-8)."""
+def contract_file_exists(contract_path: str) -> bool:
+    """Default missing-contract-file check: is `contract_path` a real file
+    in the current working tree (Task 022 Scope section 6, "missing
+    contract file")."""
+    return bool(contract_path) and Path(contract_path).is_file()
+
+
+def validate_workspace_evidence(
+    workspace: PlannerWorkspace,
+    *,
+    contract_file_check: Callable[[str], bool] = contract_file_exists,
+) -> list[str]:
+    """Detect a missing contract file, missing Checkpoints, missing
+    Validation Gate, missing Result path, or missing cross-links (CP-022-8).
+
+    `contract_file_check` defaults to a real filesystem check
+    (`contract_file_exists`) and is injectable so callers/tests can supply a
+    Task contract discovered from GitHub instead of the local working tree.
+    """
     errors: list[str] = []
 
+    if not contract_file_check(workspace.contract_path):
+        errors.append(f"missing contract file: '{workspace.contract_path}'")
     if not workspace.checkpoints:
         errors.append("missing Checkpoints")
     if not workspace.validation_gate:
@@ -215,12 +234,13 @@ def validate_planner_workspace(
     workspace: PlannerWorkspace,
     *,
     known_workspaces: Iterable[KnownWorkspace] = (),
+    contract_file_check: Callable[[str], bool] = contract_file_exists,
 ) -> PlannerValidationResult:
     """Run every Planner checklist validation against one workspace
     (docs/12-planner-workflow.md section 7)."""
     errors: list[str] = [
         *validate_naming_and_numbering(workspace),
-        *validate_workspace_evidence(workspace),
+        *validate_workspace_evidence(workspace, contract_file_check=contract_file_check),
         *find_duplicate_workspaces(workspace, known_workspaces),
     ]
     return PlannerValidationResult(errors=tuple(errors))
