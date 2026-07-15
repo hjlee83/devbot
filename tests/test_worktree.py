@@ -64,6 +64,16 @@ def _make_operator_repo(tmp_path: Path, *, name: str = "myrepo") -> tuple[Reposi
     return repository, origin
 
 
+def _clone(origin_path: Path, dest: Path) -> None:
+    subprocess.run(
+        ["git", "clone", "-q", str(origin_path), str(dest)], check=True, capture_output=True
+    )
+    # A CI runner has no global git identity configured (unlike a typical
+    # dev machine) - every throwaway clone that commits needs its own.
+    _run_git("config", "user.email", "test@example.com", cwd=dest)
+    _run_git("config", "user.name", "Test", cwd=dest)
+
+
 def _push_branch(
     origin_path: Path, tmp_path: Path, branch: str, *, filename: str = "task.txt"
 ) -> None:
@@ -71,9 +81,7 @@ def _push_branch(
     operator checkout never locally checks it out itself - exactly like a
     Planner-created Task branch the operator has never touched."""
     scratch = tmp_path / f"scratch-{branch.replace('/', '-')}"
-    subprocess.run(
-        ["git", "clone", "-q", str(origin_path), str(scratch)], check=True, capture_output=True
-    )
+    _clone(origin_path, scratch)
     _run_git("checkout", "-q", "-b", branch, cwd=scratch)
     (scratch / filename).write_text("task work\n", encoding="utf-8")
     _run_git("add", ".", cwd=scratch)
@@ -86,9 +94,7 @@ def _push_to_main(origin_path: Path, tmp_path: Path, filename: str) -> None:
     something the operator checkout's own stale `origin/main` ref does not
     know about until it is fetched again."""
     scratch = tmp_path / "scratch-main-update"
-    subprocess.run(
-        ["git", "clone", "-q", str(origin_path), str(scratch)], check=True, capture_output=True
-    )
+    _clone(origin_path, scratch)
     (scratch / filename).write_text("external update\n", encoding="utf-8")
     _run_git("add", ".", cwd=scratch)
     _run_git("commit", "-q", "-m", "external update", cwd=scratch)

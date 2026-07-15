@@ -139,6 +139,23 @@ worktree 안에서 파일을 읽고 쓰고 로컬 검증만 수행하면 된다.
 행위(에이전트 실패 -> claim/blocked 전이 2회, comment 1회)는 그대로다 -
 mock 정밀도만 개선했다.
 
+## CI에서 발견한 문제
+
+첫 push 후 PR #44의 `verify` CI가 실패했다: `tests/test_worktree.py`의
+`_push_branch()`/`_push_to_main()` 헬퍼가 throwaway clone에서 `git
+commit`을 실행하기 전에 `user.email`/`user.name`을 설정하지 않았다. 이
+저장소의 로컬 개발 환경에는 global git identity가 이미 설정되어 있어
+로컬 `uv run pytest`는 항상 통과했지만, CI runner에는 global identity가
+없어 `git commit`이 종료 코드 128("Please tell me who you are")로
+실패했다(`test_host_prepares_remote_branch_before_agent`,
+`test_existing_task_branch_is_reused`,
+`test_conflicting_dirty_worktree_is_rejected`,
+`test_render_prepared_workspace_context_states_no_network_needed` 4개
+실패). `_clone()` 공용 헬퍼를 추가해 모든 throwaway clone이 자체
+`user.email`/`user.name`을 설정하도록 고쳤고, `HOME`/`GIT_CONFIG_GLOBAL`/
+`GIT_CONFIG_SYSTEM`을 빈 값으로 override해 global identity가 전혀 없는
+환경을 로컬에서 재현한 뒤 전체 스위트(360개)가 통과함을 재확인했다.
+
 ## Checkpoint별 테스트
 
 | Checkpoint | 테스트 |
