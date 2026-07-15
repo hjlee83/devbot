@@ -110,6 +110,8 @@ class WorktreeHealthReport:
 
 
 _CONTRACT_PATH_RE = re.compile(r"Contract:\s*`([^`]+)`")
+_BRANCH_RE = re.compile(r"Branch:\s*`([^`]+)`")
+_PULL_REQUEST_RE = re.compile(r"Pull Request:\s*#(\d+)")
 _RESULT_PATH_RE = re.compile(r"Produce\s*`([^`]+)`")
 
 
@@ -120,6 +122,20 @@ def parse_contract_path_from_issue_body(body: str) -> str | None:
     does not follow that convention (e.g. a manually authored Issue)."""
     match = _CONTRACT_PATH_RE.search(body)
     return match.group(1) if match else None
+
+
+def parse_branch_from_issue_body(body: str) -> str | None:
+    """Best-effort extraction of the Planner branch metadata embedded in
+    an execution Issue body."""
+    match = _BRANCH_RE.search(body)
+    return match.group(1) if match else None
+
+
+def parse_pull_request_number_from_issue_body(body: str) -> int | None:
+    """Best-effort extraction of the Planner PR number embedded in an
+    execution Issue body."""
+    match = _PULL_REQUEST_RE.search(body)
+    return int(match.group(1)) if match else None
 
 
 def parse_result_path_from_issue_body(body: str) -> str | None:
@@ -363,6 +379,15 @@ class WorktreeManager:
         if linked_pull_request is not None:
             branch = linked_pull_request.head_ref
             create_branch = False
+            expected_branch = parse_branch_from_issue_body(issue.body)
+            if expected_branch is not None and expected_branch != branch:
+                raise WorkspacePreparationError(
+                    WorkspacePreparationFailure.BRANCH_PR_MISMATCH,
+                    "Planner Issue metadata conflicts with resolved PR: "
+                    f"expected_branch={expected_branch!r}, "
+                    f"resolved_pr=#{linked_pull_request.number}, "
+                    f"resolved_pr_head={branch!r}",
+                )
         else:
             branch = generate_branch_name(repository, issue.number, issue.title)
             create_branch = True

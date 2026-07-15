@@ -53,6 +53,13 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
 
 생명주기 (`WorktreeManager`):
 
+- **PR 해석**: Agent 실행 전 `PollingService`가 실행 Issue 본문의
+  `Pull Request: #<number>` Planner metadata를 먼저 확인한다. 명시 PR이
+  있으면 그 PR이 authoritative이며, PR body에 `Closes #<issue>`가 없어도
+  해당 PR을 사용한다. 명시 PR을 찾을 수 없으면 fallback branch를 만들지
+  않고 `linked_branch_missing` workspace preparation failure로 중단한다.
+  Planner PR metadata가 없는 legacy Issue만 기존 closing-keyword 해석과
+  fallback branch 생성을 유지한다.
 - **생성**: Agent 실행 전, `prepare()`가 linked PR이 있으면 그 branch를,
   없으면 `devbot.workspace.generate_branch_name()`으로 만든 새 branch를
   `origin/<default_branch>`에서 분기해 worktree를 만든다.
@@ -66,6 +73,9 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
 - **충돌 거부**: 같은 경로에 다른 branch가 dirty 상태로 이미 존재하면
   `WorkspacePreparationFailure.WORKTREE_CONFLICT`로 거부한다(안전하지 않은
   재사용 금지).
+- **Issue branch/PR mismatch 거부**: 실행 Issue의 `Branch: ` metadata와
+  resolved PR head branch가 모두 존재하고 서로 다르면
+  `WorkspacePreparationFailure.BRANCH_PR_MISMATCH`로 거부한다.
 - **branch/PR mismatch 거부**: 같은 경로가 이미 등록된 worktree이고
   clean하지만 branch가 새로 해석된 branch와 다르면(예: 같은 Issue의 linked
   PR이 다른 branch를 가리키도록 바뀐 경우) `WorkspacePreparationFailure.
