@@ -47,6 +47,13 @@ def _run_git(*args: str, cwd: Path) -> None:
 
 
 def _init_git_repo(path: Path, *, branch: str | None = None) -> None:
+    """`git init`'s default initial branch name depends on the runner's
+    `init.defaultBranch` config (`main` locally, `master` on the GitHub
+    Actions runner used by CI) - explicitly renaming to `main` right after
+    the first commit keeps every test deterministic regardless of that
+    environment default, instead of only passing by coincidence wherever
+    `main` already happens to be the default (CI failure discovered via
+    PR #36 review, `test_startup_validation_passes_for_clean_enabled_repository`)."""
     path.mkdir(parents=True, exist_ok=True)
     _run_git("init", "-q", cwd=path)
     _run_git("config", "user.email", "test@example.com", cwd=path)
@@ -54,6 +61,7 @@ def _init_git_repo(path: Path, *, branch: str | None = None) -> None:
     (path / "README.md").write_text("hello\n", encoding="utf-8")
     _run_git("add", ".", cwd=path)
     _run_git("commit", "-q", "-m", "initial", cwd=path)
+    _run_git("branch", "-m", "main", cwd=path)
     if branch is not None:
         _run_git("checkout", "-q", "-b", branch, cwd=path)
 

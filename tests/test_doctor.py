@@ -34,6 +34,10 @@ def _run_git(*args: str, cwd: Path) -> None:
 
 
 def _init_git_repo(path: Path) -> None:
+    """`git init`'s default initial branch name depends on the runner's
+    `init.defaultBranch` config (`main` locally vs `master` on CI) -
+    renaming to `main` right after the first commit keeps this
+    deterministic (see `tests/test_startup.py::_init_git_repo`)."""
     path.mkdir(parents=True, exist_ok=True)
     _run_git("init", "-q", cwd=path)
     _run_git("config", "user.email", "test@example.com", cwd=path)
@@ -41,6 +45,7 @@ def _init_git_repo(path: Path) -> None:
     (path / "README.md").write_text("hello\n", encoding="utf-8")
     _run_git("add", ".", cwd=path)
     _run_git("commit", "-q", "-m", "initial", cwd=path)
+    _run_git("branch", "-m", "main", cwd=path)
 
 
 # ---- CP-019-5: doctor command ----

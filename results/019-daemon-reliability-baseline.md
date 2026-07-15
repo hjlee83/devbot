@@ -144,7 +144,10 @@ uv run ruff check .
   All checks passed!
 
 uv run pytest
-  303 passed (신규 31개 + 기존 272개, 회귀 없음)
+  303 passed (신규 31개 + 기존 272개, 회귀 없음) - macOS(로컬)/Linux(CI) 양쪽
+  확인. 최초 push(`df343f3`)는 CI(Linux, GitHub Actions)에서
+  `1 failed, 302 passed`였다 - 아래 "리뷰 피드백 반영" 절 참고. 이 검증
+  결과는 그 수정 반영 이후 기준이다.
 
 uv run devbot doctor
   (실제 hjlee83/devbot 배포 설정 대상으로 실행, 종료 코드 0)
@@ -239,6 +242,37 @@ failover, VPS 배포는 계약의 명시적 제외 범위이며 후속 Task로 �
   `uv run devbot --once`는 실행하지 않았다(위 "관련 제약과 대안 검증"
   참고) - 이는 이 Task의 코드 동작에 대한 위험이 아니라 검증 방법론의
   의도적 제약이다.
+
+## 리뷰 피드백 반영 (PR #36, `hjlee83` REQUEST CHANGES, head `df343f3` 리뷰)
+
+`hjlee83`의 `REQUEST CHANGES` 리뷰(Task Contract/Checkpoints/Validation
+Gate/Required Tests/Result Document/PR Evidence/CI/Regression/
+Documentation 9개 항목 모두 FAIL로 지적됨, 근본 원인은 동일한 CI 실패
+하나)를 반영했다.
+
+- **Blocker — CI 실패 (`uv run pytest`가 최신 head에서 1개 실패)**:
+  GitHub Actions(Linux) 러너의 `git init` 기본 branch가 `master`인데
+  `tests/test_startup.py::_init_git_repo`가 초기 branch 이름을 명시적으로
+  고정하지 않아, 로컬(macOS, 기본 `main`)에서는 우연히 통과하고 CI에서는
+  `test_startup_validation_passes_for_clean_enabled_repository`가
+  `current_branch_compatibility` 체크에서 `ok=False`로 실패했다(`_repo()`
+  기본값 `default_branch="main"`과 실제 branch `master`가 불일치).
+  - **수정**: `_init_git_repo()`가 첫 commit 직후 `git branch -m main`으로
+    항상 `main`으로 정규화하도록 `tests/test_startup.py`,
+    `tests/test_doctor.py`(같은 잠재 버그를 가진 동일 헬퍼, 아직 어떤
+    assertion도 이를 걸리게 하지 않았지만 일관성 있게 함께 수정) 두
+    파일을 고쳤다. `src/devbot/startup.py`의 실제 구현
+    (`check_current_branch_compatibility`)은 변경하지 않았다 - 버그는
+    테스트 픽스처의 환경 의존성이었지 구현 로직이 아니었다.
+  - **검증**: `git -c init.defaultBranch=master init` + `git branch -m
+    main`으로 CI와 동일한 조건을 로컬에서 재현해 수정이 실제로 동작함을
+    직접 확인했다. `uv run pytest` 303 passed(회귀 없음).
+  - **CP-019-4/10 영향**: 테스트 이름/범위는 전혀 바뀌지 않았다 - 같은
+    필수 테스트(`test_startup_validation`)와 같은 checkpoint 커버리지를
+    유지한 채 픽스처만 환경 독립적으로 고쳤다.
+- **Result 문서/PR Evidence 최신화**: 리뷰가 지적한 대로, 최초 PR Evidence는
+  로컬에서만 확인한 `303 passed`를 CI 결과 확인 없이 기록했다 - 이번에
+  로컬/CI 양쪽 결과를 구분해 기록하도록 이 문서와 PR #36 본문을 갱신했다.
 
 ## Improvement Suggestions
 
