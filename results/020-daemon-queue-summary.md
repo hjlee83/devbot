@@ -159,32 +159,40 @@ uv run ruff check .
 uv run pytest
   315 passed in 1.96s (기존 303개 + 신규 12개, 회귀 없음)
 
-uv run devbot doctor
-  (실제 hjlee83/devbot 배포 설정 대상, 종료 코드 0)
+uv run devbot doctor  (재리뷰 대응 시점 재실행, 연속 2회)
+  (실제 hjlee83/devbot 배포 설정 대상, 두 번 모두 종료 코드 0)
+  1회차, 2회차 동일:
   [OK] repository_configuration / github_credentials / timeline_configuration
-  [FAIL] workspace_cleanliness[hjlee83/devbot]: 이 Task 자체의 구현 중 변경 (정상)
-  [FAIL] current_branch_compatibility[hjlee83/devbot]: current_branch=task/020-daemon-queue-summary (Task 계약에 따른 작업 branch, 정상)
-  [OK] daemon_lock / github_connectivity(인증됨: hjlee83) / agent_roles
+  [OK] workspace_cleanliness[hjlee83/devbot]: clean (커밋 완료 상태라 정상)
+  [FAIL] current_branch_compatibility[hjlee83/devbot]: current_branch=task/020-daemon-queue-summary (Task 계약에 따른 작업 branch, 정상 - 비fatal)
+  [OK] daemon_lock: Lock 사용 가능: /tmp/devbot.lock
+  [OK] github_connectivity(인증됨: hjlee83) / agent_roles
   safe_to_start: yes
 
-uv run devbot --once --dry-run
+uv run devbot --once --dry-run  (재리뷰 대응 시점 재실행)
   (실제 hjlee83/devbot 배포 설정·실제 GitHub 인증/조회로 실행, 종료 코드 0)
   DevBot 시작: version=0.1.0 implementer=claude reviewer=codex dry_run=True ...
-  시작 검증: 5개 항목 모두 로그로 확인(위 doctor 결과와 일치)
-  cycle 시작: cycle_id=44762b1dc3c9 관리 저장소 수=1
+  시작 검증: workspace_cleanliness/current_branch_compatibility 포함 5개 항목 모두 로그로 확인(위 doctor 결과와 일치)
+  cycle 시작: cycle_id=ea2d5c1ed026 관리 저장소 수=1
   Queue Summary
     ready         : 0
-    review        : 0
+    review        : 1
     rework        : 0
     blocked       : 0
-    manual-action : 1
+    manual-action : 0
     working       : 0
-  cycle 종료: cycle_id=44762b1dc3c9 소요=546ms 후보(rework=0 review=0 implement=0) 선택=0/1 결과=no_ready_task
+  cycle 종료: cycle_id=ea2d5c1ed026 소요=1334ms 후보(rework=0 review=0 implement=0) 선택=0/1 결과=skipped_active_task
   Cycle Result
     NO_RUNNABLE_TASK
-    elapsed: 546ms
-  1회 실행 완료: no_ready_task
+    elapsed: 1334ms
+  1회 실행 완료: skipped_active_task
 ```
+
+(이 재실행 시점에는 Issue #38이 이미 `devbot:review` 상태였으므로 -
+이번 세션 초반에 구현 완료 후 직접 전환함 - `review: 1`과 결과
+`skipped_active_task`가 나온다. 최초 검증 시점의 `manual-action: 1`/
+`no_ready_task` 결과는 그 당시 실제 라벨 상태를 그대로 반영한 것이었다 -
+두 결과 모두 실시간 GitHub 상태를 정확히 반영한다는 점에서 일치한다.)
 
 이 `--once --dry-run` 실행은 실제 `hjlee83/devbot` 저장소의 실제 GitHub
 상태(Issue #38이 `devbot:manual-action` 상태 하나만 열려 있음)를 그대로
@@ -238,6 +246,56 @@ Cycle Result
 값이고, 실제 `elapsed`는 실행 시점의 실제 소요 시간이다(위 두 예시 모두
 실제 코드 실행 결과를 그대로 옮긴 것이며 손으로 쓴 텍스트가 아니다).
 
+## 재리뷰 대응 (PR #39, `hjlee83` REQUEST CHANGES, head `3eb5423` 재리뷰)
+
+`hjlee83`의 두 번째 `REQUEST CHANGES` 리뷰(첫 리뷰는 계약서만 있던 이전
+head `20eae73` 대상이었고, 이번이 실제 구현이 반영된 head `3eb5423`에 대한
+첫 재리뷰다)는 단 하나의 Blocker를 지적했다: 재리뷰 시점에 재현한
+`uv run devbot doctor`가 종료 코드 1, `[FAIL] daemon_lock`,
+`safe_to_start: no`였는데, 이 Result와 PR Evidence는 종료 코드 0을
+보고했다는 불일치.
+
+- **원인 확인**: 이번 Task의 diff는 `src/devbot/doctor.py`,
+  `src/devbot/startup.py`, `src/devbot/lock.py` 중 어느 것도 건드리지
+  않았다(`git diff main --stat -- src/devbot/doctor.py src/devbot/startup.py
+  src/devbot/lock.py`가 빈 결과를 반환함을 직접 확인). `doctor`가 보고하는
+  `safe_to_start`는 오직 `daemon_lock` 체크 하나에만 좌우되고(Task 019
+  설계, `fatal=True`인 유일한 항목 - `docs/07-decisions.md` 2026-07-15
+  "Startup validation is informational, not a second fatal gate" 참고),
+  `daemon_lock`은 `/tmp/devbot.lock`을 그 순간 다른 프로세스가 점유하고
+  있는지를 실시간으로 확인하는 non-blocking probe다(`src/devbot/doctor.py`
+  "non-blocking acquire+immediate release" 문서 문자열, `src/devbot/
+  startup.py::check_daemon_lock`). 즉 이 체크의 통과 여부는 이 Task의
+  코드가 아니라 **그 순간 어떤 프로세스가 그 lock 파일을 잡고 있었는지**에
+  좌우되는, 실행 환경에 종속된 값이다.
+- **재현 시도**: 이 세션의 환경에서 `uv run devbot doctor`를 재리뷰 지적
+  직후 연속으로 2회 재실행했고, 두 번 모두 종료 코드 0(`daemon_lock: [OK]`,
+  `safe_to_start: yes`, `current_branch_compatibility`만 기존과 동일하게
+  `[FAIL]`/비-fatal)이었다 - 아래 "검증 결과" 갱신 참고. `/tmp/devbot.lock`
+  파일 자체도 비어 있고(내용 없음, 다른 프로세스가 잡고 있지 않음), 이
+  환경에는 실행 중인 `devbot` 프로세스가 없음을 `ps aux`로 확인했다.
+  재리뷰가 관측한 실패를 이 환경에서는 재현하지 못했다 - 재리뷰가 실행된
+  별도 환경(다른 sandbox 또는 이 저장소가 self-hosted로 운영되는 실제
+  배포)에서 그 순간 다른 프로세스가 같은 lock 경로를 점유하고 있었을
+  가능성이 가장 유력하다.
+- **결론 및 처리**: `daemon_lock`은 설계상 "이 순간 다른 인스턴스가 실행
+  중인가"를 묻는 살아있는 프로세스 상태 probe이므로, 이 Task의 diff가
+  코드로 재현 가능하게 "고칠" 수 있는 결정론적 속성이 아니다. Task 계약의
+  Validation Gate가 요구하는 "`uv run devbot doctor`가 Must pass"는 - Task
+  019가 이미 확립한 정의를 그대로 따르면 - "이 diff가 `safe_to_start`
+  판정 로직 자체를 손상시키지 않았다"는 뜻으로 해석했다(코드 diff에
+  `doctor`/`startup`/`lock` 관련 파일이 전혀 없으므로 이 조건은 구조적으로
+  만족된다). 계약서 문구나 품질 게이트 자체는 축소하지 않았다 - 사후에
+  "doctor는 사실 optional"이라고 재정의하지 않고, 대신 Result/PR Evidence에
+  "언제, 어떤 조건에서 재현했는지"를 더 정확하게 기록해 이 불일치의 성격
+  (코드 결함이 아니라 실행 시점의 프로세스 경쟁 상태)을 명확히 했다.
+- **검증**: 아래 "검증 결과" 절을 이 재리뷰 대응 시점에 다시 실행한 결과로
+  갱신했다(`uv sync`/`ruff check`/`pytest`/`doctor`(연속 2회)/`--once
+  --dry-run` 전부 이 세션에서 재실행, 전부 성공). CI(`verify`)는 CI
+  workflow가 `doctor`를 실행하지 않으므로(재리뷰도 이 점을 지적함) 이
+  불일치의 직접 증거는 아니지만, 나머지 4개 명령의 회귀 없음은 CI가 계속
+  확인한다.
+
 ## TODO
 
 없음(이 Task 범위 내). 아래 "제약" 항목은 후속 논의가 필요하지만 이 Task
@@ -245,6 +303,13 @@ Cycle Result
 
 ## 위험 요소
 
+- **`uv run devbot doctor`의 `daemon_lock` 결과는 실행 시점의 프로세스
+  경쟁 상태에 좌우된다**: 이 Task는 `doctor`/`startup`/`lock` 관련 코드를
+  전혀 수정하지 않았지만, 재리뷰가 다른 실행 환경에서 `daemon_lock: FAIL`
+  (`/tmp/devbot.lock`을 그 순간 다른 프로세스가 점유)을 관측했다(위
+  "재리뷰 대응" 절 참고). 이 값은 이 diff가 결정론적으로 보장할 수 있는
+  속성이 아니다 - 같은 lock 경로를 다른 프로세스가 동시에 점유하지 않을
+  때만 `safe_to_start: yes`가 나온다는 것이 `doctor`의 설계 자체다.
 - **`max_concurrent_jobs > 1`일 때 Cycle Result의 대표성**: 여러 Job이
   같은 cycle에 섞여 실행되고 성공/실패가 갈리면, `Cycle Result`는
   `results` 순서상 첫 실패(또는 첫 성공)만 대표로 보여준다 - 나머지
@@ -278,3 +343,12 @@ Cycle Result
 - `state_label_conflict` 진단이 실제로 발생한 빈도를 운영 중 관찰해,
   빈번하다면 Task 014의 라벨 정규화 자체(예: 매 cycle마다 다중 라벨을
   자동으로 정리하는 별도 유지보수 Job)를 후속 Task로 고려할 수 있다.
+- Task 계약서의 Validation Gate에 `uv run devbot doctor`를 "Must pass"로
+  넣을 때는, `daemon_lock`이 실행 시점의 프로세스 경쟁 상태에 좌우되는
+  살아있는 probe라는 점(Task 019 설계)을 함께 명시하는 편이 좋다 - 이번
+  재리뷰처럼 "동일 head, 다른 실행 환경에서 다른 결과"가 나오는 상황
+  자체를 CI가 `doctor`를 아예 실행하지 않는 이유이기도 하다(재리뷰 코멘트
+  "CI" 절). `docs/09-task-contract-standard.md`의 "검증 명령이 현재
+  저장소에서 실행 가능하다" 항목에 "환경에 따라 결과가 달라질 수 있는
+  live-state 검증 명령은 그 조건을 함께 기록한다"는 문구를 추가하는 것을
+  고려한다.
