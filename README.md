@@ -71,7 +71,8 @@ silently falling back). `--verbose` overrides it to `DEBUG` for that one
 process only, without touching `.env` or the environment.
 
 - `INFO` (default): startup configuration, managed repositories, cycle
-  start/end summaries, selected/finished Jobs, and failures - what an
+  start/end summaries, one **Queue Summary** per cycle, the **Selected**
+  job (if any), the normalized **Cycle Result**, and failures - what an
   operator needs during normal operation.
 - `DEBUG`: adds per-repository search conditions and result counts, every
   candidate Job found or excluded (with a structured reason code such as
@@ -85,6 +86,48 @@ GitHub call - it is never conflated with "no ready Issue found". Secrets
 (`GITHUB_TOKEN`, `Authorization`/`Bearer` header values) are never written
 to any log line, at any level. See `docs/08-beta-runbook.md` for a
 diagnostic walkthrough.
+
+### Queue Summary / Selected / Cycle Result (Task 020)
+
+Each cycle emits exactly one operator-facing report with three parts,
+instead of the several overlapping free-form lines earlier versions logged:
+
+```text
+Queue Summary
+  ready         : 0
+  review        : 1
+  rework        : 0
+  blocked       : 1
+  manual-action : 0
+  working       : 0
+
+Selected
+  repo     : hjlee83/devbot
+  issue    : #38
+  pr       : #39
+  job_type : review
+
+Cycle Result
+  REVIEW
+  elapsed: 402ms
+```
+
+- **Queue Summary**: a count for every stable workflow state
+  (`ready`/`review`/`rework`/`blocked`/`manual-action`/`working`) across
+  every managed repository. Each Issue is counted into exactly one bucket,
+  even if its GitHub labels are ambiguous (`state_label_conflict`, DEBUG,
+  logs the anomaly without changing the count).
+- **Selected**: only present when a Job was actually chosen to run this
+  cycle - repository, Issue, PR (when already known), and job type.
+- **Cycle Result**: one normalized, uppercase outcome -
+  `NO_RUNNABLE_TASK` when nothing was runnable, `IMPLEMENT`/`REVIEW`/
+  `REWORK` when a Job ran and succeeded, or the Job's `FailureCategory`
+  (e.g. `AGENT_EXECUTION_FAILED`) when it failed - independent of the
+  Queue Summary's counts.
+
+DEBUG-level candidate diagnostics (`repository_search`, `candidate_found`,
+`candidate_excluded`) and the existing Task 013 `cycle_start`/`cycle_end`
+structured logs are unchanged.
 
 ## Development
 

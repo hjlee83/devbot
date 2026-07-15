@@ -53,3 +53,35 @@ distinguishable recovery hint (`devbot.reliability.session_limit_block_reason`)
 so an operator does not have to guess why automatic retry never happens.
 This keeps the state machine unchanged while still satisfying "avoid
 infinite retries" and "a clear recovery hint" (Task 019 CP-019-9).
+
+## 2026-07-15 — Queue summary reuses issue_to_task's state resolution; it does not add a second ambiguity rule
+Task 020's queue summary counts each `IssueTask` into exactly one of six
+stable-state buckets by summing `IssueTask.state` - the single `TaskState`
+`devbot.polling.issue_to_task` (via `_matched_task_states`, first match in
+`TaskState` declaration order: READY, WORKING, REVIEW, REWORK,
+MANUAL_ACTION, BLOCKED, DONE) already resolves from an Issue's raw GitHub
+labels for scheduling. This guarantees the summary can never double-count
+an Issue across buckets (CP-020-8) without inventing a second resolution
+rule that could disagree with what the scheduler itself sees. When an
+Issue carries more than one `devbot:*` state label, `log_state_label_conflict`
+(DEBUG) surfaces the anomaly and which state won - it does not change the
+count. Note this first-match order is *not* the same precedence
+`devbot.issue_state._current_state` uses when validating a label
+*transition* (`_LABEL_PRECEDENCE`: DONE, BLOCKED, WORKING, MANUAL_ACTION,
+REWORK, REVIEW, READY - closer to reverse order) - that pre-existing
+inconsistency between candidate collection and transition validation is
+unchanged by this Task and out of scope here; see Improvement Suggestions
+in `results/020-daemon-queue-summary.md`.
+
+## 2026-07-15 — Cycle result reports the first failure over a mixed cycle's successes
+`devbot.polling._normalized_cycle_result()` scans `results` (candidate-
+collection hard errors first, then executed Job results in selection
+order) and returns the first genuine failure's `FailureCategory` if any
+result failed, only falling back to a succeeded Job's `JobType` when none
+did. With the default `max_concurrent_jobs=1` a cycle has at most one
+result, so this only matters once concurrency is raised above 1 and two
+different repositories' jobs disagree on outcome in the same cycle - a
+case the Task 020 contract's examples do not cover. Surfacing the failure
+prominently was chosen over surfacing whichever job happens to be first in
+scheduling order, since a failure is normally the more actionable signal
+for an operator glancing at one `Cycle Result` line.

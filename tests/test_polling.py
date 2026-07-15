@@ -1614,3 +1614,274 @@ def test_logging_failure_does_not_abort_job_execution() -> None:
     assert result.status is PollingStatus.AGENT_COMPLETED
     assert result.task is not None
     assert result.task.number == 1
+
+
+# --- Task 020: daemon queue summary and cycle logging ----------------------
+
+
+def test_cycle_logs_queue_summary_once(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-020-1: exactly one operator-level queue summary is emitted per
+    cycle, regardless of how many repositories/Issues are involved."""
+    repo_a = _repo("repo-a")
+    repo_b = _repo("repo-b")
+    config = _config([repo_a, repo_b])
+    ready_issue = _issue(repo_a.full_name, 1, labels=["devbot:ready"])
+    blocked_issue = _issue(repo_b.full_name, 2, labels=["devbot:blocked"])
+    github_client = FakeGitHubClient(
+        {repo_a.full_name: [ready_issue], repo_b.full_name: [blocked_issue]}
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    summaries = [r for r in caplog.records if getattr(r, "event", None) == "queue_summary"]
+    assert len(summaries) == 1
+
+
+def test_queue_summary_includes_all_workflow_states(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-020-2: the queue summary reports a count for every stable
+    workflow state the scheduler uses (ready/review/rework/blocked/
+    manual-action/working), each counted independently."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issues = [
+        _issue(repo.full_name, 1, labels=["devbot:ready"]),
+        _issue(repo.full_name, 2, labels=["devbot:review"]),
+        _issue(repo.full_name, 3, labels=["devbot:rework"]),
+        _issue(repo.full_name, 4, labels=["devbot:blocked"]),
+        _issue(repo.full_name, 5, labels=["devbot:manual-action"]),
+        _issue(repo.full_name, 6, labels=["devbot:working"]),
+    ]
+    github_client = FakeGitHubClient({repo.full_name: issues})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "queue_summary")
+    assert record.ready == 1
+    assert record.review == 1
+    assert record.rework == 1
+    assert record.blocked == 1
+    assert record.manual_action == 1
+    assert record.working == 1
+
+
+def test_no_runnable_task_is_reported_once(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-020-3: an empty cycle emits a single normalized `NO_RUNNABLE_TASK`
+    cycle result rather than multiple free-form messages restating the
+    same "nothing to do" fact."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    github_client = FakeGitHubClient({repo.full_name: []})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        result = service.run_once()
+
+    assert result.status is PollingStatus.NO_READY_TASK
+    results = [r for r in caplog.records if getattr(r, "event", None) == "cycle_result"]
+    assert len(results) == 1
+    assert results[0].result == "NO_RUNNABLE_TASK"
+    no_work_prose = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) is None
+        and ("Issue가 없습니다" in r.getMessage() or "선택하지 않습니다" in r.getMessage())
+    ]
+    assert no_work_prose == []
+
+
+def test_selected_job_summary_contains_identity_fields(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-020-4: a selected job's summary reports repository, Issue, PR
+    (when already known), and job type together in one structured
+    entry."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug")
+    linked_pr = _pull_request(101, issue_number=7, head_sha="sha-1")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    review_service.process.return_value = MagicMock(
+        status="MERGE READY", issue_state=TaskState.REVIEW, message="reviewed: MERGE READY"
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        review_service=review_service,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    selected = [r for r in caplog.records if getattr(r, "event", None) == "job_selected"]
+    assert len(selected) == 1
+    record = selected[0]
+    assert record.repository == repo.full_name
+    assert record.issue_number == 7
+    assert record.pr_number == 101
+    assert record.job_type == "review"
+
+
+def test_cycle_result_is_reported_separately_from_queue_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CP-020-5: the cycle result is its own log entry, independent of the
+    queue-summary counts - a successful IMPLEMENT job reports
+    result=IMPLEMENT regardless of how many other Issues are queued, and
+    the cycle-result record itself carries no queue-count fields."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    ready_issue = _issue(repo.full_name, 1, labels=["devbot:ready"])
+    blocked_issue = _issue(repo.full_name, 2, labels=["devbot:blocked"])
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    github_client = FakeGitHubClient({repo.full_name: [ready_issue, blocked_issue]})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    queue = next(r for r in caplog.records if getattr(r, "event", None) == "queue_summary")
+    result = next(r for r in caplog.records if getattr(r, "event", None) == "cycle_result")
+    assert queue.ready == 1
+    assert queue.blocked == 1
+    assert result.result == "IMPLEMENT"
+    assert not hasattr(result, "ready")
+    assert not hasattr(result, "blocked")
+
+
+def test_debug_logging_preserves_candidate_details(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-020-6: DEBUG still carries per-candidate found/excluded detail
+    even though INFO now only shows the queue summary/selected/cycle
+    result triad."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    ready_issue = _issue(repo.full_name, 1, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="devbot"):
+        service.run_once()
+
+    assert any(getattr(r, "event", None) == "candidate_found" for r in caplog.records)
+    assert any(getattr(r, "event", None) == "queue_summary" for r in caplog.records)
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        caplog.clear()
+        service.run_once()
+
+    assert not any(getattr(r, "event", None) == "candidate_found" for r in caplog.records)
+    assert any(getattr(r, "event", None) == "queue_summary" for r in caplog.records)
+
+
+def test_queue_logging_preserves_structured_context(caplog: pytest.LogCaptureFixture) -> None:
+    """CP-020-7: the new queue-summary/selected/cycle-result logs keep the
+    Task 013 correlation fields (cycle_id, repository, Issue, job type,
+    elapsed time) alongside their new content."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    ready_issue = _issue(repo.full_name, 1, labels=["devbot:ready"])
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    queue = next(r for r in caplog.records if getattr(r, "event", None) == "queue_summary")
+    selected = next(r for r in caplog.records if getattr(r, "event", None) == "job_selected")
+    result = next(r for r in caplog.records if getattr(r, "event", None) == "cycle_result")
+
+    assert isinstance(queue.cycle_id, str) and queue.cycle_id
+    assert selected.cycle_id == queue.cycle_id
+    assert selected.repository == repo.full_name
+    assert selected.issue_number == 1
+    assert selected.job_type == "implement"
+    assert result.cycle_id == queue.cycle_id
+    assert isinstance(result.elapsed_ms, float)
+
+
+def test_queue_summary_does_not_double_count_issue_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CP-020-8: an Issue carrying more than one `devbot:*` state label
+    (a malformed/stale manual edit) is still counted into exactly one
+    queue-summary bucket - the same single-state resolution
+    `devbot.polling.issue_to_task` already applies for scheduling, not a
+    second independent rule per bucket."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    conflicted_issue = _issue(
+        repo.full_name, 9, labels=["devbot:review", "devbot:blocked"], title="Conflicting labels"
+    )
+    github_client = FakeGitHubClient({repo.full_name: [conflicted_issue]})
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="devbot"):
+        service.run_once()
+
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "queue_summary")
+    total = (
+        record.ready
+        + record.review
+        + record.rework
+        + record.blocked
+        + record.manual_action
+        + record.working
+    )
+    assert total == 1
+    # `TaskState` declaration order (READY, WORKING, REVIEW, REWORK,
+    # MANUAL_ACTION, BLOCKED, DONE) resolves the conflict to REVIEW here -
+    # the same rule `issue_to_task` already used before Task 020.
+    assert record.review == 1
+    assert record.blocked == 0
+
+    conflicts = [r for r in caplog.records if getattr(r, "event", None) == "state_label_conflict"]
+    assert len(conflicts) == 1
+    assert conflicts[0].repository == repo.full_name
+    assert conflicts[0].issue_number == 9
+    assert conflicts[0].resolved_state == "review"
+    assert set(conflicts[0].matched_states) == {"review", "blocked"}

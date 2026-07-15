@@ -217,7 +217,16 @@ repo's Git history.
    `cycle 종료: cycle_id=... 소요=...ms 후보(rework=... review=...
    implement=...) 선택=.../... 결과=...`로 끝난다. 같은 `cycle_id`를 가진
    로그 줄을 모으면 그 cycle에서 실제로 무엇을 검색하고, 무엇을 후보로
-   만들고, 무엇을 선택해 실행했는지 전부 재구성할 수 있다.
+   만들고, 무엇을 선택해 실행했는지 전부 재구성할 수 있다. Task 020부터는
+   이 사이에 **Queue Summary**(`ready`/`review`/`rework`/`blocked`/
+   `manual-action`/`working` 6개 상태 전체 개수, cycle당 정확히 한 번),
+   Job이 선택된 경우에만 나오는 **Selected**(`repo`/`issue`/`pr`/
+   `job_type`), 그리고 **Cycle Result**(`NO_RUNNABLE_TASK` 또는
+   `IMPLEMENT`/`REVIEW`/`REWORK` 또는 실패 분류 코드, 대문자 정규화된 값
+   하나)가 순서대로 출력된다 - "이 cycle의 큐 상태", "무엇을 골랐는지",
+   "결과가 무엇인지"를 서로 다른 세 줄로 분리해서 보는 것이 목적이다
+   (README.md "Queue Summary / Selected / Cycle Result (Task 020)" 절 참고).
+   기존 `cycle 시작`/`cycle 종료` 구조화 로그와 필드는 그대로 남아있다.
 4. **저장소별 검색 조건 확인 (DEBUG)**: `저장소 검색: cycle_id=... repo=...
    state=open label_filter=devbot:*(client-side) 결과 수=...`로 GitHub에
    실제로 어떤 조건을 보냈고 몇 건이 돌아왔는지 확인한다. DevBot은 라벨로
@@ -240,17 +249,24 @@ repo's Git history.
    | `lower_priority` | 같은 저장소에서 더 높은 순위(REWORK>REVIEW>IMPLEMENT, 우선순위, 나이, Issue 번호) 후보가 이미 선택됨 |
    | `dry_run` | 예약된 코드 (Task 013 시점에는 실제로 발생하지 않음) |
 
-6. **선택된 Job과 실행 시간 확인**: `Job 선택: cycle_id=... repo=...
-   issue=#... job_type=... 순위=...` 뒤에 `Job 시작`/`Job 종료`가 이어진다.
-   `Job 종료` 줄의 `소요=...ms`가 총 소요 시간이고, DEBUG에서는
-   `단계 완료: ... stage=workspace_validate|agent_execution|delivery|
-   rework_process|review_process 소요=...ms`로 단계별 소요 시간도 확인할
-   수 있다.
+6. **선택된 Job과 실행 시간 확인**: 후보 제외 로그 뒤에, 이번 cycle에
+   실제로 선택된 Job이 있으면 `Selected\n  repo     : ...\n  issue    :
+   #...\n  pr       : ...\n  job_type : ...` 블록이 (선택된 Job마다 한 번)
+   출력되고, 이어서 `Job 시작`/`Job 종료`가 나온다. `Job 종료` 줄의
+   `소요=...ms`가 총 소요 시간이고, DEBUG에서는 `단계 완료: ...
+   stage=workspace_validate|agent_execution|delivery|rework_process|
+   review_process 소요=...ms`로 단계별 소요 시간도 확인할 수 있다.
+   Job이 하나도 선택되지 않은 cycle(`Cycle Result`가
+   `NO_RUNNABLE_TASK`)에는 `Selected` 블록 자체가 나오지 않는다.
 7. **실패 원인 확인**: Job이 실패(`workspace_invalid`/`agent_failed`/
    `blocked`/`iteration_error`)로 끝나면 `Job 종료` 바로 뒤에 `Job 실패
    요약: ...`이 ERROR 수준으로 남는다. Agent의 원본 stdout/stderr 전체는
    INFO에 출력되지 않고, 이 요약도 Secret/Token/Authorization 값은 항상
-   `***`로 치환된다.
+   `***`로 치환된다. cycle 맨 끝의 `Cycle Result`도 이 실패를
+   `AGENT_EXECUTION_FAILED`/`DELIVERY_FAILED`/`REVIEW_FAILED`/
+   `GITHUB_API_ERROR` 등 같은 `FailureCategory` 코드로 요약해서 보여준다 -
+   `Job 실패 요약`을 못 봤어도 `Cycle Result` 한 줄만으로 실패 여부와
+   대략적인 원인 분류를 알 수 있다.
 
 `--verbose`는 `.env`나 실제 프로세스 환경을 변경하지 않고 그 실행에만
 적용된다. 운영 중인 데몬을 잠시 더 자세히 보고 싶을 때는 별도로 `--once
