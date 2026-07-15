@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -8,6 +8,7 @@ from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
 from devbot.rework import ReworkActionScope, ReworkService, classify_rework_action_scope
+from devbot.timeline import COMMENT_MARKER, TimelineService, parse_events
 
 BRANCH = "devbot/myrepo-42-existing-branch"
 
@@ -52,6 +53,8 @@ def _service(
     push: MagicMock | None = None,
     current_branch=None,
     has_changes=None,
+    timeline: TimelineService | None = None,
+    actor: str | None = None,
 ) -> tuple[ReworkService, IssueStateWriter | MagicMock, MagicMock]:
     state_writer = state_writer or MagicMock(spec=IssueStateWriter)
     if isinstance(state_writer, MagicMock):
@@ -66,8 +69,52 @@ def _service(
         push=push or MagicMock(),
         current_branch=current_branch or (lambda repository: BRANCH),
         has_changes=has_changes or (lambda repository: True),
+        timeline=timeline,
+        actor=actor,
     )
     return service, state_writer, write_client
+
+
+class _TimelineBackend:
+    """Minimal in-memory Issue-comment store for wiring a real
+    `TimelineService` without HTTP mocking (Task 024) - duck-typed to only
+    the `read_client`/`write_client` methods `TimelineService` calls."""
+
+    def __init__(self, *, issue: GitHubIssue, seed_body: str | None = None) -> None:
+        self._issue = issue
+        self._comment_id: int | None = 1 if seed_body is not None else None
+        self._body = seed_body or ""
+        self.create_calls = 0
+        self.update_calls = 0
+
+    def get_issue(self, repository: RepositoryConfig, issue_number: int) -> GitHubIssue:
+        return self._issue
+
+    def list_issue_comments(self, repository: RepositoryConfig, issue_number: int):
+        if self._comment_id is None:
+            return []
+        return [
+            PullRequestComment(
+                id=self._comment_id,
+                author="devbot",
+                body=self._body,
+                created_at=self._issue.created_at,
+                reactions={},
+            )
+        ]
+
+    def create_comment(self, repository: RepositoryConfig, issue_number: int, body: str) -> None:
+        self._comment_id = 1
+        self._body = body
+        self.create_calls += 1
+
+    def update_comment(self, repository: RepositoryConfig, comment_id: int, body: str) -> None:
+        self._body = body
+        self.update_calls += 1
+
+    @property
+    def body(self) -> str:
+        return self._body
 
 
 def test_rework_classifies_repository_change_comment() -> None:
@@ -566,3 +613,69 @@ def test_rework_with_real_dry_run_state_writer_completes_full_cycle() -> None:
     result = service.process(repository, _issue(), BRANCH, [_comment()])
 
     assert result.message == "reworked"
+
+
+# --- Task 024: automatic Timeline recording -------------------------------
+
+
+_CYCLE_1_REQUEST_CHANGES = "\n".join(
+    [
+        "<!-- devbot-timeline:v1 issue=42 pr=- cycle=1 phase=queue event=ready "
+        "result=- at=2026-01-01T00:00:00Z -->",
+        "<!-- devbot-timeline:v1 issue=42 pr=- cycle=1 phase=dev event=start "
+        "result=- actor=claude at=2026-01-01T00:01:00Z -->",
+        "<!-- devbot-timeline:v1 issue=42 pr=16 cycle=1 phase=dev event=end "
+        "result=pushed actor=claude at=2026-01-01T00:10:00Z -->",
+        "<!-- devbot-timeline:v1 issue=42 pr=16 cycle=1 phase=review event=start "
+        "result=- actor=codex at=2026-01-01T00:11:00Z -->",
+        "<!-- devbot-timeline:v1 issue=42 pr=16 cycle=1 phase=review event=end "
+        "result=request-changes actor=codex at=2026-01-01T00:20:00Z -->",
+    ]
+)
+
+
+def test_rework_job_records_next_dev_cycle() -> None:
+    """CP-024-4: a REWORK Job's `dev:start`/`dev:end` land on the *existing*
+    Timeline comment as cycle 2 - the cycle number a fresh `REQUEST CHANGES`
+    review:end (cycle 1) already implies, never overwriting cycle 1's
+    history."""
+    backend = _TimelineBackend(
+        issue=_issue(labels=("devbot:rework",)),
+        seed_body=f"{COMMENT_MARKER}\n{_CYCLE_1_REQUEST_CHANGES}\n",
+    )
+    timeline = TimelineService(
+        read_client=backend,
+        write_client=backend,
+        dry_run=False,
+        clock=lambda: datetime(2026, 1, 1, 0, 25, tzinfo=UTC),
+    )
+    service, _, _ = _service(timeline=timeline, actor="claude")
+    repository = _repo()
+
+    result = service.process(repository, _issue(labels=("devbot:rework",)), BRANCH, [_comment()])
+
+    assert result.message == "reworked"
+    events = parse_events(backend.body)
+    dev_starts = [e for e in events if e.phase == "dev" and e.event == "start"]
+    dev_ends = [e for e in events if e.phase == "dev" and e.event == "end"]
+    assert len(dev_starts) == 2, "cycle 1의 dev:start를 덮어쓰지 않고 새 marker를 추가해야 한다"
+    assert dev_starts[-1].cycle == 2
+    assert dev_starts[-1].actor == "claude"
+    assert dev_ends[-1].cycle == 2
+    assert dev_ends[-1].result == "pushed"
+
+
+def test_rework_timeline_write_failure_preserves_primary_outcome() -> None:
+    """CP-024-10 (rework side): a Timeline write failure never blocks or
+    otherwise changes the rework's own GitHub outcome."""
+    timeline = MagicMock(spec=TimelineService)
+    timeline.start.side_effect = RuntimeError("timeline boom")
+    timeline.end.side_effect = RuntimeError("timeline boom")
+    service, state_writer, _ = _service(timeline=timeline, actor="claude")
+    repository = _repo()
+
+    result = service.process(repository, _issue(), BRANCH, [_comment()])
+
+    assert result.message == "reworked"
+    assert result.issue_state == TaskState.REVIEW
+    state_writer.mark_for_review.assert_called_once()

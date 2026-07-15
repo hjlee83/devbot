@@ -7,6 +7,7 @@ reviewers reading `results/018-timeline-cli.md` against this diff, matching
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -24,6 +25,9 @@ from devbot.timeline import (
     TimelineOverlappingStartError,
     TimelineService,
     parse_events,
+    safe_end,
+    safe_ready,
+    safe_start,
 )
 
 
@@ -542,3 +546,135 @@ def test_timeline_start_dry_run_flag_opts_into_preview_only(
 
     assert exit_code == 0
     assert _SpyTimelineService.last_dry_run is True
+
+
+# --- Task 024: automatic Timeline recording -------------------------------
+
+
+def test_ready_records_exactly_one_event() -> None:
+    """CP-024-1 (unit level): `TimelineService.ready()` writes a marker the
+    first time, and is a no-op on every later replay regardless of which
+    cycle is currently active."""
+    backend = _FakeGitHubBackend(issue_number=40, labels=["devbot:working"])
+    service, _read_session, write_session = _service(
+        backend, clock=datetime(2026, 7, 16, 9, 0, tzinfo=UTC)
+    )
+
+    first = service.ready(_repository(), 40)
+    assert not first.idempotent
+    write_session.post.assert_called_once()
+
+    second = service.ready(_repository(), 40)
+    assert second.idempotent
+    write_session.post.assert_called_once()
+    write_session.patch.assert_not_called()
+
+    (body,) = backend.comments.values()
+    events = parse_events(body)
+    assert len(events) == 1
+    assert events[0].phase == "queue"
+    assert events[0].event == "ready"
+
+
+def test_automatic_timeline_recording_is_idempotent() -> None:
+    """CP-024-8: retrying the same lifecycle boundary through the daemon's
+    `safe_start`/`safe_end` helpers does not append duplicate markers -
+    `TimelineService`'s own idempotency (CP-018-8) is what every automatic
+    call site (`devbot.polling`/`devbot.review`/`devbot.rework`) relies on."""
+    backend = _FakeGitHubBackend(issue_number=41, labels=["devbot:working"])
+    clock = datetime(2026, 7, 16, 9, 0, tzinfo=UTC)
+
+    service, _read_session, write_session = _service(backend, clock=clock)
+    safe_start(service, _repository(), 41, phase="dev", actor="claude")
+    safe_start(service, _repository(), 41, phase="dev", actor="claude")
+
+    assert write_session.post.call_count == 1, "재시도된 dev:start가 중복 comment를 만들면 안 된다"
+    (body,) = backend.comments.values()
+    assert len(parse_events(body)) == 1
+
+    service, _read_session, write_session = _service(backend, clock=clock)
+    safe_end(service, _repository(), 41, phase="dev", actor="claude", result="pushed")
+    safe_end(service, _repository(), 41, phase="dev", actor="claude", result="pushed")
+
+    (body,) = backend.comments.values()
+    assert len(parse_events(body)) == 2, "재시도된 dev:end가 중복 marker를 추가하면 안 된다"
+
+
+def test_safe_helpers_swallow_timeline_write_failures() -> None:
+    """CP-024-10 (unit level): `safe_ready`/`safe_start`/`safe_end` never
+    raise even when the underlying `TimelineService` call fails - this is
+    the single implementation choke point every automatic call site relies
+    on to preserve its own primary outcome."""
+    timeline = MagicMock(spec=TimelineService)
+    timeline.ready.side_effect = RuntimeError("boom")
+    timeline.start.side_effect = RuntimeError("boom")
+    timeline.end.side_effect = RuntimeError("boom")
+    logger = logging.getLogger("devbot-test-safe-helpers")
+
+    safe_ready(timeline, _repository(), 1, logger=logger)
+    safe_start(timeline, _repository(), 1, phase="dev", actor="claude", logger=logger)
+    safe_end(
+        timeline, _repository(), 1, phase="dev", actor="claude", result="blocked", logger=logger
+    )
+
+    # `timeline=None` (the default on every affected dataclass) is also a
+    # silent no-op - no attribute access on `None` is ever attempted.
+    safe_ready(None, _repository(), 1)
+    safe_start(None, _repository(), 1, phase="dev", actor="claude")
+    safe_end(None, _repository(), 1, phase="dev", actor="claude", result="blocked")
+
+
+def test_manual_timeline_cli_remains_compatible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CP-024-11: Task 018's `timeline start`/`end`/`status` behavior is
+    unaffected by Task 024's automatic-recording additions - the daemon-only
+    `ready`/`safe_start`/`safe_end` helpers are never invoked by this manual
+    CLI path, so no `ready` event ever appears from a manual sequence."""
+    backend = _FakeGitHubBackend(issue_number=70, labels=["devbot:working"])
+    read_client, write_client, _read_session, write_session = backend.build_clients()
+    monkeypatch.setattr("devbot.main.GitHubClient", lambda token: read_client)
+    monkeypatch.setattr("devbot.main.GitHubWriteClient", lambda token: write_client)
+
+    env_path, repositories_path = _write_env(tmp_path, dry_run="true")
+
+    start_exit = main(
+        ["timeline", "start", "--issue", "70", "--phase", "dev", "--actor", "claude"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+    end_exit = main(
+        [
+            "timeline",
+            "end",
+            "--issue",
+            "70",
+            "--phase",
+            "dev",
+            "--actor",
+            "claude",
+            "--result",
+            "pushed",
+            "--pr",
+            "35",
+        ],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+    status_exit = main(
+        ["timeline", "status", "--issue", "70"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert (start_exit, end_exit, status_exit) == (0, 0, 0)
+    assert write_session.post.call_count == 1
+    assert write_session.patch.call_count == 1
+    (body,) = backend.comments.values()
+    events = parse_events(body)
+    assert len(events) == 2
+    assert events[0].phase == "dev" and events[0].event == "start"
+    assert events[1].phase == "dev" and events[1].event == "end" and events[1].result == "pushed"
+    assert all(
+        e.event != "ready" for e in events
+    ), "수동 timeline 명령은 ready 이벤트를 만들지 않는다"

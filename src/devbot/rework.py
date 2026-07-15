@@ -26,6 +26,7 @@ local state (see `docs/07-decisions.md`).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -50,6 +51,7 @@ from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
 from devbot.reliability import session_limit_block_reason
+from devbot.timeline import TimelineService, safe_end, safe_start
 
 _MENTION = "@devbot"
 _PROCESSED_REACTION = "eyes"
@@ -181,6 +183,12 @@ class ReworkService:
     push: PushFn = field(default=push_task_branch)
     current_branch: CurrentBranchFn = field(default=current_git_branch)
     has_changes: HasChangesFn = field(default=repository_has_changes)
+    # Task 024: automatic `dev:start`/`dev:end` recording for this rework
+    # cycle. `None` (every existing caller/test that doesn't set this) is a
+    # silent no-op - see `devbot.timeline.safe_start`/`safe_end`.
+    timeline: TimelineService | None = None
+    actor: str | None = None
+    logger: logging.Logger = field(default_factory=lambda: logging.getLogger("devbot"))
 
     def process(
         self,
@@ -207,6 +215,16 @@ class ReworkService:
         action_scope = classify_rework_action_scope(comment.body)
 
         working_issue = self.state_writer.claim(repository, issue, job_type=JobType.REWORK)
+        actor = self.actor or "unknown"
+        safe_start(
+            self.timeline, repository, issue.number, phase="dev", actor=actor, logger=self.logger
+        )
+
+        def _end(result: str) -> None:
+            safe_end(
+                self.timeline, repository, issue.number, phase="dev", actor=actor, result=result,
+                logger=self.logger,
+            )
 
         if action_scope is not ReworkActionScope.REPOSITORY_CHANGE:
             reason = (
@@ -216,6 +234,7 @@ class ReworkService:
             self.state_writer.require_manual_action(
                 repository, working_issue, reason, job_type=JobType.REWORK
             )
+            _end("manual-action")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -230,6 +249,7 @@ class ReworkService:
         except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
             reason = f"현재 브랜치 확인 중 오류로 rework 중단: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -245,6 +265,7 @@ class ReworkService:
                 f"expected={branch!r} actual={actual_branch!r}"
             )
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -262,6 +283,7 @@ class ReworkService:
             # same as the generic Agent-failure path below.
             reason = session_limit_block_reason(f"Agent 실행 중 오류로 rework 중단: {exc}")
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -274,6 +296,7 @@ class ReworkService:
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - record, then block
             reason = f"Agent 실행 중 오류로 rework 중단: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -289,6 +312,7 @@ class ReworkService:
         except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
             reason = f"검증 실행 중 오류로 rework 중단: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -308,6 +332,7 @@ class ReworkService:
                 f"{' '.join(verification.failed_command or ())}\n\n{verification.output}",
                 job_type=JobType.REWORK,
             )
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -320,6 +345,7 @@ class ReworkService:
             )
 
         if self.dry_run:
+            _end("pushed")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -349,6 +375,7 @@ class ReworkService:
                         "commit/push 없이 review로 복귀"
                     ),
                 )
+                _end("pushed")
                 return ReworkResult(
                     triggered=True,
                     comment=comment,
@@ -368,6 +395,7 @@ class ReworkService:
         except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working`
             reason = f"커밋/푸시/댓글 반응 처리 중 오류로 rework 중단: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -387,6 +415,7 @@ class ReworkService:
         except Exception as exc:  # noqa: BLE001 - commit/push already happened; block the claim
             reason = f"rework 성공 후 review 상태 전이 실패: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
@@ -401,6 +430,7 @@ class ReworkService:
                 message="blocked: review transition failed",
             )
 
+        _end("pushed")
         return ReworkResult(
             triggered=True,
             comment=comment,
