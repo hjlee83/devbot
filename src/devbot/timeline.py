@@ -219,7 +219,7 @@ def _describe_waiting(
         return None, "없음 (기록된 이벤트 없음)"
 
     latest_cycle = cycle_numbers[-1]
-    cv = cycles[latest_cycle]
+    cv = cycles.get(latest_cycle, _CycleView(number=latest_cycle))
 
     if cv.dev_start is not None and cv.dev_end is None:
         return "dev", f"없음 (Cycle {latest_cycle} Dev 진행 중)"

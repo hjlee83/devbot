@@ -436,7 +436,9 @@ def test_review_job_records_review_end_result() -> None:
     merge_ready_runner.run.return_value = AgentRunResult(
         executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
     )
-    service, _, _, _ = _service(reviewer_runner=merge_ready_runner, timeline=timeline, actor="codex")
+    service, _, _, _ = _service(
+        reviewer_runner=merge_ready_runner, timeline=timeline, actor="codex"
+    )
     _process(service)
     timeline.end.assert_called_once_with(
         _repo(), 17, phase="review", actor="codex", result="merge-ready", pr=16

@@ -675,4 +675,6 @@ def test_manual_timeline_cli_remains_compatible(
     assert len(events) == 2
     assert events[0].phase == "dev" and events[0].event == "start"
     assert events[1].phase == "dev" and events[1].event == "end" and events[1].result == "pushed"
-    assert all(e.event != "ready" for e in events), "수동 timeline 명령은 ready 이벤트를 만들지 않는다"
+    assert all(
+        e.event != "ready" for e in events
+    ), "수동 timeline 명령은 ready 이벤트를 만들지 않는다"

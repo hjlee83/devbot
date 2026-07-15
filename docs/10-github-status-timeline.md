@@ -1,14 +1,16 @@
 # GitHub Status Timeline Protocol
 
-Version: 1.0.0
-Last Updated: 2026-07-15
+Version: 1.1.0
+Last Updated: 2026-07-16
 
 이 문서는 Task 017의 산출물이다. DevBot의 현재 상태를 사람과 모든 Agent(GPT/Claude/
 Gemini 등, VPS에서 실행되는 DevBot 자신 포함)가 동일한 방식으로 읽고 답할 수 있도록
 GitHub 기반 상태 타임라인 규격을 정의한다.
 
-이 문서는 프로토콜/규격 문서다. DevBot이 아래 marker를 실제로 자동 기록하는 구현은
-이 Task의 범위가 아니며 후속 Task로 남는다 (`## 후속 구현 범위` 참고).
+이 문서는 프로토콜/규격 문서다. Task 018이 수동 `devbot timeline start/end/status`
+CLI를, Task 024가 daemon lifecycle(IMPLEMENT/REVIEW/REWORK Job)의 자동 marker
+기록(`devbot.timeline.safe_ready`/`safe_start`/`safe_end`)을 각각 구현했다 -
+자세한 내용은 `## 후속 구현 범위` 참고.
 
 ---
 
@@ -249,9 +251,9 @@ Total elapsed: 87m
 - 모든 Agent(구현/리뷰 역할, 그리고 상태를 "질문받는" GPT/Claude/Gemini 앱 등)는
   이 문서의 라벨 의미(3절), marker 필드(4절), 이벤트(5절), 구간 계산 규칙(6절)만
   가지고 동일한 Status Card(7절)를 재구성할 수 있어야 한다.
-- 이벤트 marker가 아직 자동 기록되지 않는 과거/현재 Task 구간(9절)에 대해서는,
-  GitHub의 Issue/PR 타임스탬프(라벨 변경 시각, comment 시각, PR 생성/커밋/리뷰
-  시각)로 최선 추정(best-effort)한다는 점을 답변에 명시한다.
+- Task 024 이전에 완료된 과거 Task 구간(9절 - 역사적 backfill은 범위 밖)은 이벤트
+  marker가 없으므로, GitHub의 Issue/PR 타임스탬프(라벨 변경 시각, comment 시각, PR
+  생성/커밋/리뷰 시각)로 최선 추정(best-effort)한다는 점을 답변에 명시한다.
 - 상태 질문에는 항상 Status Card 형식(7절)을 우선 사용하고, 필요할 때만 자연어
   설명을 덧붙인다.
 
@@ -261,9 +263,14 @@ Total elapsed: 87m
 
 다음은 이 프로토콜을 정의만 하고, 실제 구현은 이후 Task로 남긴다.
 
-- DevBot이 5절 이벤트가 발생할 때마다 4절 marker를 GitHub comment에 자동으로 남기는
-  구현.
-- `devbot status` 같은 CLI로 7절 Status Card를 자동 생성하는 구현.
+- ~~DevBot이 5절 이벤트가 발생할 때마다 4절 marker를 GitHub comment에 자동으로
+  남기는 구현.~~ Task 024에서 구현 완료 (`src/devbot/timeline.py`의
+  `safe_ready`/`safe_start`/`safe_end`, `devbot.polling`/`devbot.review`/
+  `devbot.rework`에서 호출). Timeline write 실패는 진단으로만 노출되고 Job의
+  실제 결과를 대체하지 않는다(`results/024-timeline-auto-recording.md`).
+- ~~`devbot timeline status` 같은 CLI로 7절 Status Card를 자동 생성하는 구현.~~
+  Task 018에서 구현 완료 (`devbot timeline start/end/status`).
+- 자동 Merge, historical backfill(Task 024 이전 완료 Task 구간에 marker 소급 기록).
 - GitHub 상의 status card 자동 업데이트(예: PR 설명 갱신).
 - Dashboard/UI.
 - VPS 로그 수집 파이프라인.
