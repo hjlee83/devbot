@@ -146,6 +146,37 @@ def local_branch_exists(repository: RepositoryConfig, branch: str) -> bool:
     return completed.returncode == 0
 
 
+def branch_has_implementation_evidence(
+    repository: RepositoryConfig, branch: str, base_branch: str
+) -> bool:
+    """True when `branch` has more than one commit ahead of `base_branch`
+    (Task 021 Scope §7/§8) - i.e. more than just a single Task-contract-
+    authoring commit that opened the branch/PR, so there is git history
+    evidence of real implementation work beyond that contract-only commit.
+
+    Best-effort and conservative: any git failure (missing local ref,
+    unreachable base, a workspace path that does not exist yet, ...) is
+    treated as "no evidence" rather than raised - this check exists
+    specifically to prevent a false "implementation completed" positive
+    (CP-021-11), so an inconclusive result must never default to True."""
+    try:
+        completed = subprocess.run(
+            ["git", "rev-list", "--count", f"{base_branch}..{branch}"],
+            cwd=str(repository.local_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    if completed.returncode != 0:
+        return False
+    try:
+        return int(completed.stdout.strip()) > 1
+    except ValueError:
+        return False
+
+
 def current_git_branch(repository: RepositoryConfig) -> str:
     """Return the branch currently checked out in `repository.local_path`
     (the literal string `"HEAD"` if the checkout is detached)."""

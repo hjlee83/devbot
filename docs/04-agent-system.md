@@ -105,5 +105,40 @@ before adding the target state, so an Issue ends with exactly one state
 label. Concurrent in-process claims for the same repository/Issue are
 rejected before any Agent is run.
 
+## Agent outcome classification (Task 021)
+
+`devbot.agent_outcome.classify_agent_outcome()` turns one implementer
+`AgentRunResult` into an explicit `devbot.models.AgentOutcome` -
+`implementation_completed`, `implementation_skipped`,
+`no_repository_changes`, `approval_required`, `network_blocked`,
+`session_limit`, `repository_locked`, `agent_failed`, or `unknown` -
+instead of `PollingService._run_claimed_implement_job` inferring success
+from `AgentRunResult.failed` being False alone. It prefers a structured
+`AgentRunResult.outcome_hint` when a runner sets one; every runner shipped
+today falls back to text-matching predicates in `devbot.agents.base`
+(`is_approval_required_output`, `is_session_limit_output`,
+`is_network_blocked_output`, `is_repository_locked_output`,
+`is_implementation_skipped_output`), checked *before* `.failed` so a
+genuine block is recognized even from a process that exited 0.
+
+`devbot.agent_outcome.AGENT_OUTCOME_TRANSITIONS` declares each outcome's
+deterministic destination: `approval_required`/`network_blocked`/
+`repository_locked`/`implementation_skipped` -> `devbot:manual-action`;
+`session_limit`/`agent_failed`/`unknown` -> `devbot:blocked` (never a new
+label - `docs/07-decisions.md`'s existing session-limit decision); only
+`implementation_completed` proceeds to delivery. None of these ever target
+`devbot:working`.
+
+Classification alone is still not proof of a completed implementation.
+Delivery only ever runs after `implementation_completed`, and
+`devbot:review` additionally requires either a real commit/push this run,
+or - when delivery reports `no_repository_changes` against a reused linked
+PR - `devbot.delivery.branch_has_implementation_evidence()` confirming that
+PR's branch carries git history beyond its own pre-existing
+Task-contract-authoring commit. A linked PR's mere existence (a
+contract-only PR, e.g. Issue #41's motivating incident) is not sufficient
+on its own. See `docs/07-decisions.md`'s 2026-07-15 "Agent outcome
+classification closes the contract-only-PR false-review path" entry.
+
 The target repository's root `AGENTS.md` is the project-specific source of truth.
 DevBot does not duplicate those rules into its own repository-specific configuration.

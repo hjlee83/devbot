@@ -73,6 +73,48 @@ inconsistency between candidate collection and transition validation is
 unchanged by this Task and out of scope here; see Improvement Suggestions
 in `results/020-daemon-queue-summary.md`.
 
+## 2026-07-15 — Agent outcome classification closes the contract-only-PR false-review path
+Task 021's motivating incident (Issue #41): an implementer Agent stopped
+after reporting it needed approval to run Git/`gh` commands, DevBot
+observed no repository changes, and because the Issue already had a linked
+Task-contract-only PR (only the contract-authoring commit, no
+implementation), `PollingService._run_claimed_implement_job` advanced the
+Issue straight to `devbot:review` - a false-success transition with no
+implementation ever having happened
+(`devbot.polling`'s old unconditional `delivery_result.message ==
+"no_repository_changes" and linked_pull_request is not None ->
+mark_for_review` branch, previously asserted as *intentional* by
+`test_implement_no_repository_changes_with_linked_pr_marks_review`, Task
+016 CP-016-12).
+
+`devbot.agent_outcome.classify_agent_outcome()` now turns every implementer
+`AgentRunResult` into an explicit `AgentOutcome` *before* delivery is even
+attempted, checking approval/session-limit/network-blocked/
+repository-locked/implementation-skipped text patterns ahead of
+`AgentRunResult.failed` (a genuine block can arrive from a process that
+still exited 0). Only `implementation_completed` proceeds to delivery;
+every other outcome resolves to `devbot:manual-action` or `devbot:blocked`
+(never a new label, never `devbot:working`) with an operator recovery hint.
+
+Separately, `devbot.polling` no longer treats a linked PR's mere existence
+as proof of a completed implementation when delivery reports
+`no_repository_changes`: it now also requires
+`devbot.delivery.branch_has_implementation_evidence()` - more than one git
+commit ahead of the repository's default branch on that PR's branch, i.e.
+evidence beyond a single pre-existing contract-authoring commit - before
+resuming review on the reused PR. Absent that evidence (a genuinely
+never-implemented contract-only PR, or no linked PR at all), the Issue
+moves to `devbot:manual-action` instead. This check is deliberately
+conservative: any git failure (missing local ref, a workspace path that
+does not exist) defaults to "no evidence", never to allowing review.
+
+This does not introduce any new `devbot:*` label, and does not change
+`devbot:working`'s transient-claim guarantee (Task 014) or the
+`session_limit` -> `devbot:blocked` mapping (the 2026-07-15 "Agent
+session-limit failures get a distinct block reason" entry above) - it only
+makes the *evidence* required to leave `devbot:working` via delivery/review
+explicit and typed instead of inferred from the absence of a problem.
+
 ## 2026-07-15 — Cycle result reports the first failure over a mixed cycle's successes
 `devbot.polling._normalized_cycle_result()` scans `results` (candidate-
 collection hard errors first, then executed Job results in selection

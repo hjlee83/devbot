@@ -67,6 +67,28 @@ class RecoveryOutcome(StrEnum):
     REVIEW = "review"
 
 
+class AgentOutcome(StrEnum):
+    """Normalized classification of a single Agent invocation's result
+    (Task 021 CP-021-1) - a narrower, earlier question than
+    `FailureCategory`: did *this run* actually complete the requested
+    implementation, and if not, why not. `devbot.agent_outcome` classifies
+    an `AgentRunResult` (`devbot.agents.base`) into exactly one of these
+    and `devbot.polling` gates delivery/review on the result, instead of
+    inferring completion from the absence of a problem (process exit
+    success, no raised exception, an existing PR, or a clean workspace -
+    Task 021 CP-021-11)."""
+
+    IMPLEMENTATION_COMPLETED = "implementation_completed"
+    IMPLEMENTATION_SKIPPED = "implementation_skipped"
+    NO_REPOSITORY_CHANGES = "no_repository_changes"
+    APPROVAL_REQUIRED = "approval_required"
+    NETWORK_BLOCKED = "network_blocked"
+    SESSION_LIMIT = "session_limit"
+    REPOSITORY_LOCKED = "repository_locked"
+    AGENT_FAILED = "agent_failed"
+    UNKNOWN = "unknown"
+
+
 class ExclusionReason(StrEnum):
     """Structured reason a candidate `Job` did not run this cycle (Task
     013's "표준 제외 사유"). Diagnostic logging uses these codes instead of

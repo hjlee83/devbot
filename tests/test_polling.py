@@ -1099,9 +1099,13 @@ def test_implement_no_repository_changes_without_pr_does_not_mark_review() -> No
 
 
 def test_implement_no_repository_changes_with_linked_pr_marks_review() -> None:
-    """The intentional counterpart: when a linked PR already exists and
-    delivery reports `no_repository_changes` (already implemented),
-    review resumes on that existing PR instead of blocking."""
+    """When a linked PR already exists, delivery reports
+    `no_repository_changes`, and (Task 021 Scope §7/§8) that PR's branch
+    already carries git history evidence beyond its pre-existing
+    contract-only commit, review resumes on that existing PR instead of
+    blocking - the PR's mere existence is not enough on its own (see
+    `test_review_requires_completed_implementation` for the case where
+    that evidence is absent)."""
     repo = _repo("myrepo")
     config = _config([repo])
     issue = _issue(repo.full_name, 10, labels=["devbot:ready"])
@@ -1129,12 +1133,207 @@ def test_implement_no_repository_changes_with_linked_pr_marks_review() -> None:
         ensure_workspace_ready=_no_op_workspace_check,
         state_writer=state_writer,
         delivery=delivery,
+        has_implementation_evidence=lambda *_args: True,
     )
 
     result = service.run_once()
 
     assert result.status is PollingStatus.DELIVERED
     assert write_client.set_labels.call_args_list[-1].args == (repo, 10, ["devbot:review"])
+
+
+def test_review_requires_completed_implementation() -> None:
+    """CP-021-7: an existing linked PR whose branch carries *no*
+    implementation evidence beyond its own pre-existing contract-only
+    commit, plus a clean workspace (`no_repository_changes`), must not
+    enter `devbot:review` - this is Task 021's motivating incident
+    (Issue #41/PR #40): the implementer never actually ran, DevBot saw no
+    repository changes, and the pre-existing contract PR was wrongly
+    treated as a completed implementation. It goes to `devbot:manual-action`
+    instead, and `devbot:review` must never be written."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 12, labels=["devbot:ready"])
+    contract_only_pr = _pull_request(
+        40, issue_number=12, head_ref="task/021-agent-outcome-classification"
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [contract_only_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=False,
+        pushed=False,
+        pull_request=None,
+        dry_run=False,
+        message="no_repository_changes",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+        has_implementation_evidence=lambda *_args: False,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 12, ["devbot:manual-action"])
+    assert all(
+        call.args[2] != ["devbot:review"] for call in write_client.set_labels.call_args_list
+    )
+
+
+def test_success_requires_explicit_completion() -> None:
+    """CP-021-11: none of (a) a zero Agent process exit code, (b) the
+    complete absence of any raised exception, (c) an existing linked PR, or
+    (d) a clean/no-diff workspace - alone or all combined - may be treated
+    as proof of a completed implementation. All four are true in this
+    scenario (Task 021's exact motivating incident: a contract-only PR
+    already exists, the Agent "ran" cleanly, and nothing changed) and the
+    Issue must still not reach `devbot:review`. Unlike
+    `test_review_requires_completed_implementation`, this relies on the
+    *default* `has_implementation_evidence` (a real git check against a
+    workspace path that does not exist in this test) to prove the
+    conservative fail-safe default itself, not just an injected fake."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 14, labels=["devbot:ready"])
+    contract_only_pr = _pull_request(41, issue_number=14, head_ref="task/contract-only-branch")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [contract_only_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    # (a) zero exit code, (b) no exception raised:
+    agent_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="ok", returncode=0
+    )
+    delivery = MagicMock()
+    # (d) clean workspace, (c) linked_pr above is the existing PR:
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=False,
+        pushed=False,
+        pull_request=None,
+        dry_run=False,
+        message="no_repository_changes",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is not PollingStatus.DELIVERED
+    assert write_client.set_labels.call_args_list[-1].args != (repo, 14, ["devbot:review"])
+
+
+def test_contract_first_pr_reused_without_false_completion() -> None:
+    """CP-021-9: a Task-contract-first Issue that already has a linked
+    branch/PR (Planner-created) is reused - no duplicate branch/PR ever
+    generated - and, when that branch/PR already carries real
+    implementation evidence beyond its contract-only commit, a no-op
+    re-verification run still safely resumes review on the *same* PR.
+    Task 021's false-completion fix (CP-021-7) must not regress Task 016's
+    CP-016-10 branch/PR reuse guarantee."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 11, labels=["devbot:ready"])
+    linked_pr = _pull_request(30, issue_number=11, head_ref="task/021-existing-branch")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=False,
+        pushed=False,
+        pull_request=None,
+        dry_run=False,
+        message="no_repository_changes",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+        has_implementation_evidence=lambda *_args: True,
+    )
+
+    result = service.run_once()
+
+    delivery.deliver.assert_called_once()
+    args, kwargs = delivery.deliver.call_args
+    assert args[2] == "task/021-existing-branch"  # reused verbatim, never a fresh branch name
+    assert kwargs["linked_pull_request"] is linked_pr
+    assert result.status is PollingStatus.DELIVERED
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 11, ["devbot:review"])
+
+
+@pytest.mark.parametrize(
+    ("message", "returncode"),
+    [
+        ("I ran `gh pr list` but this needs your approval before I can continue.", 0),
+        ("Network is unreachable: could not resolve host github.com", 0),
+        ("fatal: Unable to create '.git/index.lock': File exists.", 0),
+        ("No changes needed - this task is already implemented, skipping.", 0),
+        ("Usage limit reached, resets at 09:00 UTC", 0),
+        ("agent crashed midway", 1),
+        ("", 0),
+    ],
+)
+def test_delivery_requires_completed_implementation(message: str, returncode: int) -> None:
+    """CP-021-6: delivery must never run for approval-required, network-
+    blocked, repository-locked, session-limit, skipped, agent-failed, or
+    unknown (empty-message) outcomes - even when the Agent process itself
+    exited 0 (`AgentRunResult.failed` is False), matching Task 021 Scope
+    §7 ("Delivery may run only after an outcome classified as
+    implementation_completed")."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 13, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message=message, returncode=returncode
+    )
+    delivery = MagicMock()
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    delivery.deliver.assert_not_called()
+    assert result.status not in (PollingStatus.DELIVERED, PollingStatus.AGENT_COMPLETED)
 
 
 def test_iteration_dry_run_has_no_external_side_effects() -> None:
