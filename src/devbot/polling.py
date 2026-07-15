@@ -89,6 +89,9 @@ from devbot.workspace import (
 from devbot.worktree import (
     PreparedWorkspace,
     WorkspacePreparationError,
+    WorkspacePreparationFailure,
+    parse_branch_from_issue_body,
+    parse_pull_request_number_from_issue_body,
     render_prepared_workspace_context,
 )
 
@@ -260,12 +263,19 @@ _CLOSING_KEYWORD_RE = re.compile(
 def find_linked_pull_request(
     issue: GitHubIssue, pull_requests: Iterable[PullRequest]
 ) -> PullRequest | None:
-    """Return the open PR that closes `issue`, identified the same way
-    GitHub's own "Development" linking does: a closing keyword (`Closes
-    #N`, `Fixes #N`, `Resolves #N`, ...) referencing the Issue's number in
-    the PR body. `delivery.build_pr_body()` always writes `Closes #N`, so
-    every PR DevBot itself opens is found this way; this also finds a
-    manually-opened PR that uses the same convention."""
+    """Return the open PR linked to `issue`.
+
+    Planner execution Issues declare authoritative metadata in their body
+    (`Pull Request: #N`). That explicit PR wins even if the PR body does
+    not yet contain a closing keyword. Legacy Issues without Planner PR
+    metadata keep the existing closing-keyword behavior."""
+    explicit_pr_number = parse_pull_request_number_from_issue_body(issue.body)
+    if explicit_pr_number is not None:
+        for pull_request in pull_requests:
+            if pull_request.number == explicit_pr_number:
+                return pull_request
+        return None
+
     for pull_request in pull_requests:
         referenced_numbers = {
             int(match) for match in _CLOSING_KEYWORD_RE.findall(pull_request.body)
@@ -273,6 +283,19 @@ def find_linked_pull_request(
         if issue.number in referenced_numbers:
             return pull_request
     return None
+
+
+def _planner_pr_resolution_failure(issue: GitHubIssue) -> WorkspacePreparationError | None:
+    expected_pr = parse_pull_request_number_from_issue_body(issue.body)
+    if expected_pr is None:
+        return None
+    expected_branch = parse_branch_from_issue_body(issue.body)
+    return WorkspacePreparationError(
+        WorkspacePreparationFailure.LINKED_BRANCH_MISSING,
+        "Planner Issue declared a Pull Request that could not be resolved; "
+        "fallback branch creation is disabled for Planner Issues: "
+        f"expected_pr=#{expected_pr}, expected_branch={expected_branch!r}",
+    )
 
 
 EnsureWorkspaceFn = Callable[[RepositoryConfig], None]
@@ -436,6 +459,23 @@ class PollingService:
 
         linked_pull_request = find_linked_pull_request(issue, pull_requests)
         if linked_pull_request is None:
+            resolution_failure = _planner_pr_resolution_failure(issue)
+            if resolution_failure is not None:
+                self.logger.error(
+                    "review Issue의 Planner PR 해석 실패 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    resolution_failure,
+                )
+                return (
+                    None,
+                    [],
+                    PollingResult(
+                        status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
+                        task=selected,
+                        message=f"{resolution_failure.category.value}: {resolution_failure}",
+                    ),
+                )
             self.logger.error(
                 "review Issue에 연결된 PR을 찾지 못했습니다 (%s #%d)",
                 selected.repository,
@@ -1136,6 +1176,31 @@ class PollingService:
             linked_pull_request = self._find_linked_pull_request_best_effort(
                 repository, selected, issue
             )
+            if linked_pull_request is None:
+                resolution_failure = _planner_pr_resolution_failure(issue)
+                if resolution_failure is not None:
+                    self.logger.error(
+                        "Planner PR 해석 실패 (%s #%d): %s",
+                        selected.repository,
+                        selected.number,
+                        resolution_failure,
+                    )
+                    restore_failure = self._restore(
+                        repository,
+                        issue,
+                        selected.state,
+                        f"워크스페이스 준비 실패({resolution_failure.category.value}): "
+                        f"{resolution_failure}",
+                        selected,
+                        job_type=JobType.IMPLEMENT,
+                    )
+                    if restore_failure is not None:
+                        return restore_failure
+                    return PollingResult(
+                        status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
+                        task=selected,
+                        message=f"{resolution_failure.category.value}: {resolution_failure}",
+                    )
             prep_start = time.monotonic()
             try:
                 prepared = self.prepare_workspace(repository, issue, linked_pull_request)
@@ -1432,6 +1497,22 @@ class PollingService:
                     branch,
                 )
             else:
+                resolution_failure = _planner_pr_resolution_failure(issue)
+                if resolution_failure is not None:
+                    block_failure = self._block(
+                        repository,
+                        issue,
+                        f"Planner PR 해석 실패: {resolution_failure}",
+                        selected,
+                        job_type=JobType.IMPLEMENT,
+                    )
+                    if block_failure is not None:
+                        return block_failure
+                    return PollingResult(
+                        status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
+                        task=selected,
+                        message=f"{resolution_failure.category.value}: {resolution_failure}",
+                    )
                 branch = generate_branch_name(repository, issue.number, issue.title)
         self.logger.info("Delivery 시작: branch=%s", branch)
 

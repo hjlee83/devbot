@@ -13,7 +13,7 @@ from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
 from devbot.issue_state import IssueStateWriter
 from devbot.models import DevBotConfig, RepositoryConfig, TaskState
-from devbot.polling import PollingService, PollingStatus
+from devbot.polling import PollingService, PollingStatus, find_linked_pull_request
 from devbot.review import build_review_marker
 from devbot.rework import ReworkService
 from devbot.timeline import TimelineService, parse_events
@@ -97,6 +97,15 @@ def _pull_request(
         head_sha=head_sha,
         body=f"Closes #{issue_number}",
         html_url=f"https://github.com/someone/myrepo/pull/{number}",
+    )
+
+
+def _planner_issue_body(*, branch: str, pr_number: int) -> str:
+    return (
+        "- Contract: `tasks/025-planner-linked-pr-resolution.md`\n"
+        f"- Branch: `{branch}`\n"
+        f"- Pull Request: #{pr_number}\n\n"
+        "- Produce `results/025-planner-linked-pr-resolution.md`.\n"
     )
 
 
@@ -1113,6 +1122,208 @@ def test_ready_implement_reuses_linked_pr_branch() -> None:
 
 
 # ---- Task 023: host-managed workspace preparation ----
+
+
+def test_explicit_issue_pr_resolves_without_closing_keyword() -> None:
+    issue = _issue(
+        "someone/myrepo",
+        49,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch="task/025-planner-linked-pr-resolution", pr_number=48),
+    )
+    planner_pr = replace(
+        _pull_request(48, issue_number=999, head_ref="task/025-planner-linked-pr-resolution"),
+        body="Planner-created PR without a closing keyword yet.",
+    )
+
+    assert find_linked_pull_request(issue, [planner_pr]) is planner_pr
+
+
+def test_planner_pr_head_branch_is_reused(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(
+        repo.full_name,
+        49,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch="task/025-planner-linked-pr-resolution", pr_number=48),
+    )
+    linked_pr = replace(
+        _pull_request(48, issue_number=999, head_ref="task/025-planner-linked-pr-resolution"),
+        body="No closing keyword.",
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch=linked_pr.head_ref, issue_number=49, pull_request=linked_pr
+    )
+
+    def fake_prepare(
+        repository: RepositoryConfig,
+        issue_arg: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+    ) -> PreparedWorkspace:
+        assert issue_arg.number == issue.number
+        assert issue_arg.body == issue.body
+        assert linked_pull_request is linked_pr
+        return prepared
+
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=48, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=fake_prepare,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    delivery.deliver.assert_called_once()
+    assert delivery.deliver.call_args.args[2] == "task/025-planner-linked-pr-resolution"
+
+
+def test_missing_explicit_pr_rejects_fallback_branch(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(
+        repo.full_name,
+        49,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch="task/025-planner-linked-pr-resolution", pr_number=48),
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: []}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    prepare_workspace = MagicMock()
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=prepare_workspace,
+        state_writer=state_writer,
+        delivery=MagicMock(),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
+    assert "expected_pr=#48" in result.message
+    assert "expected_branch='task/025-planner-linked-pr-resolution'" in result.message
+    prepare_workspace.assert_not_called()
+    agent_runner.run.assert_not_called()
+
+
+def test_legacy_issue_without_pr_keeps_fallback_branch(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 50, labels=["devbot:ready"], title="Legacy fallback")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: []}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    fallback_prepared = _prepared_workspace(
+        repo,
+        branch="devbot/myrepo-50-legacy-fallback",
+        issue_number=50,
+        pull_request=None,
+    )
+
+    def fake_prepare(
+        repository: RepositoryConfig,
+        issue_arg: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+    ) -> PreparedWorkspace:
+        assert linked_pull_request is None
+        return fallback_prepared
+
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=50, html_url="https://example.test/pr/50"),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=fake_prepare,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    delivery.deliver.assert_called_once()
+    assert delivery.deliver.call_args.args[2] == "devbot/myrepo-50-legacy-fallback"
+
+
+def test_existing_workflows_compatible_with_planner_pr_resolution() -> None:
+    issue = _issue("someone/myrepo", 51, labels=["devbot:ready"], body="manual issue")
+    linked_pr = _pull_request(51, issue_number=51, head_ref="devbot/myrepo-51-manual")
+
+    assert find_linked_pull_request(issue, [linked_pr]) is linked_pr
+
+
+def test_planner_pr_resolution_diagnostics(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(
+        repo.full_name,
+        49,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch="task/025-planner-linked-pr-resolution", pr_number=404),
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: []}
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=MagicMock(),
+        state_writer=IssueStateWriter(client=MagicMock(spec=GitHubWriteClient), dry_run=False),
+        delivery=MagicMock(),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
+    assert "linked_branch_missing" in result.message
+    assert "expected_pr=#404" in result.message
+    assert "expected_branch='task/025-planner-linked-pr-resolution'" in result.message
 
 
 def test_existing_planner_workspace_is_resolved_before_agent(tmp_path: Path) -> None:
