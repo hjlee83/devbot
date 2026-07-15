@@ -156,6 +156,24 @@ commit`을 실행하기 전에 `user.email`/`user.name`을 설정하지 않았�
 `GIT_CONFIG_SYSTEM`을 빈 값으로 override해 global identity가 전혀 없는
 환경을 로컬에서 재현한 뒤 전체 스위트(360개)가 통과함을 재확인했다.
 
+두 번째 push 후에도 CI가 실패했다(이번엔 로컬 재현 환경에서는 재현되지
+않음): `test_host_prepares_remote_branch_before_agent`가
+`git push -q origin HEAD:refs/heads/main`에서 종료 코드 1로 실패했다.
+원인은 `git init --bare`가 만드는 bare `origin`의 symbolic HEAD가
+`init.defaultBranch`를 따르는데, 이 값이 CI runner에서는(전형적으로
+`master`로 귀결) 로컬 개발 환경과 다르게 해석된다는 점이었다 - `origin`
+에 `main`만 push해두어도 `origin`의 HEAD 자체는 여전히 존재하지 않는
+`master`를 가리킬 수 있고, 이름 없는 `git clone <origin> <dest>`
+(`_clone()`이 쓰는 방식)는 바로 그 HEAD를 따라 checkout할 branch를
+정하므로, CI에서는 `main`이 아닌 다른(대개 비어 있는/무관한 이력의)
+checkout이 만들어졌다. 그 위에서 만든 커밋을 다시 `refs/heads/main`에
+push하면 origin의 실제 `main` 이력과 무관한 fast-forward가 아닌 push가
+되어 거부된다. `_init_bare_repo()`가 bare 저장소 생성 직후
+`git symbolic-ref HEAD refs/heads/main`으로 HEAD를 명시적으로 고정하도록
+고쳐, 이후 모든 이름 없는 clone이 runner의 기본값과 무관하게 항상
+`main`을 checkout하게 만들었다. 세 번째 push 후 CI(`verify`)가 통과함을
+확인했다(`https://github.com/hjlee83/devbot/actions/runs/29421682922`).
+
 ## Checkpoint별 테스트
 
 | Checkpoint | 테스트 |
@@ -203,6 +221,9 @@ uv run devbot --once --dry-run
   Queue Summary: manual-action=1 (Issue #45 자신)
   cycle 종료: 결과=no_ready_task (선택 0/1)
   1회 실행 완료: no_ready_task
+
+CI (`verify`, PR #44, head cc60320)
+  pass (18s) - https://github.com/hjlee83/devbot/actions/runs/29421682922
 ```
 
 ### 수동 검증 (계약 Validation Gate "Manual verification" 항목)
