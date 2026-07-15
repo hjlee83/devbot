@@ -10,7 +10,9 @@ from devbot.worktree import (
     WorkspacePreparationError,
     WorkspacePreparationFailure,
     WorktreeManager,
+    parse_branch_from_issue_body,
     parse_contract_path_from_issue_body,
+    parse_pull_request_number_from_issue_body,
     parse_result_path_from_issue_body,
     render_prepared_workspace_context,
 )
@@ -98,6 +100,7 @@ def _push_branch(
     scratch = tmp_path / f"scratch-{branch.replace('/', '-')}"
     _clone(origin_path, scratch)
     _run_git("checkout", "-q", "-b", branch, cwd=scratch)
+    (scratch / filename).parent.mkdir(parents=True, exist_ok=True)
     (scratch / filename).write_text("task work\n", encoding="utf-8")
     _run_git("add", ".", cwd=scratch)
     _run_git("commit", "-q", "-m", "task work", cwd=scratch)
@@ -205,6 +208,35 @@ def test_existing_task_branch_is_reused(tmp_path: Path) -> None:
     # No `devbot/...` fallback branch was ever generated for this Task.
     branches = _git_output("branch", "--list", cwd=repository.local_path)
     assert "devbot/" not in branches
+
+
+def test_prepared_workspace_contains_planner_contract(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    contract_path = "tasks/025-planner-linked-pr-resolution.md"
+    _push_branch(
+        origin,
+        tmp_path,
+        "task/025-planner-linked-pr-resolution",
+        filename=contract_path,
+    )
+    issue = _issue(
+        number=49,
+        body=(
+            f"- Contract: `{contract_path}`\n"
+            "- Branch: `task/025-planner-linked-pr-resolution`\n"
+            "- Pull Request: #48\n"
+        ),
+    )
+    pull_request = _pull_request(
+        head_ref="task/025-planner-linked-pr-resolution", number=48, issue_number=49
+    )
+
+    prepared = manager.prepare(repository, issue, pull_request)
+
+    assert prepared.branch == "task/025-planner-linked-pr-resolution"
+    assert (prepared.worktree_path / contract_path).is_file()
+    assert prepared.contract_path == contract_path
 
 
 # ---- CP-023-8: worktree lifecycle and cleanup ----
@@ -317,6 +349,25 @@ def test_branch_pr_mismatch_is_classified(tmp_path: Path) -> None:
     assert prepared.worktree_path.is_dir()
 
 
+def test_issue_branch_and_pr_head_mismatch_rejected(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    _push_branch(origin, tmp_path, "task/025-expected")
+    _push_branch(origin, tmp_path, "task/025-actual")
+    issue = _issue(
+        number=25,
+        body="- Branch: `task/025-expected`\n- Pull Request: #48\n",
+    )
+    pull_request = _pull_request(head_ref="task/025-actual", number=48, issue_number=25)
+
+    with pytest.raises(WorkspacePreparationError) as exc_info:
+        manager.prepare(repository, issue, pull_request)
+
+    assert exc_info.value.category is WorkspacePreparationFailure.BRANCH_PR_MISMATCH
+    assert "expected_branch='task/025-expected'" in str(exc_info.value)
+    assert "resolved_pr=#48" in str(exc_info.value)
+
+
 def test_workspace_dirty_is_classified(tmp_path: Path) -> None:
     """PR #44 REQUEST CHANGES (CP-023-9): a freshly created worktree that
     is unexpectedly dirty immediately after checkout (e.g. a smudge/clean
@@ -374,6 +425,20 @@ def test_parse_contract_and_result_path_from_issue_body() -> None:
         parse_result_path_from_issue_body(body)
         == "results/023-host-managed-workspace-preparation.md"
     )
+
+
+def test_execution_issue_pr_number_is_parsed() -> None:
+    body = (
+        "Implement Task 025 according to the approved contract.\n\n"
+        "- Contract: `tasks/025-planner-linked-pr-resolution.md`\n"
+        "- Branch: `task/025-planner-linked-pr-resolution`\n"
+        "- Pull Request: #48\n\n"
+        "- Produce `results/025-planner-linked-pr-resolution.md`.\n"
+    )
+
+    assert parse_pull_request_number_from_issue_body(body) == 48
+    assert parse_branch_from_issue_body(body) == "task/025-planner-linked-pr-resolution"
+    assert parse_pull_request_number_from_issue_body("manual issue") is None
 
 
 def test_parse_contract_path_returns_none_without_convention() -> None:

@@ -132,3 +132,21 @@
       연결하지 않는다 - Planner 검증은 항상 명시적으로 호출되며, 기존
       daemon/리뷰/rework/delivery/timeline/상태 머신/재시도 동작은 변경하지
       않는다(`results/022-planner-workflow-standard.md`).
+- [x] Task 023: host-managed workspace preparation. IMPLEMENT/REWORK Job
+      실행 전에 DevBot host가 linked PR branch를 fetch하고 격리된
+      `.devbot-worktrees/<repo>/issue-<N>` worktree를 준비한다. Agent는
+      준비된 worktree 안에서만 구현하고, operator checkout의 현재 branch나
+      dirty 상태와 무관하게 기존 Task branch/PR을 재사용한다
+      (`docs/13-host-managed-workspace-preparation.md`,
+      `results/023-host-managed-workspace-preparation.md`).
+- [ ] Task 024: timeline auto recording. Task 017/018 Timeline protocol을
+      daemon lifecycle에 연결하는 작업은 PR #46 / Issue #47에서 계속 진행
+      중이며, Task 025의 Planner-linked PR resolution hardening이 완료된 뒤
+      기존 branch/PR workspace에서 재개된다.
+- [x] Task 025: planner-linked PR resolution hardening. 실행 Issue의
+      `Pull Request: #<number>` Planner metadata를 PR body closing keyword보다
+      먼저 신뢰하고, resolved PR head branch를 host-managed worktree 준비에
+      사용한다. 명시 PR 누락 또는 Issue branch/PR head mismatch는 fallback
+      branch 생성 없이 workspace preparation failure로 중단하며, Planner
+      metadata가 없는 legacy Issue만 기존 fallback branch 생성을 유지한다
+      (`results/025-planner-linked-pr-resolution.md`).

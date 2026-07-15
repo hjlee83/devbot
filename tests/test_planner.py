@@ -189,6 +189,13 @@ def test_planner_pr_contract_template() -> None:
     assert "Closes #43" in body
 
 
+def test_planner_pr_template_includes_execution_issue_closing_link() -> None:
+    body = render_pr_body(SAMPLE_WORKSPACE, scope="Planner PR links execution Issue.")
+
+    assert "- Execution Issue: #43" in body
+    assert "Closes #43" in body
+
+
 def test_minimal_review_entry_contract() -> None:
     # Happy path.
     context = resolve_review_entry("Review PR #42.")
