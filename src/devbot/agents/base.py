@@ -36,6 +36,38 @@ def is_approval_required_output(message: str) -> bool:
     return any(pattern in lowered for pattern in _APPROVAL_REQUIRED_PATTERNS)
 
 
+_SESSION_LIMIT_PATTERNS = (
+    "usage limit",
+    "session limit",
+    "rate limit",
+    "quota exceeded",
+    "quota_exceeded",
+    "resets at",
+    "try again later",
+    "limit reached",
+)
+
+
+def is_session_limit_output(message: str) -> bool:
+    """True when a failed Agent run's own output indicates a session/usage
+    limit rather than a genuine execution error (Task 019 CP-019-9) - e.g.
+    the Claude Code or Codex CLI reporting it has hit a usage/rate limit.
+    Callers must classify this as `FailureCategory.AGENT_SESSION_LIMIT`
+    (`devbot.models`) and must not schedule an automatic polling retry for
+    it - see `devbot.reliability`'s retry policy."""
+    lowered = message.casefold()
+    return any(pattern in lowered for pattern in _SESSION_LIMIT_PATTERNS)
+
+
+class AgentSessionLimitError(RuntimeError):
+    """Raised by callers (not `AgentRunner` itself) when a failed Agent run's
+    output matches `is_session_limit_output()` - lets a generic
+    `except Exception` still catch it (Task 014 CP-014-7's "never leave
+    `working`" contract is unaffected), while giving a handler that wants to
+    label the failure distinctly (Task 019 CP-019-9's "clear recovery hint")
+    something to `isinstance`-check for."""
+
+
 @dataclass(frozen=True, slots=True)
 class AgentRunResult:
     """Outcome of a single agent invocation."""

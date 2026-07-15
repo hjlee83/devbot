@@ -38,6 +38,35 @@ class JobType(StrEnum):
     IMPLEMENT = "implement"
 
 
+class FailureCategory(StrEnum):
+    """Deterministic failure classification (Task 019 CP-019-1) used for
+    retry decisions, recovery-policy lookups, and operator diagnostics -
+    never for GitHub state-machine control flow itself, which remains
+    `devbot.issue_state`'s job."""
+
+    WORKSPACE_INVALID = "workspace_invalid"
+    STARTUP_VALIDATION_FAILED = "startup_validation_failed"
+    AGENT_SESSION_LIMIT = "agent_session_limit"
+    AGENT_EXECUTION_FAILED = "agent_execution_failed"
+    DELIVERY_FAILED = "delivery_failed"
+    REVIEW_FAILED = "review_failed"
+    GITHUB_API_ERROR = "github_api_error"
+    CONFIGURATION_ERROR = "configuration_error"
+    UNKNOWN_ERROR = "unknown_error"
+
+
+class RecoveryOutcome(StrEnum):
+    """The explicit outcome a claimed (`devbot:working`) workflow must reach
+    (Task 019 Recovery Policy) - the same four outcomes
+    `docs/07-decisions.md`'s "Working must be transient" decision and Task
+    014 (CP-014-5/6/7) already enforce structurally."""
+
+    RESTORE = "restore"
+    BLOCKED = "blocked"
+    MANUAL_ACTION = "manual-action"
+    REVIEW = "review"
+
+
 class ExclusionReason(StrEnum):
     """Structured reason a candidate `Job` did not run this cycle (Task
     013's "표준 제외 사유"). Diagnostic logging uses these codes instead of

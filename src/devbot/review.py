@@ -31,11 +31,12 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from devbot.agents.base import AgentRunner
+from devbot.agents.base import AgentRunner, is_session_limit_output
 from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
+from devbot.reliability import session_limit_block_reason
 from devbot.rework import ReworkActionScope, classify_rework_action_scope
 
 _MENTION = "@devbot"
@@ -187,12 +188,20 @@ class ReviewService:
 
         if result.failed:
             reason = f"리뷰 Agent 실행 실패: {result.message}"
+            # Task 019 CP-019-9: classify and add a clear recovery hint for
+            # a session/usage-limit failure; the devbot:blocked transition
+            # itself is unchanged either way.
+            if is_session_limit_output(result.message):
+                reason = session_limit_block_reason(reason)
+                message = "blocked: agent session limit"
+            else:
+                message = "blocked: reviewer execution failed"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
             return ReviewResult(
                 triggered=True,
                 status=None,
                 issue_state=TaskState.BLOCKED,
-                message="blocked: reviewer execution failed",
+                message=message,
             )
 
         review_text = result.message

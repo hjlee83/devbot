@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from devbot import observability
-from devbot.agents.base import AgentRunner, is_approval_required_output
+from devbot.agents.base import AgentRunner, is_approval_required_output, is_session_limit_output
 from devbot.delivery import DeliveryService
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.issue_state import ClaimConflictError, IssueStateWriter
@@ -63,6 +63,7 @@ from devbot.models import (
     CandidateExclusion,
     DevBotConfig,
     ExclusionReason,
+    FailureCategory,
     IssueComment,
     IssueTask,
     Job,
@@ -71,6 +72,7 @@ from devbot.models import (
     RepositoryConfig,
     TaskState,
 )
+from devbot.reliability import build_diagnostic_report, session_limit_block_reason
 from devbot.review import ReviewService, has_review_marker_for_head
 from devbot.rework import ReworkService, find_unprocessed_devbot_comments
 from devbot.scheduler import select_jobs_with_exclusions
@@ -121,6 +123,31 @@ _JOB_FAILURE_STATUSES = {
     PollingStatus.BLOCKED,
     PollingStatus.ITERATION_ERROR,
 }
+
+
+def classify_job_failure(job_type: JobType, status: PollingStatus, message: str) -> FailureCategory:
+    """Best-effort `FailureCategory` for one failed Job result (Task 019
+    CP-019-1) - diagnostics/logging only (`devbot.reliability`), never used
+    for control flow. The `devbot:*` transition this failure led to has
+    already happened by the time a caller calls this (`devbot.issue_state`,
+    hardened by Task 014, decides that independently)."""
+    if status is PollingStatus.WORKSPACE_INVALID:
+        return FailureCategory.WORKSPACE_INVALID
+    if status is PollingStatus.AGENT_FAILED:
+        return (
+            FailureCategory.AGENT_SESSION_LIMIT
+            if is_session_limit_output(message)
+            else FailureCategory.AGENT_EXECUTION_FAILED
+        )
+    if status is PollingStatus.ITERATION_ERROR:
+        return FailureCategory.GITHUB_API_ERROR
+    if status is PollingStatus.BLOCKED:
+        if is_session_limit_output(message):
+            return FailureCategory.AGENT_SESSION_LIMIT
+        if job_type is JobType.REVIEW:
+            return FailureCategory.REVIEW_FAILED
+        return FailureCategory.DELIVERY_FAILED
+    return FailureCategory.UNKNOWN_ERROR
 
 
 def _task_state_from_labels(labels: Iterable[str]) -> TaskState | None:
@@ -573,12 +600,23 @@ class PollingService:
         observability.log_job_started(self.logger, cycle_id, job, role=role)
         start = time.monotonic()
 
-        if job.job_type is JobType.IMPLEMENT:
-            result = self._run_implement_job(repository, job.task, issues_by_key, cycle_id)
-        elif job.job_type is JobType.REWORK:
-            result = self._run_rework_job(repository, job.task, issues_by_key, cycle_id)
-        else:
-            result = self._run_review_job(repository, job.task, issues_by_key, cycle_id)
+        try:
+            if job.job_type is JobType.IMPLEMENT:
+                result = self._run_implement_job(repository, job.task, issues_by_key, cycle_id)
+            elif job.job_type is JobType.REWORK:
+                result = self._run_rework_job(repository, job.task, issues_by_key, cycle_id)
+            else:
+                result = self._run_review_job(repository, job.task, issues_by_key, cycle_id)
+        except Exception as exc:  # noqa: BLE001 - CP-019-7: no Job may ever crash the daemon loop
+            self.logger.error(
+                "Job 실행 중 처리되지 않은 예외 (%s #%d): %s",
+                job.task.repository,
+                job.task.number,
+                exc,
+            )
+            result = PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=job.task, message=str(exc)
+            )
 
         failure_summary = result.message if result.status in _JOB_FAILURE_STATUSES else ""
         observability.log_job_finished(
@@ -589,6 +627,16 @@ class PollingService:
             start=start,
             failure_summary=failure_summary,
         )
+
+        if result.status in _JOB_FAILURE_STATUSES:
+            category = classify_job_failure(job.job_type, result.status, result.message)
+            report = build_diagnostic_report(
+                repository=job.task.repository,
+                category=category,
+                issue_number=job.task.number,
+            )
+            observability.log_diagnostic_report(self.logger, report)
+
         return result
 
     def _execute_jobs(
@@ -954,10 +1002,17 @@ class PollingService:
                 selected.number,
                 agent_result.returncode,
             )
+            # Task 019 CP-019-9: a session/usage-limit failure gets a
+            # distinct, actionable recovery hint on the blocking comment
+            # itself - the underlying devbot:blocked transition (and "no
+            # automatic retry" behavior) is unchanged either way.
+            block_reason = f"AgentRunner 실행 실패: {message}"
+            if is_session_limit_output(message):
+                block_reason = session_limit_block_reason(block_reason)
             block_failure = self._block(
                 repository,
                 issue,
-                f"AgentRunner 실행 실패: {message}",
+                block_reason,
                 selected,
                 job_type=JobType.IMPLEMENT,
             )
@@ -1374,7 +1429,12 @@ def run_forever(
     previous_sigterm = signal.signal(signal.SIGTERM, _handle_shutdown_signal)
     try:
         while not shutdown_requested:
-            polling_service.run_once()
+            try:
+                polling_service.run_once()
+            except Exception as exc:  # noqa: BLE001 - CP-019-7: one cycle's failure must not stop the daemon
+                log.error(
+                    "cycle 실행 중 처리되지 않은 예외, 다음 cycle을 계속 진행합니다: %s", exc
+                )
             if shutdown_requested:
                 break
             log.info("다음 폴링까지 %d초 대기합니다.", poll_interval_seconds)

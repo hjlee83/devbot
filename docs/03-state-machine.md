@@ -32,3 +32,10 @@ No automated retry unless explicitly returned to `ready`.
 The Issue needs GitHub metadata work, external verification, or human
 approval. It is not selected for automatic repository rework and does not
 mean the Agent or delivery path failed.
+
+## Failure classification, retry, and recovery policy (Task 019)
+No new state or label is introduced by Task 019 - every `BLOCKED`
+transition above is unchanged. `docs/11-daemon-reliability.md` documents
+the failure-category taxonomy, retry policy, and the declarative recovery
+mapping (`FailureCategory` -> `RESTORE`/`BLOCKED`) layered on top of these
+same transitions for diagnostics and operator guidance.
