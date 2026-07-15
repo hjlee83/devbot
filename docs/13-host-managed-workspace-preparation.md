@@ -65,8 +65,19 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
   [--force]` (서비스 API: `WorktreeManager.cleanup()`).
 - **충돌 거부**: 같은 경로에 다른 branch가 dirty 상태로 이미 존재하면
   `WorkspacePreparationFailure.WORKTREE_CONFLICT`로 거부한다(안전하지 않은
-  재사용 금지). Clean하지만 branch가 다르면 등록을 갱신하고 올바른
-  branch로 재생성한다.
+  재사용 금지).
+- **branch/PR mismatch 거부**: 같은 경로가 이미 등록된 worktree이고
+  clean하지만 branch가 새로 해석된 branch와 다르면(예: 같은 Issue의 linked
+  PR이 다른 branch를 가리키도록 바뀐 경우) `WorkspacePreparationFailure.
+  BRANCH_PR_MISMATCH`로 거부한다 - 조용히 삭제하고 새 branch로 재생성하지
+  않는다(PR #44 리뷰 반영: 이전 구현은 이 경우를 실패로 보고하지 않고
+  자동으로 지우고 재생성했다). 재시도하려면 `devbot worktree cleanup`으로
+  명시적으로 정리해야 한다.
+- **prepared workspace dirty 거부**: 새로 만든(재사용이 아닌) worktree가
+  checkout 직후 예상과 달리 dirty하면 `WorkspacePreparationFailure.
+  WORKSPACE_DIRTY`로 거부한다 - `git worktree add` 명령 자체는 성공했지만
+  결과물이 안전하지 않은 경우를 `WORKTREE_CREATION_FAILED`(명령 실패)와
+  구분한다.
 
 ## 4. 준비된 Agent 컨텍스트
 

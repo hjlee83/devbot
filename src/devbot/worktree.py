@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -223,6 +224,7 @@ class WorktreeManager:
     for one `workspace_root` (Scope §3/§8)."""
 
     workspace_root: Path
+    is_dirty: Callable[[Path], bool] = field(default=_is_dirty)
 
     def worktree_path(self, repository: RepositoryConfig, issue_number: int) -> Path:
         return self.worktree_root(repository) / f"issue-{issue_number}"
@@ -290,15 +292,25 @@ class WorktreeManager:
         if matching is not None:
             if matching.branch == branch:
                 return True  # Scope §8: reuse - same repository/Issue/branch.
-            if _is_dirty(target):
+            if self.is_dirty(target):
                 raise WorkspacePreparationError(
                     WorkspacePreparationFailure.WORKTREE_CONFLICT,
                     f"worktree at {target} is on branch {matching.branch!r} (expected "
                     f"{branch!r}) and has uncommitted changes - refusing unsafe reuse",
                 )
-            # Clean but stale (e.g. the linked PR's branch changed): drop the
-            # old registration and recreate on the correct branch.
-            _run_git(repository.local_path, "worktree", "remove", "--force", str(target))
+            # Clean, but the branch this Issue's worktree was last prepared
+            # on no longer matches what was just resolved (e.g. the linked
+            # PR now points at a different branch than the worktree was
+            # created for). This is a genuine `branch/PR mismatch` (Scope
+            # §9) - never silently recreated; it needs an explicit
+            # `devbot worktree cleanup` before the Issue can be retried.
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.BRANCH_PR_MISMATCH,
+                f"worktree at {target} is on branch {matching.branch!r} but the "
+                f"resolved branch is now {branch!r} - the linked branch/PR appears "
+                "to have changed since this worktree was prepared; run "
+                "`devbot worktree cleanup` before retrying",
+            )
         elif target.exists():
             raise WorkspacePreparationError(
                 WorkspacePreparationFailure.WORKTREE_CONFLICT,
@@ -321,6 +333,18 @@ class WorktreeManager:
             raise WorkspacePreparationError(
                 WorkspacePreparationFailure.WORKTREE_CREATION_FAILED,
                 f"git worktree add failed: {output}",
+            )
+
+        # Scope §9's `prepared workspace dirty`: a freshly created worktree
+        # (never reused - `return True` above already handled reuse) should
+        # always be clean immediately after checkout. If it isn't, that is
+        # itself an unsafe-to-hand-to-the-Agent state distinct from the
+        # `git worktree add` command failing outright.
+        if self.is_dirty(target):
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.WORKSPACE_DIRTY,
+                f"newly created worktree at {target} is unexpectedly dirty "
+                "immediately after checkout",
             )
         return False
 

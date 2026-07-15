@@ -293,6 +293,44 @@ def test_linked_branch_missing_is_classified(tmp_path: Path) -> None:
     assert exc_info.value.category is WorkspacePreparationFailure.LINKED_BRANCH_MISSING
 
 
+def test_branch_pr_mismatch_is_classified(tmp_path: Path) -> None:
+    """PR #44 REQUEST CHANGES (CP-023-9): a worktree already prepared for
+    one branch, still clean, whose Issue is now linked to a *different*
+    branch/PR (e.g. the Task branch was recreated) must be reported as an
+    explicit `branch_pr_mismatch` - never silently deleted and recreated
+    on the new branch without a trace."""
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=16)
+    _push_branch(origin, tmp_path, "task/023-old-branch")
+    _push_branch(origin, tmp_path, "task/023-new-branch")
+    old_pr = _pull_request(head_ref="task/023-old-branch", issue_number=16)
+    new_pr = _pull_request(head_ref="task/023-new-branch", number=2, issue_number=16)
+
+    prepared = manager.prepare(repository, issue, old_pr)
+    assert prepared.branch == "task/023-old-branch"
+
+    with pytest.raises(WorkspacePreparationError) as exc_info:
+        manager.prepare(repository, issue, new_pr)
+    assert exc_info.value.category is WorkspacePreparationFailure.BRANCH_PR_MISMATCH
+    # The stale worktree is preserved, not silently deleted, for diagnosis.
+    assert prepared.worktree_path.is_dir()
+
+
+def test_workspace_dirty_is_classified(tmp_path: Path) -> None:
+    """PR #44 REQUEST CHANGES (CP-023-9): a freshly created worktree that
+    is unexpectedly dirty immediately after checkout (e.g. a smudge/clean
+    filter or filesystem anomaly) must be reported as `workspace_dirty`
+    rather than silently handed to the Agent."""
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace", is_dirty=lambda path: True)
+    issue = _issue(number=17)
+
+    with pytest.raises(WorkspacePreparationError) as exc_info:
+        manager.prepare(repository, issue, None)
+    assert exc_info.value.category is WorkspacePreparationFailure.WORKSPACE_DIRTY
+
+
 # ---- Prepared Agent context rendering (CP-023-5/CP-023-6 helpers) ----
 
 

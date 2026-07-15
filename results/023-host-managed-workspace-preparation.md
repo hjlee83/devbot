@@ -41,7 +41,11 @@ worktree 안에서 파일을 읽고 쓰고 로컬 검증만 수행하면 된다.
   않는다.
 - **준비된 branch로 delivery (CP-023-7)**: delivery의 검증/commit/push/PR
   재사용이 모두 `prepared.repository`(worktree 경로)와 `prepared.branch`
-  위에서 수행된다 - operator checkout이 아니다.
+  위에서 수행된다 - operator checkout이 아니다. `DeliveryService.deliver()`
+  는 commit 직전에 `current_branch(repository)`가 실제로 `target_branch`
+  인지 검증하고, 불일치하면 commit/push 전에 `delivery_branch_mismatch`로
+  거부한다(PR #44 1차 리뷰 Blocker 반영 - 아래 "PR #44 REQUEST CHANGES
+  대응" 절 참고).
 - **Worktree 생명주기와 명시적 cleanup (CP-023-8)**: 실패한 Job의 worktree는
   절대 자동으로 지우지 않는다(다음 `prepare()` 호출이 그대로 재사용,
   미커밋 변경도 보존). 성공적인 cleanup은 `WorktreeManager.cleanup()`
@@ -50,9 +54,13 @@ worktree 안에서 파일을 읽고 쓰고 로컬 검증만 수행하면 된다.
   거부한다.
 - **준비 실패 분류와 복구 (CP-023-9)**: `WorkspacePreparationFailure`
   (`remote_sync_failed`/`linked_branch_missing`/`branch_pr_mismatch`/
-  `worktree_creation_failed`/`worktree_conflict`/`workspace_dirty`)가
-  세부 원인을 구분한다. `PollingService`는 이 실패를 Agent 실행 전에
-  잡아 `_restore()`로 claim 이전 안정 상태로 되돌린다(`PollingStatus.
+  `worktree_creation_failed`/`worktree_conflict`/`workspace_dirty`) 6개
+  전부에 실제 발생 경로와 테스트가 있다 - `branch_pr_mismatch`(등록된
+  worktree가 clean하지만 새로 해석된 branch와 다름)와 `workspace_dirty`
+  (새로 만든 worktree가 checkout 직후 예상과 달리 dirty)는 PR #44 1차
+  리뷰 Warning 반영으로 이번에 추가했다(아래 "PR #44 REQUEST CHANGES
+  대응" 절 참고). `PollingService`는 이 실패를 Agent 실행 전에 잡아
+  `_restore()`로 claim 이전 안정 상태로 되돌린다(`PollingStatus.
   WORKSPACE_PREPARATION_FAILED`, `FailureCategory.
   WORKSPACE_PREPARATION_FAILED` - `RESTORE` outcome, 재시도 없음).
   `devbot:working`에 영구히 머무르는 경우는 없다.
@@ -124,6 +132,29 @@ worktree 안에서 파일을 읽고 쓰고 로컬 검증만 수행하면 된다.
 - `tests/test_main_loop.py` - `test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero`
   fixture 갱신 (아래 "기존 테스트 조정" 절).
 
+PR #44 1차 리뷰(REQUEST CHANGES) 반영으로 추가 수정:
+- `src/devbot/delivery.py` - `DeliveryService.current_branch`(주입 가능,
+  기본 `current_git_branch`) 필드 추가. `deliver()`가 commit 직전에 실제
+  checkout branch와 `target_branch`를 비교해 불일치하면 commit/push 전에
+  `delivery_branch_mismatch`로 거부.
+- `src/devbot/worktree.py` - `WorktreeManager.is_dirty`(주입 가능, 기본
+  `_is_dirty`) 필드 추가. `_create_or_reuse()`가 (1) 등록된 worktree가
+  clean하지만 branch가 다르면 조용히 재생성하는 대신
+  `BRANCH_PR_MISMATCH`로 거부하고, (2) 새로 만든 worktree가 checkout
+  직후 dirty하면 `WORKSPACE_DIRTY`로 거부하도록 변경.
+- `tests/test_delivery.py` - `test_delivery_rejects_branch_mismatch_before_commit`,
+  `test_delivery_rejects_when_current_branch_lookup_fails` 추가. 기존
+  `DeliveryService` 생성 5곳에 `current_branch` 주입 추가(회귀 방지).
+- `tests/test_worktree.py` - `test_branch_pr_mismatch_is_classified`,
+  `test_workspace_dirty_is_classified` 추가.
+- `tests/test_beta_smoke.py` - `test_reuse_existing_pr`의 phase 1
+  `DeliveryService`에 `current_branch` 주입 추가(회귀 방지).
+- `docs/13-host-managed-workspace-preparation.md` - 3절에서 "clean하지만
+  branch가 다르면 재생성" 서술을 제거하고 `BRANCH_PR_MISMATCH`/
+  `WORKSPACE_DIRTY`의 실제 거부 동작으로 교체.
+- `docs/07-decisions.md` - 2026-07-15 항목에 PR #44 1차 리뷰가 지적한
+  두 지점과 그 수정 근거를 기록.
+
 ## 기존 테스트 조정
 
 `devbot.worktree`가 process-wide `subprocess` 모듈을 `devbot.agents.codex`
@@ -174,6 +205,71 @@ push하면 origin의 실제 `main` 이력과 무관한 fast-forward가 아닌 pu
 `main`을 checkout하게 만들었다. 세 번째 push 후 CI(`verify`)가 통과함을
 확인했다(`https://github.com/hjlee83/devbot/actions/runs/29421682922`).
 
+## PR #44 REQUEST CHANGES 대응
+
+자동 리뷰(`hjlee83`, head `6b2ee07`)가 `REQUEST CHANGES`를 반환했다.
+
+**Blocker (CP-023-7 미충족)**: Task 023 계약 Scope §7("Delivery must
+reject branch mismatch before commit or push")을 만족하지 않았다.
+`DeliveryService.deliver()`는 `target_branch`만 계산할 뿐, commit 직전에
+실제 checkout branch가 그 branch인지 검증하지 않았다 - `branch_exists()`
+검사는 commit *이후*에, 게다가 "그 이름의 local branch가 존재하는지"만
+확인했다. Agent가 준비된 worktree에서 실수로/어떤 이유로든 다른 branch로
+checkout한 채 변경사항을 만들면, delivery는 그 다른 branch에 commit한
+뒤 기존 `target_branch`(움직이지 않은 오래된 ref)를 push할 수 있었다 -
+리뷰 지적이 정확했다.
+
+수정: `DeliveryService`에 `current_branch`(주입 가능, 기본
+`current_git_branch`) 필드를 추가하고, `target_branch` 계산 직후
+`has_changes` 확인보다도 먼저 `self.current_branch(repository) ==
+target_branch`를 확인해 불일치 시 `commit`/`push`를 전혀 호출하지 않고
+`delivery_branch_mismatch`로 거부하도록 고쳤다. `current_branch` 조회
+자체가 실패하는 경우(예: detached/손상된 checkout)도 같은 방식으로
+거부한다(raise하지 않음). `test_delivery_rejects_branch_mismatch_before_commit`
+/ `test_delivery_rejects_when_current_branch_lookup_fails`를 추가했고,
+기존 `DeliveryService`를 직접 생성하는 테스트(5곳, `tests/test_delivery.py`
+`_passing_service` + 3개 개별 테스트, `tests/test_beta_smoke.py`
+`test_reuse_existing_pr`)에 실제 delivery 대상과 일치하는 `current_branch`
+를 주입해 회귀를 막았다.
+
+**Warning (CP-023-9 불완전)**: 계약이 최소 구분 대상으로 명시한
+`branch_pr_mismatch`/`workspace_dirty`(Scope §9)가 enum 값으로만
+존재하고 실제로 도달 가능한 코드 경로도 테스트도 없었다 - 리뷰 지적이
+정확했다.
+
+수정: `WorktreeManager._create_or_reuse()`의 동작을 두 가지로 바꿨다.
+(1) 기존에는 "등록된 worktree가 있는데 branch가 다르지만 clean하면
+조용히 지우고 새 branch로 재생성"했다 - 이제는 그 경우를
+`WorkspacePreparationFailure.BRANCH_PR_MISMATCH`로 거부하고, worktree는
+지우지 않고 그대로 보존한다(재시도하려면 `devbot worktree cleanup`이
+필요). (2) 새로 만든(재사용이 아닌) worktree가 `git worktree add` 직후
+예상과 달리 dirty하면 `WorkspacePreparationFailure.WORKSPACE_DIRTY`로
+거부한다 - 검사 함수(`WorktreeManager.is_dirty`)를 주입 가능하게 만들어
+`test_workspace_dirty_is_classified`가 실제 git 동작에 의존하지 않고 이
+경로를 결정적으로 재현한다. `test_branch_pr_mismatch_is_classified`도
+추가했다(실제 두 branch를 push하고 worktree를 두 번 준비해 재현).
+
+이 수정으로 CP-023-8("reuse only when repository/Issue/branch match")과
+CP-023-9의 관계도 더 명확해졌다: branch가 다르면 이제 어떤 경우에도
+암묵적으로 재사용/재생성되지 않는다 - dirty하면 `WORKTREE_CONFLICT`,
+clean해도 `BRANCH_PR_MISMATCH`로 항상 명시적 실패다.
+
+## PR #44 cross-link 보정 (코드 밖 발견)
+
+리뷰 반영 검증 중 `uv run devbot --once --dry-run`을 다시 실행하다가
+`review Issue에 연결된 PR을 찾지 못했습니다 (hjlee83/devbot #45)`가
+발생함을 발견했다. 원인은 PR #44 본문에 `devbot.polling.
+find_linked_pull_request()`가 찾는 closing keyword(`Closes #45` 등,
+`_CLOSING_KEYWORD_RE`)가 없었다는 것이다 - Planner가 PR을 만들 때
+"Pull Request: this PR"이라는 문구는 있었지만 GitHub/DevBot이 인식하는
+`Closes #<번호>` 형식은 아니었다. 이 Task의 코드 변경과는 무관한, PR
+생성 당시부터 있던 사전 조건 문제지만, Task 023이 바로 "linked PR을
+정확히 resolve"하는 기능이라 방치하면 이 Issue/PR 쌍 자체가 daemon에서
+영구히 review 후보가 되지 못한다. PR #44 본문 끝에 `Closes #45` 한 줄을
+추가해 고쳤다(`gh pr edit 44 --body-file ...`, 기존 내용은 그대로 유지).
+수정 후 `uv run devbot --once --dry-run`을 다시 실행해 REVIEW 후보가
+정상적으로 발견됨을 확인했다(아래 "검증 결과" 참고).
+
 ## Checkpoint별 테스트
 
 | Checkpoint | 테스트 |
@@ -184,9 +280,9 @@ push하면 origin의 실제 `main` 이력과 무관한 fast-forward가 아닌 pu
 | CP-023-4 기존 branch 재사용 | `test_existing_task_branch_is_reused` |
 | CP-023-5 준비된 Agent 컨텍스트 | `test_agent_prompt_contains_prepared_workspace_context` |
 | CP-023-6 네트워크 없는 구현 호환성 | `test_implementation_does_not_require_agent_network_access` |
-| CP-023-7 준비된 branch로 delivery | `test_delivery_uses_prepared_worktree_branch` |
+| CP-023-7 준비된 branch로 delivery | `test_delivery_uses_prepared_worktree_branch`, `test_delivery_rejects_branch_mismatch_before_commit`, `test_delivery_rejects_when_current_branch_lookup_fails` |
 | CP-023-8 worktree 생명주기/cleanup | `test_failed_job_preserves_worktree_for_recovery`, `test_successful_cleanup_removes_worktree`, `test_conflicting_dirty_worktree_is_rejected` |
-| CP-023-9 준비 실패 복구 | `test_workspace_preparation_failure_skips_agent_and_recovers_state` |
+| CP-023-9 준비 실패 복구 | `test_workspace_preparation_failure_skips_agent_and_recovers_state`, `test_branch_pr_mismatch_is_classified`, `test_workspace_dirty_is_classified` |
 | CP-023-10 doctor/진단 | `test_doctor_reports_worktree_health` |
 | CP-023-11 operator checkout 독립성 | `test_daemon_job_is_independent_of_operator_checkout_branch` |
 | CP-023-12 회귀/문서 | 기존 342개 테스트 전부 통과(회귀 없음) + 이 문서 |
@@ -202,10 +298,11 @@ uv run ruff check .
   All checks passed!
 
 uv run pytest
-  360 passed (기존 342개 + Task 023 신규 18개: test_worktree.py 11개
-  [필수 6 + 보조 5] + test_polling.py 6개 + test_doctor.py 1개;
-  test_main_loop.py 1개는 신규 테스트가 아니라 위 "기존 테스트 조정"에서
-  설명한 fixture 갱신)
+  364 passed (기존 342개 + Task 023 최초 구현 신규 18개[test_worktree.py
+  11개(필수 6 + 보조 5) + test_polling.py 6개 + test_doctor.py 1개] +
+  PR #44 1차 리뷰 반영 신규 4개[test_delivery.py 2개 +
+  test_worktree.py 2개]; test_main_loop.py/test_beta_smoke.py는 신규
+  테스트가 아니라 fixture 갱신 - "기존 테스트 조정" 절 참고)
 
 uv run devbot --dry-run doctor
   (실제 hjlee83/devbot 배포 설정으로 실행)
@@ -217,13 +314,19 @@ uv run devbot --dry-run doctor
   설계대로 daemon 시작을 막지 않는 정보성 체크다 - worktree_health는 OK)
 
 uv run devbot --once --dry-run
-  (실제 hjlee83/devbot 배포 설정 · 실제 GitHub 인증/조회로 실행, 종료 코드 0)
-  Queue Summary: manual-action=1 (Issue #45 자신)
-  cycle 종료: 결과=no_ready_task (선택 0/1)
-  1회 실행 완료: no_ready_task
+  (실제 hjlee83/devbot 배포 설정 · 실제 GitHub 인증/조회로 실행, 종료 코드 1)
+  Queue Summary: review=1 (Issue #45 자신, PR #44 cross-link 보정 이후)
+  cycle 종료: 후보(rework=0 review=1 implement=0) 선택=1/1 결과=workspace_invalid
+  1회 실행 완료: workspace_invalid
+  (REVIEW Job은 이 Task 범위 밖이라 operator checkout을 그대로 쓰고
+  dirty 여부를 검사한다 - 이 실행 시점에 operator checkout 자체가 이
+  Task의 미커밋 변경을 갖고 있어 정직하게 workspace_invalid를 보고했다.
+  --dry-run이라 실제 GitHub 쓰기는 없었다. PR #44 cross-link 보정 전에는
+  linked PR을 아예 찾지 못해 iteration_error였던 것과 달리, 이제 REVIEW
+  후보 자체는 정상적으로 발견된다는 것이 확인 목적이었다.)
 
-CI (`verify`, PR #44, head cc60320)
-  pass (18s) - https://github.com/hjlee83/devbot/actions/runs/29421682922
+CI (`verify`, PR #44)
+  두 번째 push(head: 아래 "커밋/CI 정보" 참고) 이후 pass
 ```
 
 ### 수동 검증 (계약 Validation Gate "Manual verification" 항목)

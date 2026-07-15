@@ -168,3 +168,31 @@ does (CP-023-11). `PollingService.prepare_workspace` defaults to `None`,
 so this whole path - and every existing test that does not opt in - is
 unaffected; `devbot.main` always wires the real
 `WorktreeManager.prepare` in production.
+
+PR #44's first automated review (`hjlee83`, head `6b2ee07`) returned
+`REQUEST CHANGES` on two points worth recording here because the fix
+changed intended behavior, not just added a missing check:
+
+- **Delivery now verifies the currently checked-out branch before
+  `commit`/`push`** (`DeliveryService.current_branch`, Scope §7's
+  "reject branch mismatch before commit or push"). The gap: `commit()`
+  always commits to whatever branch is actually checked out - Git has no
+  notion of "the branch the caller meant" - so an unverified mismatch
+  between a prepared worktree's actual branch and delivery's resolved
+  `target_branch` could commit real work onto the wrong branch and then
+  push `target_branch`'s unrelated, unmoved ref while still reporting
+  `delivered`.
+- **A worktree that is clean but on the wrong branch is now a hard
+  `branch_pr_mismatch` failure, not silently deleted and recreated.** The
+  original `WorktreeManager._create_or_reuse()` treated "registered
+  worktree, branch differs, not dirty" as safe to auto-heal (remove +
+  recreate on the newly resolved branch). The review correctly pointed out
+  the contract's `branch_pr_mismatch` category (Scope §9) had no real
+  trigger path or test - and on reflection, silently discarding a
+  worktree's identity because its linked branch changed is exactly the
+  kind of implicit action Task 023's "no preparation failure may leave the
+  Issue in `devbot:working` permanently, use explicit failure categories"
+  principle argues against. It now raises instead, requiring an explicit
+  `devbot worktree cleanup` before retrying - consistent with CP-023-8's
+  broader "cleanup is always explicit" rule (this file's entry above), not
+  an exception to it.
