@@ -150,12 +150,55 @@ def classify_job_failure(job_type: JobType, status: PollingStatus, message: str)
     return FailureCategory.UNKNOWN_ERROR
 
 
-def _task_state_from_labels(labels: Iterable[str]) -> TaskState | None:
+_NO_WORK_STATUSES = {
+    PollingStatus.NO_READY_TASK,
+    PollingStatus.SKIPPED_ACTIVE_TASK,
+    PollingStatus.NO_MANAGED_REPOSITORIES,
+}
+
+
+def _normalized_cycle_result(selected_jobs: Sequence[Job], results: Sequence[PollingResult]) -> str:
+    """Task 020 CP-020-5: one stable, uppercase label summarizing the whole
+    cycle - `NO_RUNNABLE_TASK` when no Job ran, the `FailureCategory` of the
+    first genuine Job failure this cycle (in `results` order: candidate-
+    collection hard errors first, then executed Job results in selection
+    order), or the `JobType` of the Job that ran. Independent of
+    `observability.QueueSummary`'s state counts - this only summarizes
+    *what the cycle did*, not the queue it saw."""
+    if not results or all(result.status in _NO_WORK_STATUSES for result in results):
+        return "NO_RUNNABLE_TASK"
+
+    job_by_key = {(job.task.repository, job.task.number): job for job in selected_jobs}
+    for result in results:
+        if result.status in _JOB_FAILURE_STATUSES:
+            task_key = (result.task.repository, result.task.number) if result.task else None
+            job = job_by_key.get(task_key) if task_key is not None else None
+            job_type = job.job_type if job is not None else JobType.IMPLEMENT
+            return classify_job_failure(job_type, result.status, result.message).value.upper()
+
+    for result in results:
+        task_key = (result.task.repository, result.task.number) if result.task else None
+        job = job_by_key.get(task_key) if task_key is not None else None
+        if job is not None:
+            return job.job_type.value.upper()
+
+    return results[0].status.value.upper()
+
+
+def _matched_task_states(labels: Iterable[str]) -> list[TaskState]:
+    """Every `devbot:*` state label present on `labels`, in `TaskState`
+    declaration order (READY, WORKING, REVIEW, REWORK, MANUAL_ACTION,
+    BLOCKED, DONE). `_task_state_from_labels` picks the first of these when
+    more than one is present - an existing, unchanged rule (Task 020 only
+    makes the ambiguity visible via `observability.log_state_label_conflict`,
+    CP-020-8)."""
     label_set = set(labels)
-    for state in TaskState:
-        if f"{_STATE_LABEL_PREFIX}{state.value}" in label_set:
-            return state
-    return None
+    return [state for state in TaskState if f"{_STATE_LABEL_PREFIX}{state.value}" in label_set]
+
+
+def _task_state_from_labels(labels: Iterable[str]) -> TaskState | None:
+    matched = _matched_task_states(labels)
+    return matched[0] if matched else None
 
 
 def _priority_from_labels(labels: Iterable[str]) -> Priority:
@@ -308,6 +351,16 @@ class PollingService:
                 result_count=len(issues),
             )
             for issue in issues:
+                matched_states = _matched_task_states(issue.labels)
+                if len(matched_states) > 1:
+                    observability.log_state_label_conflict(
+                        self.logger,
+                        cycle_id,
+                        repository=issue.repository,
+                        issue_number=issue.number,
+                        matched_states=matched_states,
+                        resolved_state=matched_states[0],
+                    )
                 task = issue_to_task(issue)
                 if task is None:
                     continue
@@ -410,19 +463,21 @@ class PollingService:
         rework_task: IssueTask,
         issue: GitHubIssue,
         cycle_id: str,
-    ) -> tuple[Job | None, PollingResult | None]:
+    ) -> tuple[Job | None, int | None, PollingResult | None]:
         """A `devbot:rework` Issue is a REWORK candidate only when its
         linked PR has an unprocessed `@devbot` comment (CP-014-3); other-
         wise it is excluded (DEBUG) and stays `devbot:rework`, waiting for
-        feedback."""
+        feedback. Returns the candidate's linked PR number alongside the
+        `Job` (Task 020 CP-020-4) so a caller that later selects this Job
+        can report it without a second GitHub lookup."""
         if self.rework_service is None:
-            return None, None
+            return None, None, None
 
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
             repository, rework_task, issue, cycle_id
         )
         if error is not None:
-            return None, error
+            return None, None, error
         assert linked_pull_request is not None  # `error` is None only when this is set
 
         if find_unprocessed_devbot_comments(pr_comments):
@@ -430,7 +485,7 @@ class PollingService:
             observability.log_candidate_found(
                 self.logger, cycle_id, job, pr_number=linked_pull_request.number
             )
-            return job, None
+            return job, linked_pull_request.number, None
 
         observability.log_candidate_excluded(
             self.logger,
@@ -443,7 +498,7 @@ class PollingService:
                 detail=f"PR #{linked_pull_request.number}에 처리되지 않은 @devbot 댓글 없음",
             ),
         )
-        return None, None
+        return None, None, None
 
     def _review_state_candidate(
         self,
@@ -451,20 +506,22 @@ class PollingService:
         review_task: IssueTask,
         issue: GitHubIssue,
         cycle_id: str,
-    ) -> tuple[Job | None, PollingResult | None]:
+    ) -> tuple[Job | None, int | None, PollingResult | None]:
         """A `devbot:review` Issue is a REVIEW candidate whenever its
         linked PR's current head commit has no auto-review marker yet
         (Task 014: rework detection no longer runs against `devbot:review`
         Issues - `@devbot` feedback only exists on `devbot:rework` Issues
-        now, CP-014-2/CP-014-3)."""
+        now, CP-014-2/CP-014-3). Returns the candidate's linked PR number
+        alongside the `Job` (Task 020 CP-020-4), same as
+        `_rework_state_candidate`."""
         if self.review_service is None:
-            return None, None
+            return None, None, None
 
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
             repository, review_task, issue, cycle_id
         )
         if error is not None:
-            return None, error
+            return None, None, error
         assert linked_pull_request is not None  # `error` is None only when this is set
 
         if not has_review_marker_for_head(pr_comments, linked_pull_request.head_sha):
@@ -472,7 +529,7 @@ class PollingService:
             observability.log_candidate_found(
                 self.logger, cycle_id, job, pr_number=linked_pull_request.number
             )
-            return job, None
+            return job, linked_pull_request.number, None
 
         observability.log_candidate_excluded(
             self.logger,
@@ -488,7 +545,7 @@ class PollingService:
                 ),
             ),
         )
-        return None, None
+        return None, None, None
 
     def _collect_job_candidates(
         self,
@@ -496,13 +553,14 @@ class PollingService:
         tasks: Sequence[IssueTask],
         issues_by_key: IssuesByKey,
         cycle_id: str,
-    ) -> tuple[list[Job], list[PollingResult]]:
+    ) -> tuple[list[Job], list[PollingResult], dict[tuple[str, int], int]]:
         tasks_by_repo: dict[str, list[IssueTask]] = {}
         for task in tasks:
             tasks_by_repo.setdefault(task.repository, []).append(task)
 
         candidates: list[Job] = []
         hard_errors: list[PollingResult] = []
+        candidate_pr_numbers: dict[tuple[str, int], int] = {}
 
         for repository in repositories:
             repo_tasks = tasks_by_repo.get(repository.full_name, [])
@@ -540,20 +598,28 @@ class PollingService:
             rework_tasks = [task for task in repo_tasks if task.state == TaskState.REWORK]
             for rework_task in rework_tasks:
                 issue = issues_by_key[(rework_task.repository, rework_task.number)]
-                job, error = self._rework_state_candidate(repository, rework_task, issue, cycle_id)
+                job, pr_number, error = self._rework_state_candidate(
+                    repository, rework_task, issue, cycle_id
+                )
                 if error is not None:
                     hard_errors.append(error)
                 elif job is not None:
                     candidates.append(job)
+                    if pr_number is not None:
+                        candidate_pr_numbers[(job.task.repository, job.task.number)] = pr_number
 
             review_tasks = [task for task in repo_tasks if task.state == TaskState.REVIEW]
             for review_task in review_tasks:
                 issue = issues_by_key[(review_task.repository, review_task.number)]
-                job, error = self._review_state_candidate(repository, review_task, issue, cycle_id)
+                job, pr_number, error = self._review_state_candidate(
+                    repository, review_task, issue, cycle_id
+                )
                 if error is not None:
                     hard_errors.append(error)
                 elif job is not None:
                     candidates.append(job)
+                    if pr_number is not None:
+                        candidate_pr_numbers[(job.task.repository, job.task.number)] = pr_number
 
             if rework_tasks or review_tasks:
                 # An unmerged PR already occupies this repository's
@@ -580,7 +646,7 @@ class PollingService:
                 candidates.append(job)
                 observability.log_candidate_found(self.logger, cycle_id, job)
 
-        return candidates, hard_errors
+        return candidates, hard_errors, candidate_pr_numbers
 
     _ROLE_BY_JOB_TYPE = {
         JobType.IMPLEMENT: "implementer",
@@ -700,14 +766,6 @@ class PollingService:
         cycle_id = observability.new_cycle_id()
         cycle_start = time.monotonic()
         observability.log_cycle_start(self.logger, cycle_id, len(repositories))
-        self.logger.info("폴링을 시작합니다.")
-        self.logger.info("관리 저장소 수: %d", len(repositories))
-        self.logger.info(
-            "Agent 구성: implementer=%s reviewer=%s dry_run=%s",
-            self.config.implementer_agent,
-            self.config.reviewer_agent,
-            self.config.dry_run,
-        )
 
         try:
             tasks, issues_by_key = self._collect(repositories, cycle_id)
@@ -725,40 +783,51 @@ class PollingService:
                     results=results,
                 ),
             )
+            observability.log_cycle_result(
+                self.logger,
+                cycle_id,
+                _normalized_cycle_result([], results),
+                observability.elapsed_ms(cycle_start),
+            )
             return results
 
-        ready_count = sum(1 for task in tasks if task.state == TaskState.READY)
-        self.logger.info("ready 상태 Issue 수: %d", ready_count)
+        # CP-020-1/CP-020-2: one structured queue summary per cycle,
+        # covering every stable workflow state - replaces the free-form
+        # "ready 상태 Issue 수: ..." line this used to log inline.
+        observability.log_queue_summary(
+            self.logger, observability.build_queue_summary(cycle_id, tasks)
+        )
 
-        candidates, hard_errors = self._collect_job_candidates(
+        candidates, hard_errors, candidate_pr_numbers = self._collect_job_candidates(
             repositories, tasks, issues_by_key, cycle_id
         )
         selection = select_jobs_with_exclusions(candidates, self.config.max_concurrent_jobs)
         observability.log_candidates_excluded(self.logger, cycle_id, selection.exclusions)
-        observability.log_jobs_selected(
-            self.logger,
-            cycle_id,
-            selection.selected,
-            available_slots=self.config.max_concurrent_jobs,
-        )
+        # CP-020-4: one "Selected" report per Job actually chosen to run
+        # this cycle (none at all when nothing was selected).
+        for job in selection.selected:
+            observability.log_job_selected(
+                self.logger,
+                cycle_id,
+                job,
+                pr_number=candidate_pr_numbers.get((job.task.repository, job.task.number)),
+            )
         job_results = self._execute_jobs(selection.selected, repositories, issues_by_key, cycle_id)
 
         results = [*hard_errors, *job_results]
         if not results:
+            # CP-020-3: no separate free-form "no work" narration - the
+            # normalized `NO_RUNNABLE_TASK` cycle result below covers both
+            # of these cases; the distinction between them still lives in
+            # the returned `PollingStatus` itself.
             if not tasks:
-                self.logger.info("선택 가능한 ready Issue가 없습니다.")
                 results = [PollingResult(status=PollingStatus.NO_READY_TASK)]
             elif any(
                 task.state in (TaskState.WORKING, TaskState.REVIEW, TaskState.REWORK)
                 for task in tasks
             ):
-                self.logger.info(
-                    "이미 진행 중인(working/review/rework) Issue가 있어 "
-                    "새 작업을 선택하지 않습니다."
-                )
                 results = [PollingResult(status=PollingStatus.SKIPPED_ACTIVE_TASK)]
             else:
-                self.logger.info("선택 가능한 ready Issue가 없습니다.")
                 results = [PollingResult(status=PollingStatus.NO_READY_TASK)]
 
         observability.log_cycle_end(
@@ -771,6 +840,14 @@ class PollingService:
                 available_slots=self.config.max_concurrent_jobs,
                 results=results,
             ),
+        )
+        # CP-020-5: one normalized cycle result, independent of the queue
+        # summary's state counts.
+        observability.log_cycle_result(
+            self.logger,
+            cycle_id,
+            _normalized_cycle_result(selection.selected, results),
+            observability.elapsed_ms(cycle_start),
         )
         return results
 

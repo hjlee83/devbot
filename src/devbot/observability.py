@@ -42,7 +42,7 @@ from functools import wraps
 from importlib import metadata
 from typing import ParamSpec, TypeVar
 
-from devbot.models import CandidateExclusion, DevBotConfig, Job, JobType
+from devbot.models import CandidateExclusion, DevBotConfig, IssueTask, Job, JobType, TaskState
 from devbot.reliability import DiagnosticReport, render_diagnostic_report
 from devbot.startup import StartupValidationReport
 
@@ -277,6 +277,142 @@ def log_cycle_start(logger: logging.Logger, cycle_id: str, repository_count: int
     )
 
 
+_QUEUE_SUMMARY_STATES: tuple[TaskState, ...] = (
+    TaskState.READY,
+    TaskState.REVIEW,
+    TaskState.REWORK,
+    TaskState.BLOCKED,
+    TaskState.MANUAL_ACTION,
+    TaskState.WORKING,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueSummary:
+    """One cycle's complete workflow-queue snapshot (Task 020) - every
+    managed repository's Issues, bucketed by their single resolved
+    `TaskState`. Independent of which candidate becomes a `Job` this cycle
+    (`CycleSummary` below) and of the cycle's eventual result
+    (`log_cycle_result`)."""
+
+    cycle_id: str
+    ready: int
+    review: int
+    rework: int
+    blocked: int
+    manual_action: int
+    working: int
+
+
+def build_queue_summary(cycle_id: str, tasks: Sequence[IssueTask]) -> QueueSummary:
+    """Count every `IssueTask` into exactly one of the six stable
+    scheduler-facing buckets (CP-020-2). Each `IssueTask.state` is already
+    the single `TaskState` `devbot.polling.issue_to_task` resolved from
+    that Issue's GitHub labels, so summing over `tasks` can never
+    double-count one Issue across buckets even when its underlying labels
+    are ambiguous (CP-020-8) - a task outside these six states (e.g.
+    `DONE`) simply contributes to no bucket."""
+    counts = dict.fromkeys(_QUEUE_SUMMARY_STATES, 0)
+    for task in tasks:
+        if task.state in counts:
+            counts[task.state] += 1
+    return QueueSummary(
+        cycle_id=cycle_id,
+        ready=counts[TaskState.READY],
+        review=counts[TaskState.REVIEW],
+        rework=counts[TaskState.REWORK],
+        blocked=counts[TaskState.BLOCKED],
+        manual_action=counts[TaskState.MANUAL_ACTION],
+        working=counts[TaskState.WORKING],
+    )
+
+
+@_safe_log
+def log_queue_summary(logger: logging.Logger, summary: QueueSummary) -> None:
+    """INFO: CP-020-1 - the single operator-facing queue summary emitted
+    once per cycle, replacing the free-form ready-count/no-work prose that
+    used to be logged inline in `devbot.polling.PollingService.run_cycle`."""
+    logger.info(
+        "Queue Summary\n"
+        "  ready         : %d\n"
+        "  review        : %d\n"
+        "  rework        : %d\n"
+        "  blocked       : %d\n"
+        "  manual-action : %d\n"
+        "  working       : %d",
+        summary.ready,
+        summary.review,
+        summary.rework,
+        summary.blocked,
+        summary.manual_action,
+        summary.working,
+        extra={
+            "event": "queue_summary",
+            "cycle_id": summary.cycle_id,
+            "ready": summary.ready,
+            "review": summary.review,
+            "rework": summary.rework,
+            "blocked": summary.blocked,
+            "manual_action": summary.manual_action,
+            "working": summary.working,
+        },
+    )
+
+
+@_safe_log
+def log_state_label_conflict(
+    logger: logging.Logger,
+    cycle_id: str,
+    *,
+    repository: str,
+    issue_number: int,
+    matched_states: Sequence[TaskState],
+    resolved_state: TaskState,
+) -> None:
+    """WARNING: CP-020-8 - an Issue carries more than one `devbot:*` state
+    label at once (a stale manual edit, or a previous write that partially
+    applied - the same ambiguity `devbot.issue_state._current_state`
+    normalizes before any write). The queue summary still counts this
+    Issue into exactly one bucket (`resolved_state`) using the same
+    first-match rule `devbot.polling.issue_to_task` already applies for
+    scheduling; this log only makes the anomaly visible to an operator, it
+    does not change which bucket wins."""
+    logger.warning(
+        "state_label_conflict: cycle_id=%s repo=%s issue=#%d labels=%s resolved=%s",
+        cycle_id,
+        repository,
+        issue_number,
+        ",".join(state.value for state in matched_states),
+        resolved_state.value,
+        extra={
+            "event": "state_label_conflict",
+            "cycle_id": cycle_id,
+            "repository": repository,
+            "issue_number": issue_number,
+            "matched_states": [state.value for state in matched_states],
+            "resolved_state": resolved_state.value,
+        },
+    )
+
+
+@_safe_log
+def log_cycle_result(logger: logging.Logger, cycle_id: str, result: str, elapsed_ms: float) -> None:
+    """INFO: CP-020-5 - one normalized, uppercase cycle result
+    (`NO_RUNNABLE_TASK`, a `JobType` name, or a `FailureCategory` name),
+    reported independently of `log_queue_summary`'s state counts."""
+    logger.info(
+        "Cycle Result\n  %s\n  elapsed: %dms",
+        result,
+        elapsed_ms,
+        extra={
+            "event": "cycle_result",
+            "cycle_id": cycle_id,
+            "result": result,
+            "elapsed_ms": elapsed_ms,
+        },
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CycleSummary:
     """Pure summary of one cycle's outcome, built before logging so the
@@ -439,47 +575,38 @@ def log_candidates_excluded(
 
 
 @_safe_log
-def log_job_selected(logger: logging.Logger, cycle_id: str, job: Job, *, rank: int) -> None:
-    """INFO: one Job actually selected to run this cycle, with the
-    correlation fields (cycle/repository/issue/job type) CP-013-8
-    requires - `rank` is this job's 1-based position in the selection
-    order (rework outranks review outranks implement, then priority/age)."""
+def log_job_selected(
+    logger: logging.Logger,
+    cycle_id: str,
+    job: Job,
+    *,
+    pr_number: int | None = None,
+) -> None:
+    """INFO: CP-020-4 - the one structured "Selected" report for a Job
+    chosen to run this cycle, keeping the CP-013-8 correlation fields
+    (`cycle_id`, repository, Issue, job type) an existing regression test
+    already asserts on and adding the PR number when one is already known
+    (REWORK/REVIEW candidates already resolved their linked PR during
+    candidate collection; a fresh IMPLEMENT Job usually has none yet)."""
     logger.info(
-        "Job 선택: cycle_id=%s repo=%s issue=#%d job_type=%s 순위=%d",
-        cycle_id,
+        "Selected\n"
+        "  repo     : %s\n"
+        "  issue    : #%d\n"
+        "  pr       : %s\n"
+        "  job_type : %s",
         job.task.repository,
         job.task.number,
+        f"#{pr_number}" if pr_number is not None else "-",
         job.job_type.value,
-        rank,
         extra={
             "event": "job_selected",
             "cycle_id": cycle_id,
             "repository": job.task.repository,
             "issue_number": job.task.number,
+            "pr_number": pr_number,
             "job_type": job.job_type.value,
-            "rank": rank,
         },
     )
-
-
-@_safe_log
-def log_jobs_selected(
-    logger: logging.Logger, cycle_id: str, jobs: Sequence[Job], *, available_slots: int
-) -> None:
-    logger.info(
-        "Job 선택 완료: cycle_id=%s 선택=%d 가용 slot=%d",
-        cycle_id,
-        len(jobs),
-        available_slots,
-        extra={
-            "event": "jobs_selected",
-            "cycle_id": cycle_id,
-            "selected_count": len(jobs),
-            "available_slots": available_slots,
-        },
-    )
-    for rank, job in enumerate(jobs, start=1):
-        log_job_selected(logger, cycle_id, job, rank=rank)
 
 
 @_safe_log

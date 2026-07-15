@@ -20,6 +20,7 @@ from devbot.observability import (
     SafeLogger,
     SecretRedactingFilter,
     build_cycle_summary,
+    build_queue_summary,
     elapsed_ms,
     ensure_safe_logger,
     install_secret_filter,
@@ -32,12 +33,17 @@ from devbot.observability import (
 from devbot.polling import PollingResult, PollingStatus
 
 
-def _task(*, repository: str = "someone/myrepo", number: int = 1) -> IssueTask:
+def _task(
+    *,
+    repository: str = "someone/myrepo",
+    number: int = 1,
+    state: TaskState = TaskState.READY,
+) -> IssueTask:
     return IssueTask(
         repository=repository,
         number=number,
         title="task",
-        state=TaskState.READY,
+        state=state,
         priority=Priority.NONE,
         created_at=datetime(2026, 1, 1),
     )
@@ -243,6 +249,64 @@ def test_build_cycle_summary_handles_no_candidates_or_results() -> None:
 
     assert summary.candidate_counts[JobType.REWORK] == 0
     assert summary.result_statuses == ()
+
+
+# --- Task 020: build_queue_summary ------------------------------------------
+
+
+def test_build_queue_summary_counts_each_stable_state() -> None:
+    """CP-020-2: every stable workflow state gets its own count, and a
+    state with multiple tasks accumulates correctly."""
+    tasks = [
+        _task(number=1, state=TaskState.READY),
+        _task(number=2, state=TaskState.REVIEW),
+        _task(number=3, state=TaskState.REVIEW),
+        _task(number=4, state=TaskState.REWORK),
+        _task(number=5, state=TaskState.BLOCKED),
+        _task(number=6, state=TaskState.MANUAL_ACTION),
+        _task(number=7, state=TaskState.WORKING),
+    ]
+
+    summary = build_queue_summary("cyc-1", tasks)
+
+    assert summary.cycle_id == "cyc-1"
+    assert summary.ready == 1
+    assert summary.review == 2
+    assert summary.rework == 1
+    assert summary.blocked == 1
+    assert summary.manual_action == 1
+    assert summary.working == 1
+
+
+def test_build_queue_summary_returns_all_zero_counts_for_no_tasks() -> None:
+    """Boundary: an empty queue still builds a valid summary instead of
+    raising, with every bucket at zero."""
+    summary = build_queue_summary("cyc-empty", [])
+
+    assert (
+        summary.ready,
+        summary.review,
+        summary.rework,
+        summary.blocked,
+        summary.manual_action,
+        summary.working,
+    ) == (0, 0, 0, 0, 0, 0)
+
+
+def test_build_queue_summary_ignores_terminal_done_state() -> None:
+    """Boundary: a `DONE` task (outside the six scheduler-facing stable
+    states) contributes to no bucket rather than raising or being silently
+    added somewhere unexpected."""
+    summary = build_queue_summary("cyc-done", [_task(state=TaskState.DONE)])
+
+    assert (
+        summary.ready,
+        summary.review,
+        summary.rework,
+        summary.blocked,
+        summary.manual_action,
+        summary.working,
+    ) == (0, 0, 0, 0, 0, 0)
 
 
 # --- log_startup / log_job_finished / log_candidate_excluded ----------------

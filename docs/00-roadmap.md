@@ -100,3 +100,15 @@
       `results/019-daemon-reliability-baseline.md`). Worktree 격리,
       Timeline 자동 기록, 멀티 Agent failover, VPS 배포는 범위 밖으로
       남긴다.
+- [x] Task 020: daemon queue summary and cycle logging. cycle마다 흩어져
+      있던 자유 형식 로그 줄("폴링을 시작합니다", "ready 상태 Issue 수",
+      "선택 가능한 ready Issue가 없습니다" 등)을 Queue Summary(6개
+      워크플로 상태 개수, cycle당 정확히 한 번) / Selected(선택된 Job의
+      repo/issue/pr/job_type) / Cycle Result(`NO_RUNNABLE_TASK` 또는
+      `IMPLEMENT`/`REVIEW`/`REWORK` 또는 `FailureCategory` 코드로 정규화된
+      값 하나) 세 블록으로 대체한다. `devbot:*` 상태 라벨이 두 개 이상
+      붙은 Issue는 `issue_to_task`가 이미 쓰던 첫 일치 규칙으로 정확히 한
+      버킷에만 집계하고, 그 충돌 자체는 `state_label_conflict`(DEBUG)로
+      드러낸다. 스케줄러 우선순위/동시성, 상태 머신, 재시도, Timeline
+      동작은 전혀 바꾸지 않는다(`src/devbot/observability.py`,
+      `src/devbot/polling.py`, `results/020-daemon-queue-summary.md`).

@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from devbot.models import ExclusionReason, IssueTask, Job, JobType, Priority, TaskState
+from devbot.observability import build_queue_summary
 from devbot.scheduler import select_jobs, select_jobs_with_exclusions
 
 
@@ -136,3 +137,36 @@ def test_select_jobs_with_exclusions_reports_concurrency_limit_when_zero_slots()
     assert result.selected == []
     assert len(result.exclusions) == 1
     assert result.exclusions[0].reason is ExclusionReason.CONCURRENCY_LIMIT
+
+
+def test_queue_summary_does_not_change_job_selection() -> None:
+    """CP-020-9: building a Task 020 queue summary alongside scheduling is
+    read-only observation - it must not change
+    `select_jobs_with_exclusions()`'s REWORK > REVIEW > IMPLEMENT priority
+    or per-repository concurrency decision."""
+    rework_task = _task(
+        repository="someone/rework-repo", number=1, state=TaskState.REVIEW, priority=Priority.LOW
+    )
+    review_task = _task(
+        repository="someone/review-repo", number=2, state=TaskState.REVIEW, priority=Priority.HIGH
+    )
+    implement_task = _task(
+        repository="someone/implement-repo", number=3, state=TaskState.READY
+    )
+    tasks = [rework_task, review_task, implement_task]
+    candidates = [
+        Job(job_type=JobType.REWORK, task=rework_task),
+        Job(job_type=JobType.REVIEW, task=review_task),
+        Job(job_type=JobType.IMPLEMENT, task=implement_task),
+    ]
+
+    before = select_jobs_with_exclusions(candidates, max_concurrent_jobs=1)
+    summary = build_queue_summary("cycle-1", tasks)
+    after = select_jobs_with_exclusions(candidates, max_concurrent_jobs=1)
+
+    assert before.selected == after.selected
+    assert [job.job_type for job in after.selected] == [JobType.REWORK]
+    # The queue summary itself is unaffected by - and does not affect -
+    # which Job the scheduler picked.
+    assert summary.review == 2
+    assert summary.ready == 1
