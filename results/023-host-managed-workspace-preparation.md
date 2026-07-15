@@ -325,8 +325,8 @@ uv run devbot --once --dry-run
   linked PR을 아예 찾지 못해 iteration_error였던 것과 달리, 이제 REVIEW
   후보 자체는 정상적으로 발견된다는 것이 확인 목적이었다.)
 
-CI (`verify`, PR #44)
-  두 번째 push(head: 아래 "커밋/CI 정보" 참고) 이후 pass
+CI (`verify`, PR #44, head 004e093)
+  pass (15s) - https://github.com/hjlee83/devbot/actions/runs/29424496931
 ```
 
 ### 수동 검증 (계약 Validation Gate "Manual verification" 항목)
