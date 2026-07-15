@@ -112,3 +112,23 @@
       드러낸다. 스케줄러 우선순위/동시성, 상태 머신, 재시도, Timeline
       동작은 전혀 바꾸지 않는다(`src/devbot/observability.py`,
       `src/devbot/polling.py`, `results/020-daemon-queue-summary.md`).
+- [x] Task 021: agent outcome classification hardening. Implementer Agent가
+      네트워크/승인 요구로 중단되고 repository 변경이 없는데도 기존
+      Task-contract-only PR이 연결되어 있다는 이유만으로 review로
+      false-success 전이하던 Issue #41 사고를 닫는다. `AgentRunResult`를
+      `implementation_completed`/`approval_required`/`network_blocked`/
+      `repository_locked`/`session_limit`/`agent_failed` 등 명시적
+      `AgentOutcome`으로 먼저 분류하고, `no_repository_changes` + 기존 연결
+      PR 재사용 review 재개는 `branch_has_implementation_evidence()`로 실제
+      구현 커밋 증거가 있을 때만 허용한다(`src/devbot/agent_outcome.py`,
+      `results/021-agent-outcome-classification.md`).
+- [x] Task 022: Planner workflow standard. Planner-owned contract-first
+      워크플로(1 Task = 1 Branch = 1 Pull Request = 1 실행용 Issue)를
+      저장소 정책으로 고정하고 기계 검증 가능하게 만든다. Planner/
+      Implementer/Reviewer/Operator 역할 경계, 명명·번호 규칙, 실행용
+      Issue/PR 템플릿, 최소 리뷰 진입 계약(`Review PR #<number>.`), 중복
+      작업공간·누락 Evidence 검증을 `docs/12-planner-workflow.md`와
+      `src/devbot/planner.py`로 도입한다. daemon 자동 폴링 루프에는
+      연결하지 않는다 - Planner 검증은 항상 명시적으로 호출되며, 기존
+      daemon/리뷰/rework/delivery/timeline/상태 머신/재시도 동작은 변경하지
+      않는다(`results/022-planner-workflow-standard.md`).

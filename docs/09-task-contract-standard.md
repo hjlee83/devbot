@@ -1,10 +1,17 @@
 # Task Contract Standard
 
-Version: 1.1.0
-Last Updated: 2026-07-14
+Version: 1.2.0
+Last Updated: 2026-07-15
 
 이 문서는 DevBot에서 Task 계약서를 작성하고 발행할 때 적용하는 운영 표준이다.
 모든 Task Publisher와 구현 AI는 Task 계약서를 만들거나 수정하기 전에 이 문서를 따른다.
+
+Planner/Implementer/Reviewer/Operator 역할 경계, 명명 및 번호 규칙, 실행용
+Issue/PR 템플릿, 최소 리뷰 진입 계약(`Review PR #<number>.`), Planner
+작업공간 검증 헬퍼(`devbot.planner`)는 `docs/12-planner-workflow.md`
+(Task 022)에 정의되어 있다. 이 문서는 계약서 발행 순서와 완성도 검증을
+계속 정의하고, `docs/12-planner-workflow.md`는 그 위에 역할 경계와
+기계 검증 가능한 워크플로 계약을 추가한다.
 
 ## 핵심 원칙
 
@@ -83,6 +90,9 @@ PR과 실행용 Issue를 생성하기 전에 다음을 확인한다.
 - 같은 Task의 수정, 리뷰 반영, 재검증은 기존 Branch와 Pull Request를 업데이트한다.
 - 별도 `-impl` Branch, 임시 자동 Branch, 중복 Pull Request를 만들지 않는다.
 - 실행용 Issue에는 Task 계약서 경로, 작업 Branch, Pull Request 번호, Result 문서 경로를 명시한다.
+- GitHub Issue 번호와 Pull Request 번호는 Task 번호와 독립적인 식별자다.
+  세 식별자를 일치시키려 하지 말고, 대신 서로를 명시적으로 cross-link한다
+  (`docs/12-planner-workflow.md` 4절).
 
 ## PR Evidence 필수 항목
 
@@ -99,6 +109,12 @@ Pull Request 본문 또는 최신 댓글에는 최소 다음 Evidence가 있어�
 Evidence가 누락되거나 실제 변경 사항과 맞지 않으면 리뷰는 통과할 수 없다.
 
 ## Review Gate 표준
+
+저장소 컨텍스트가 있으면 `Review PR #<number>.`처럼 짧은 리뷰 요청만으로도
+충분하다 - Reviewer는 이 게이트를 적용하기 위해 필요한 `AGENTS.md`, 이
+Review Gate 절, 연결된 Task 계약서, Result, PR Evidence, CI를 스스로 찾아
+읽는다(최소 리뷰 진입 계약, `docs/12-planner-workflow.md` 2절,
+`devbot.planner.resolve_review_entry`).
 
 리뷰 역할은 Task 계약, Result, PR Evidence, CI, 운영 정책을 하나의 게이트로 검증한다.
 다음 중 하나라도 불일치하면 코드와 테스트가 통과했더라도 `REQUEST CHANGES`로 판단한다.

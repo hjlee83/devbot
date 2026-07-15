@@ -1,6 +1,6 @@
 # DevBot AGENTS
 
-Version: 1.2.0
+Version: 1.3.0
 Last Updated: 2026-07-15
 
 > 이 문서는 DevBot 프로젝트의 최상위 운영 규칙이다.
@@ -275,6 +275,15 @@ PR-XXX 리뷰해.
 
 Merge하지 않고 Review Summary를 작성한다.
 
+저장소 컨텍스트(이 저장소를 Clone/Checkout한 상태)가 있으면
+
+```
+Review PR #<number>.
+```
+
+만으로도 충분하다 - 추가 설명을 요구하지 않고 16절 "최소 리뷰 진입
+계약"에 따라 필요한 문서와 Evidence를 스스로 찾아 읽는다.
+
 ---
 
 # 13. 문서 규칙
@@ -311,3 +320,42 @@ Merge하지 않고 Review Summary를 작성한다.
   `Wait implementer`/`Result`, `Total active`, `Total waiting`, `Total elapsed`.
 - 타임라인 marker(`<!-- devbot-timeline:v1 ... -->`)가 아직 기록되지 않은 구간은 GitHub
   라벨 변경/댓글/커밋/리뷰 타임스탬프로 최선 추정한 것임을 답변에 명시한다.
+
+---
+
+# 16. Planner 워크플로 (Task 022)
+
+Task 계약 발행과 실행 준비는 Planner 역할이 소유한다. 상세 규격은
+`docs/12-planner-workflow.md`에 정의되어 있고, 이를 기계로 검증하는
+헬퍼는 `src/devbot/planner.py` (`devbot.planner`)에 있다.
+
+## 역할 경계
+
+- **Planner** - Task 번호/제목, 범위, Checkpoint, Validation Gate를
+  정의하고 Branch, 계약서 파일, Pull Request, 실행용 Issue를 생성하며
+  네 식별자를 서로 명시적으로 cross-link한다.
+- **Implementer** - Planner가 만든 기존 Branch와 PR 위에서만 계속
+  구현한다. Task에 이미 Planner-owned 작업공간이 있으면 두 번째 Branch나
+  PR을 만들지 않는다(단일 Task 작업공간 정책, 1 Task = 1 Branch = 1 PR).
+- **Reviewer** - 최소 리뷰 요청(`Review PR #<number>.`)만으로 저장소
+  Review Gate, 연결된 Task 계약서, Result, PR Evidence, CI를 스스로
+  찾아 읽는다(`docs/12-planner-workflow.md` 2절 "최소 리뷰 진입 계약").
+- **Operator** - 최종 Merge와 `devbot:manual-action` 등 사람이 판단해야
+  하는 상태를 처리한다.
+
+## 명명 규칙
+
+Branch `task/<task-number>-<slug>`, 계약서
+`tasks/<task-number>-<slug>.md`, Result `results/<task-number>-<slug>.md`,
+PR 제목 `Task <task-number>: <title>`, 실행용 Issue 제목
+`Execute Task <task-number>: <title>`. GitHub Issue 번호와 PR 번호는 Task
+번호와 독립적인 식별자이며 일치시키려 하지 않는다 - 대신 서로를 명시적으로
+cross-link한다.
+
+## 적용 범위
+
+`devbot.planner`는 순수 검증/템플릿 헬퍼이며 daemon 자동 폴링
+루프(`devbot.polling`, `devbot.scheduler`, `devbot.main`)에서 호출되지
+않는다 - Planner 워크플로 검증은 항상 명시적으로 수행되고, 기존 daemon
+구현/리뷰/rework/delivery/timeline/상태 머신/재시도 동작은 이 절로 인해
+바뀌지 않는다.
