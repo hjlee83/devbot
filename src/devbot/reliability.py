@@ -21,6 +21,7 @@ from devbot.delivery import DeliveryError
 from devbot.github_client import GitHubClientError
 from devbot.models import FailureCategory, RecoveryOutcome
 from devbot.workspace import WorkspaceValidationError
+from devbot.worktree import WorkspacePreparationError
 
 # ---- Recovery policy (Task 019 CP-019-3) ----
 #
@@ -35,6 +36,11 @@ from devbot.workspace import WorkspaceValidationError
 
 RECOVERY_POLICY: dict[FailureCategory, RecoveryOutcome] = {
     FailureCategory.WORKSPACE_INVALID: RecoveryOutcome.RESTORE,
+    # Task 023 CP-023-9: a workspace-preparation failure always happens
+    # before Agent invocation (before any `claim()`, or right after one
+    # with nothing else done yet) - the same "undo the claim" recovery as
+    # a preflight `WORKSPACE_INVALID` failure, never `BLOCKED`.
+    FailureCategory.WORKSPACE_PREPARATION_FAILED: RecoveryOutcome.RESTORE,
     FailureCategory.STARTUP_VALIDATION_FAILED: RecoveryOutcome.BLOCKED,
     FailureCategory.AGENT_SESSION_LIMIT: RecoveryOutcome.BLOCKED,
     FailureCategory.AGENT_EXECUTION_FAILED: RecoveryOutcome.BLOCKED,
@@ -78,6 +84,7 @@ class RetryRule:
 #   - `devbot.main` stops before polling; see `devbot.startup`).
 RETRY_POLICY: dict[FailureCategory, RetryRule] = {
     FailureCategory.WORKSPACE_INVALID: RetryRule(retryable=False, max_attempts=0),
+    FailureCategory.WORKSPACE_PREPARATION_FAILED: RetryRule(retryable=False, max_attempts=0),
     FailureCategory.STARTUP_VALIDATION_FAILED: RetryRule(retryable=False, max_attempts=0),
     FailureCategory.AGENT_SESSION_LIMIT: RetryRule(retryable=False, max_attempts=0),
     FailureCategory.AGENT_EXECUTION_FAILED: RetryRule(retryable=False, max_attempts=0),
@@ -152,6 +159,8 @@ def classify_exception(exc: BaseException) -> FailureCategory:
     `UNKNOWN_ERROR` for anything not recognized - never raises itself."""
     if isinstance(exc, WorkspaceValidationError):
         return FailureCategory.WORKSPACE_INVALID
+    if isinstance(exc, WorkspacePreparationError):
+        return FailureCategory.WORKSPACE_PREPARATION_FAILED
     if isinstance(exc, ConfigError):
         return FailureCategory.CONFIGURATION_ERROR
     if isinstance(exc, GitHubClientError):
@@ -167,6 +176,12 @@ _RECOVERY_HINTS: dict[FailureCategory, str] = {
     FailureCategory.WORKSPACE_INVALID: (
         "워크스페이스 상태(존재 여부/Git 여부/미커밋 변경)를 확인하고 정리하세요. "
         "자동 재시도하지 않습니다."
+    ),
+    FailureCategory.WORKSPACE_PREPARATION_FAILED: (
+        "DevBot가 Agent 실행 전에 준비하는 격리 worktree(원격 동기화/branch 재사용/"
+        "worktree 생성) 단계가 실패했습니다. `devbot doctor`의 worktree_health로 "
+        "충돌/오래된 worktree를 확인하고 필요하면 `devbot worktree cleanup`으로 "
+        "정리한 뒤 재시도하세요. 자동 재시도하지 않습니다."
     ),
     FailureCategory.STARTUP_VALIDATION_FAILED: (
         "시작 검증 실패 항목을 해결한 뒤 데몬을 다시 시작하세요. 폴링은 시작되지 않았습니다."

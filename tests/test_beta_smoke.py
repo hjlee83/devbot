@@ -488,6 +488,7 @@ def test_reuse_existing_pr() -> None:
     config = _config([repo], dry_run=False)
     ready_issue = _issue(repo.full_name, 3, labels=["devbot:ready"], title="Add feature")
     github_client = FakeGitHubClient({repo.full_name: [ready_issue]})
+    branch = generate_branch_name(repo, 3, "Add feature")
     delivery = DeliveryService(
         client=write_client,
         dry_run=False,
@@ -496,6 +497,7 @@ def test_reuse_existing_pr() -> None:
         push=MagicMock(),
         has_changes=lambda repository: True,
         branch_exists=lambda repository, branch: True,
+        current_branch=lambda repository: branch,
     )
     agent_runner = MagicMock()
     agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
@@ -523,7 +525,6 @@ def test_reuse_existing_pr() -> None:
         created_at=datetime(2026, 1, 2),
         reactions={},
     )
-    branch = generate_branch_name(repo, 3, "Add feature")
     rework_service = ReworkService(
         state_writer=state_writer,
         write_client=write_client,

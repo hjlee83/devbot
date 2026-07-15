@@ -15,8 +15,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from devbot.github_client import GitHubClient, GitHubClientError
-from devbot.models import DevBotConfig
+from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.startup import StartupCheck, check_daemon_lock, run_startup_checks
+from devbot.worktree import WorktreeManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +56,37 @@ def check_agent_roles(config: DevBotConfig) -> StartupCheck:
     )
 
 
+def check_worktree_health(
+    repository: RepositoryConfig, manager: WorktreeManager
+) -> StartupCheck:
+    """Task 023 CP-023-10: operator checkout path/branch, worktree root,
+    active/stale Job worktrees, and any on-disk directory that is not a
+    registered Git worktree (`conflicting` - a future `prepare()` for that
+    path would fail). Never fatal: a stale/conflicting worktree affects only
+    the Jobs that would reuse that exact path, not the whole daemon - the
+    same "informational, not a fatal gate" policy every other startup check
+    in this module already follows (see `devbot.startup`'s module
+    docstring)."""
+    name = f"worktree_health[{repository.full_name}]"
+    report = manager.health(repository)
+    detail = (
+        f"operator_branch={report.operator_branch or 'unknown'} "
+        f"root={report.worktree_root} active={len(report.active)} "
+        f"stale={len(report.stale)} conflicting={len(report.conflicting)}"
+    )
+    if report.conflicting:
+        detail += f" conflicting_paths={', '.join(str(path) for path in report.conflicting)}"
+    return StartupCheck(name, report.safe_to_start, detail)
+
+
 def build_doctor_report(config: DevBotConfig) -> DoctorReport:
     checks = list(run_startup_checks(config).checks)
     checks.append(check_daemon_lock(config.lock_file))
     checks.append(check_github_connectivity(config))
     checks.append(check_agent_roles(config))
+    manager = WorktreeManager(workspace_root=config.workspace_root)
+    for repository in config.enabled_repositories:
+        checks.append(check_worktree_health(repository, manager))
     return DoctorReport(checks=tuple(checks))
 
 

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from devbot.delivery import (
     CheckpointEvidence,
+    DeliveryError,
     DeliveryService,
     VerificationResult,
     build_commit_message,
@@ -52,7 +53,9 @@ def _linked_pull_request(
     )
 
 
-def _passing_service(client: MagicMock, *, dry_run: bool) -> DeliveryService:
+def _passing_service(
+    client: MagicMock, *, dry_run: bool, current_branch: str = "devbot/myrepo-42-add-feature-x"
+) -> DeliveryService:
     return DeliveryService(
         client=client,
         dry_run=dry_run,
@@ -61,6 +64,7 @@ def _passing_service(client: MagicMock, *, dry_run: bool) -> DeliveryService:
         push=MagicMock(),
         has_changes=lambda repository: True,
         branch_exists=lambda repository, branch: True,
+        current_branch=lambda repository: current_branch,
     )
 
 
@@ -235,6 +239,7 @@ def test_delivery_uses_linked_pr_head_branch() -> None:
         push=push,
         has_changes=lambda repository: True,
         branch_exists=lambda repository, branch: True,
+        current_branch=lambda repository: "task/016-existing-branch",
     )
     linked_pull_request = _linked_pull_request()
     repository = _repo(Path("/tmp/workspace/myrepo"))
@@ -255,6 +260,80 @@ def test_delivery_uses_linked_pr_head_branch() -> None:
     assert result.pull_request.number == 30
 
 
+def test_delivery_rejects_branch_mismatch_before_commit() -> None:
+    """Task 023 Scope §7 (PR #44 REQUEST CHANGES, CP-023-7): if the
+    worktree is actually checked out on a different branch than the
+    resolved target (e.g. a linked PR's head branch), delivery must reject
+    before `commit`/`push` ever run - never commit real work onto the
+    wrong local branch and then push the unrelated `target_branch` ref."""
+    client = MagicMock(spec=GitHubWriteClient)
+    commit = MagicMock()
+    push = MagicMock()
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=commit,
+        push=push,
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: True,
+        current_branch=lambda repository: "some-other-branch",
+    )
+    linked_pull_request = _linked_pull_request()
+
+    result = service.deliver(
+        _repo(Path("/tmp/workspace/myrepo")),
+        _issue(number=31),
+        "devbot/myrepo-31-generated-name",
+        [],
+        linked_pull_request=linked_pull_request,
+    )
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    client.create_pull_request.assert_not_called()
+    client.create_comment.assert_not_called()
+    assert result.committed is False
+    assert result.pushed is False
+    assert result.pull_request is None
+    assert "delivery_branch_mismatch" in result.message
+    assert "task/016-existing-branch" in result.message
+    assert "some-other-branch" in result.message
+
+
+def test_delivery_rejects_when_current_branch_lookup_fails() -> None:
+    """Boundary: an error determining the current branch (e.g. a detached
+    or corrupted checkout) must reject cleanly, the same as a genuine
+    mismatch - never raise out of `deliver()`."""
+    client = MagicMock(spec=GitHubWriteClient)
+    commit = MagicMock()
+    push = MagicMock()
+
+    def _raise(repository: RepositoryConfig) -> str:
+        raise DeliveryError("git rev-parse --abbrev-ref HEAD failed")
+
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=commit,
+        push=push,
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: True,
+        current_branch=_raise,
+    )
+
+    result = service.deliver(
+        _repo(Path("/tmp/workspace/myrepo")), _issue(), "devbot/myrepo-42-add-feature-x", []
+    )
+
+    commit.assert_not_called()
+    push.assert_not_called()
+    assert result.committed is False
+    assert result.pushed is False
+    assert "delivery_branch_mismatch" in result.message
+
+
 def test_delivery_rejects_missing_local_branch_before_push() -> None:
     """CP-016-11: a push-target branch that doesn't exist locally must be
     rejected as `delivery_branch_invalid` before `push` is ever called -
@@ -270,6 +349,7 @@ def test_delivery_rejects_missing_local_branch_before_push() -> None:
         push=push,
         has_changes=lambda repository: True,
         branch_exists=lambda repository, branch: False,
+        current_branch=lambda repository: "devbot/myrepo-42-add-feature-x",
     )
 
     result = service.deliver(
@@ -300,6 +380,7 @@ def test_delivery_does_not_push_when_commit_created_no_changes() -> None:
         commit=commit,
         push=push,
         has_changes=lambda repository: False,
+        current_branch=lambda repository: "devbot/myrepo-42-add-feature-x",
     )
 
     result = service.deliver(

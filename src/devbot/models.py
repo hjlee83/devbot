@@ -45,6 +45,7 @@ class FailureCategory(StrEnum):
     `devbot.issue_state`'s job."""
 
     WORKSPACE_INVALID = "workspace_invalid"
+    WORKSPACE_PREPARATION_FAILED = "workspace_preparation_failed"
     STARTUP_VALIDATION_FAILED = "startup_validation_failed"
     AGENT_SESSION_LIMIT = "agent_session_limit"
     AGENT_EXECUTION_FAILED = "agent_execution_failed"

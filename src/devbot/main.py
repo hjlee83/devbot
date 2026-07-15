@@ -43,11 +43,13 @@ from devbot.rework import ReworkService
 from devbot.startup import run_startup_checks
 from devbot.timeline import TimelineError, TimelineService
 from devbot.workspace import build_agent_prompt
+from devbot.worktree import WorkspacePreparationError, WorktreeManager
 
 _LOGGER_NAME = "devbot"
 
 _FAILURE_STATUSES = {
     PollingStatus.WORKSPACE_INVALID,
+    PollingStatus.WORKSPACE_PREPARATION_FAILED,
     PollingStatus.AGENT_FAILED,
     PollingStatus.BLOCKED,
     PollingStatus.ITERATION_ERROR,
@@ -130,6 +132,72 @@ def _build_timeline_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_timeline_common_args(status_parser)
 
 
+def _build_worktree_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Task 023 Scope §8: an explicit operator command for Job worktree
+    lifecycle management - `devbot worktree` never runs automatically as
+    part of a polling cycle."""
+    worktree_parser = subparsers.add_parser(
+        "worktree", help="DevBot가 준비한 격리 Job worktree를 조회/정리합니다."
+    )
+    worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_command", required=True)
+
+    status_parser = worktree_subparsers.add_parser(
+        "status", help="worktree 상태(active/stale/conflicting)를 조회합니다 (읽기 전용)."
+    )
+    status_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
+    cleanup_parser = worktree_subparsers.add_parser(
+        "cleanup", help="지정한 Issue의 worktree를 명시적으로 제거합니다."
+    )
+    cleanup_parser.add_argument("--issue", type=int, required=True, help="대상 GitHub Issue 번호.")
+    cleanup_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+    cleanup_parser.add_argument(
+        "--force",
+        action="store_true",
+        default=True,
+        help="미커밋 변경이 있어도 강제로 제거합니다 (기본값).",
+    )
+
+
+def _run_worktree_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    manager = WorktreeManager(workspace_root=config.workspace_root)
+
+    if args.worktree_command == "status":
+        report = manager.health(repository)
+        print(f"operator_checkout: {report.operator_checkout_path}")
+        print(f"operator_branch: {report.operator_branch or 'unknown'}")
+        print(f"worktree_root: {report.worktree_root}")
+        print(f"active ({len(report.active)}):")
+        for path in report.active:
+            print(f"  - {path}")
+        print(f"stale ({len(report.stale)}):")
+        for path in report.stale:
+            print(f"  - {path}")
+        print(f"conflicting ({len(report.conflicting)}):")
+        for path in report.conflicting:
+            print(f"  - {path}")
+        print(f"safe_to_start: {'yes' if report.safe_to_start else 'no'}")
+        return 0
+
+    try:
+        manager.cleanup(repository, args.issue, force=args.force)
+    except WorkspacePreparationError as exc:
+        print(f"worktree cleanup 오류: [{exc.category.value}] {exc}", file=sys.stderr)
+        return 1
+    print(f"worktree 제거 완료: issue #{args.issue}")
+    return 0
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="devbot")
     parser.add_argument(
@@ -149,6 +217,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command")
     _build_timeline_parser(subparsers)
+    _build_worktree_parser(subparsers)
     subparsers.add_parser(
         "doctor",
         help=(
@@ -274,6 +343,9 @@ def main(
     if args.command == "timeline":
         return _run_timeline_command(args, config)
 
+    if args.command == "worktree":
+        return _run_worktree_command(args, config)
+
     if args.command == "doctor":
         return _run_doctor_command(config)
 
@@ -295,11 +367,17 @@ def main(
             state_writer = IssueStateWriter(
                 client=write_client, dry_run=config.dry_run, logger=logger
             )
+            # Task 023: host-managed workspace preparation - every IMPLEMENT/
+            # REWORK Job runs in its own isolated Git worktree under
+            # `config.workspace_root`, resolved and synchronized by DevBot
+            # itself before the Agent ever runs (see `devbot.worktree`).
+            worktree_manager = WorktreeManager(workspace_root=config.workspace_root)
             polling_service = PollingService(
                 config=config,
                 github_client=GitHubClient(config.github_token),
                 implementer_runner=implementer_runner,
                 reviewer_runner=reviewer_runner,
+                prepare_workspace=worktree_manager.prepare,
                 state_writer=state_writer,
                 delivery=DeliveryService(client=write_client, dry_run=config.dry_run),
                 rework_service=ReworkService(

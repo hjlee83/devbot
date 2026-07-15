@@ -231,6 +231,7 @@ class DeliveryService:
     push: PushFn = field(default=push_task_branch)
     has_changes: HasChangesFn = field(default=repository_has_changes)
     branch_exists: BranchExistsFn = field(default=local_branch_exists)
+    current_branch: CurrentBranchFn = field(default=current_git_branch)
 
     def deliver(
         self,
@@ -269,6 +270,39 @@ class DeliveryService:
             )
 
         target_branch = linked_pull_request.head_ref if linked_pull_request is not None else branch
+
+        # Task 023 Scope §7: "Delivery must reject branch mismatch before
+        # commit or push." A prepared worktree should already be checked
+        # out on `target_branch`, but this must never be assumed silently -
+        # `self.commit()` always commits to whatever is actually checked
+        # out (Git has no notion of "the branch the caller meant"), so an
+        # unverified mismatch here would commit real work onto the wrong
+        # local branch and then push `target_branch`'s *unrelated*, unmoved
+        # ref instead - silently discarding the Agent's changes or (worse)
+        # applying the previous run's stale ref while reporting success.
+        try:
+            actual_branch = self.current_branch(repository)
+        except Exception as exc:  # noqa: BLE001 - must reject cleanly, not raise
+            return DeliveryResult(
+                verification=verification,
+                committed=False,
+                pushed=False,
+                pull_request=None,
+                dry_run=False,
+                message=f"delivery_branch_mismatch: unable to determine current branch: {exc!r}",
+            )
+        if actual_branch != target_branch:
+            return DeliveryResult(
+                verification=verification,
+                committed=False,
+                pushed=False,
+                pull_request=None,
+                dry_run=False,
+                message=(
+                    f"delivery_branch_mismatch: expected {target_branch!r}, "
+                    f"actual checked-out branch {actual_branch!r}"
+                ),
+            )
 
         if not self.has_changes(repository):
             # CP-016-12: no commit was created (a clean workspace after a

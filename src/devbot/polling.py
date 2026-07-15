@@ -82,7 +82,13 @@ from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
     ensure_git_workspace_ready,
+    ensure_repository_present,
     generate_branch_name,
+)
+from devbot.worktree import (
+    PreparedWorkspace,
+    WorkspacePreparationError,
+    render_prepared_workspace_context,
 )
 
 _STATE_LABEL_PREFIX = "devbot:"
@@ -112,6 +118,7 @@ class PollingStatus(Enum):
     NO_READY_TASK = "no_ready_task"
     NO_MANAGED_REPOSITORIES = "no_managed_repositories"
     WORKSPACE_INVALID = "workspace_invalid"
+    WORKSPACE_PREPARATION_FAILED = "workspace_preparation_failed"
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
     DELIVERED = "delivered"
@@ -135,6 +142,7 @@ class PollingResult:
 # `devbot.main` treats as a nonzero exit code for `--once`.
 _JOB_FAILURE_STATUSES = {
     PollingStatus.WORKSPACE_INVALID,
+    PollingStatus.WORKSPACE_PREPARATION_FAILED,
     PollingStatus.AGENT_FAILED,
     PollingStatus.BLOCKED,
     PollingStatus.ITERATION_ERROR,
@@ -149,6 +157,8 @@ def classify_job_failure(job_type: JobType, status: PollingStatus, message: str)
     hardened by Task 014, decides that independently)."""
     if status is PollingStatus.WORKSPACE_INVALID:
         return FailureCategory.WORKSPACE_INVALID
+    if status is PollingStatus.WORKSPACE_PREPARATION_FAILED:
+        return FailureCategory.WORKSPACE_PREPARATION_FAILED
     if status is PollingStatus.AGENT_FAILED:
         return (
             FailureCategory.AGENT_SESSION_LIMIT
@@ -267,6 +277,9 @@ def find_linked_pull_request(
 EnsureWorkspaceFn = Callable[[RepositoryConfig], None]
 BuildPromptFn = Callable[[RepositoryConfig, GitHubIssue, Sequence[IssueComment]], str]
 HasImplementationEvidenceFn = Callable[[RepositoryConfig, str, str], bool]
+PrepareWorkspaceFn = Callable[
+    [RepositoryConfig, GitHubIssue, PullRequest | None], PreparedWorkspace
+]
 
 IssuesByKey = dict[tuple[str, int], GitHubIssue]
 
@@ -292,6 +305,12 @@ class PollingService:
     has_implementation_evidence: HasImplementationEvidenceFn = field(
         default=branch_has_implementation_evidence
     )
+    # Task 023: host-managed workspace preparation for IMPLEMENT/REWORK
+    # Jobs (`devbot.worktree.WorktreeManager.prepare`, wired by
+    # `devbot.main`). `None` (every existing test/caller that doesn't set
+    # this) preserves the exact pre-Task-023 behavior - the Agent and
+    # delivery run directly against the operator checkout, as always.
+    prepare_workspace: PrepareWorkspaceFn | None = None
     state_writer: IssueStateWriter | None = None
     delivery: DeliveryService | None = None
     rework_service: ReworkService | None = None
@@ -1026,7 +1045,15 @@ class PollingService:
         safety net for anything unexpected (CP-014-7)."""
         workspace_start = time.monotonic()
         try:
-            self.ensure_workspace_ready(repository)
+            if self.prepare_workspace is not None:
+                # Task 023 Scope §11: a Job that prepares its own isolated
+                # worktree only needs the operator checkout to exist and be
+                # a Git repository - not to be clean or on any particular
+                # branch (that requirement moves to the worktree itself,
+                # trivially satisfied right after it is created).
+                ensure_repository_present(repository)
+            else:
+                self.ensure_workspace_ready(repository)
         except WorkspaceValidationError as exc:
             self.logger.error(
                 "워크스페이스 검증 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -1054,7 +1081,57 @@ class PollingService:
                 start=workspace_start,
             )
 
-        prompt = self.build_prompt(repository, issue, [])
+        # Task 023 CP-023-1/CP-023-2/CP-023-3/CP-023-4: resolve the linked
+        # PR and prepare an isolated Job worktree *before* the Agent runs
+        # (only when `prepare_workspace` is configured - production always
+        # wires it via `devbot.main`; every existing caller/test that
+        # doesn't leaves this Job's behavior exactly as before Task 023).
+        work_repository = repository
+        prepared: PreparedWorkspace | None = None
+        if self.prepare_workspace is not None:
+            linked_pull_request = self._find_linked_pull_request_best_effort(
+                repository, selected, issue
+            )
+            prep_start = time.monotonic()
+            try:
+                prepared = self.prepare_workspace(repository, issue, linked_pull_request)
+            except WorkspacePreparationError as exc:
+                self.logger.error(
+                    "워크스페이스 준비 실패 (%s #%d): [%s] %s",
+                    selected.repository,
+                    selected.number,
+                    exc.category.value,
+                    exc,
+                )
+                restore_failure = self._restore(
+                    repository,
+                    issue,
+                    selected.state,
+                    f"워크스페이스 준비 실패({exc.category.value}): {exc}",
+                    selected,
+                    job_type=JobType.IMPLEMENT,
+                )
+                if restore_failure is not None:
+                    return restore_failure
+                return PollingResult(
+                    status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
+                    task=selected,
+                    message=f"{exc.category.value}: {exc}",
+                )
+            finally:
+                observability.log_stage(
+                    self.logger,
+                    cycle_id,
+                    repository=selected.repository,
+                    issue_number=selected.number,
+                    stage="workspace_preparation",
+                    start=prep_start,
+                )
+            work_repository = prepared.repository
+
+        prompt = self.build_prompt(work_repository, issue, [])
+        if prepared is not None:
+            prompt = f"{render_prepared_workspace_context(prepared)}\n\n{prompt}"
 
         self.logger.info(
             "AgentRunner 실행: implementer=%s dry_run=%s",
@@ -1064,7 +1141,7 @@ class PollingService:
 
         agent_start = time.monotonic()
         try:
-            agent_result = self.implementer_runner.run(repository, prompt)
+            agent_result = self.implementer_runner.run(work_repository, prompt)
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -1217,24 +1294,36 @@ class PollingService:
         # nothing new to commit, evidence beyond its pre-existing
         # contract-only commit (see the `no_repository_changes` branch
         # below) - is what actually gates `devbot:review`.
-        linked_pull_request = self._find_linked_pull_request_best_effort(
-            repository, selected, issue
-        )
-        if linked_pull_request is not None:
-            branch = linked_pull_request.head_ref
+        if prepared is not None:
+            # Task 023 CP-023-7: delivery uses the same prepared worktree
+            # branch the Agent just ran in - never re-resolved, so it can
+            # never mismatch what was actually implemented against.
+            branch = prepared.branch
+            linked_pull_request = prepared.pull_request
             self.logger.info(
-                "기존 linked PR 발견, 해당 branch 재사용: PR #%d branch=%s",
-                linked_pull_request.number,
+                "준비된 worktree branch로 delivery: branch=%s worktree=%s",
                 branch,
+                prepared.worktree_path,
             )
         else:
-            branch = generate_branch_name(repository, issue.number, issue.title)
+            linked_pull_request = self._find_linked_pull_request_best_effort(
+                repository, selected, issue
+            )
+            if linked_pull_request is not None:
+                branch = linked_pull_request.head_ref
+                self.logger.info(
+                    "기존 linked PR 발견, 해당 branch 재사용: PR #%d branch=%s",
+                    linked_pull_request.number,
+                    branch,
+                )
+            else:
+                branch = generate_branch_name(repository, issue.number, issue.title)
         self.logger.info("Delivery 시작: branch=%s", branch)
 
         delivery_start = time.monotonic()
         try:
             delivery_result = self.delivery.deliver(
-                repository, issue, branch, [], linked_pull_request=linked_pull_request
+                work_repository, issue, branch, [], linked_pull_request=linked_pull_request
             )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
@@ -1296,7 +1385,7 @@ class PollingService:
             # the PR's own branch carries git history evidence beyond that
             # pre-existing contract-only commit.
             has_evidence = linked_pull_request is not None and self.has_implementation_evidence(
-                repository, linked_pull_request.head_ref, repository.default_branch
+                work_repository, linked_pull_request.head_ref, work_repository.default_branch
             )
             if has_evidence:
                 assert linked_pull_request is not None  # narrows for type-checking
@@ -1423,7 +1512,10 @@ class PollingService:
 
         workspace_start = time.monotonic()
         try:
-            self.ensure_workspace_ready(repository)
+            if self.prepare_workspace is not None:
+                ensure_repository_present(repository)
+            else:
+                self.ensure_workspace_ready(repository)
         except WorkspaceValidationError as exc:
             self.logger.error(
                 "워크스페이스 검증 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -1448,10 +1540,46 @@ class PollingService:
         if error is not None:
             return error
 
+        # Task 023 CP-023-4/CP-023-7: a REWORK Job always has an existing
+        # linked branch/PR (Task 014 CP-014-3 already requires one) - reuse
+        # it in an isolated worktree instead of the operator checkout, the
+        # same as an IMPLEMENT Job. The Issue is still `devbot:rework`
+        # (not yet claimed - `ReworkService.process()` claims it only after
+        # confirming an unprocessed comment exists), so a preparation
+        # failure here needs no `_restore()`: nothing was claimed yet.
+        work_repository = repository
+        if self.prepare_workspace is not None:
+            prep_start = time.monotonic()
+            try:
+                prepared = self.prepare_workspace(repository, issue, linked_pull_request)
+            except WorkspacePreparationError as exc:
+                self.logger.error(
+                    "워크스페이스 준비 실패 (%s #%d): [%s] %s",
+                    selected.repository,
+                    selected.number,
+                    exc.category.value,
+                    exc,
+                )
+                return PollingResult(
+                    status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
+                    task=selected,
+                    message=f"{exc.category.value}: {exc}",
+                )
+            finally:
+                observability.log_stage(
+                    self.logger,
+                    cycle_id,
+                    repository=selected.repository,
+                    issue_number=selected.number,
+                    stage="workspace_preparation",
+                    start=prep_start,
+                )
+            work_repository = prepared.repository
+
         rework_start = time.monotonic()
         try:
             rework_result = self.rework_service.process(  # type: ignore[union-attr]
-                repository, issue, linked_pull_request.head_ref, pr_comments
+                work_repository, issue, linked_pull_request.head_ref, pr_comments
             )
         except ClaimConflictError as exc:  # CP-014-8: another Job already owns this Issue
             self.logger.warning(

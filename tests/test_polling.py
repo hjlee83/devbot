@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -16,6 +17,11 @@ from devbot.polling import PollingService, PollingStatus
 from devbot.review import build_review_marker
 from devbot.rework import ReworkService
 from devbot.workspace import WorkspaceValidationError
+from devbot.worktree import (
+    PreparedWorkspace,
+    WorkspacePreparationError,
+    WorkspacePreparationFailure,
+)
 
 
 class FakeGitHubClient:
@@ -127,6 +133,45 @@ def _config(repositories: list[RepositoryConfig], **overrides: object) -> DevBot
 
 def _no_op_workspace_check(_repository: RepositoryConfig) -> None:
     return None
+
+
+def _operator_repo(tmp_path: Path, *, name: str = "myrepo") -> RepositoryConfig:
+    """A `RepositoryConfig` whose `local_path` is a real, existing
+    directory with a `.git` entry - the Task 023 worktree-based preflight
+    (`ensure_repository_present`) checks the filesystem for real, unlike
+    the legacy `ensure_workspace_ready` (fully fakeable via injection)."""
+    path = tmp_path / name
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".git").mkdir(exist_ok=True)
+    return RepositoryConfig(owner="someone", repo=name, enabled=True, local_path=path)
+
+
+def _prepared_workspace(
+    repo: RepositoryConfig,
+    *,
+    branch: str,
+    issue_number: int,
+    pull_request: PullRequest | None,
+    worktree_path: Path | None = None,
+    contract_path: str | None = None,
+    result_path: str | None = None,
+) -> PreparedWorkspace:
+    """A canned `WorktreeManager.prepare()` outcome (Task 023) for tests
+    that inject a fake `prepare_workspace` instead of running real Git."""
+    path = worktree_path or Path(
+        f"/tmp/workspace/.devbot-worktrees/{repo.repo}/issue-{issue_number}"
+    )
+    return PreparedWorkspace(
+        repository=replace(repo, local_path=path),
+        branch=branch,
+        base_branch=repo.default_branch,
+        issue_number=issue_number,
+        pull_request=pull_request,
+        worktree_path=path,
+        reused=False,
+        contract_path=contract_path,
+        result_path=result_path,
+    )
 
 
 def test_iteration_skips_when_working_task_exists() -> None:
@@ -1022,6 +1067,343 @@ def test_ready_implement_reuses_linked_pr_branch() -> None:
     args, kwargs = delivery.deliver.call_args
     assert args[2] == "task/016-existing-branch"
     assert kwargs["linked_pull_request"] is linked_pr
+
+
+# ---- Task 023: host-managed workspace preparation ----
+
+
+def test_existing_planner_workspace_is_resolved_before_agent(tmp_path: Path) -> None:
+    """CP-023-1: the linked Task branch/PR is resolved (via
+    `prepare_workspace`, itself given whatever `github_client` already
+    fetched) strictly before the Agent runs - never the other way round."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 50, labels=["devbot:ready"])
+    linked_pr = _pull_request(44, issue_number=50, head_ref="task/023-host-managed")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+
+    call_order: list[str] = []
+
+    def fake_prepare(
+        repository: RepositoryConfig,
+        issue_arg: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+    ) -> PreparedWorkspace:
+        call_order.append("prepare")
+        assert linked_pull_request is linked_pr
+        return _prepared_workspace(
+            repo, branch=linked_pull_request.head_ref, issue_number=issue_arg.number,
+            pull_request=linked_pull_request,
+        )
+
+    def fake_run(repository: RepositoryConfig, prompt: str) -> AgentRunResult:
+        call_order.append("agent")
+        return AgentRunResult(executed=True, dry_run=False, message="ok")
+
+    agent_runner = MagicMock()
+    agent_runner.run.side_effect = fake_run
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=44, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=fake_prepare,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    service.run_once()
+
+    assert call_order == ["prepare", "agent"]
+
+
+def test_agent_prompt_contains_prepared_workspace_context(tmp_path: Path) -> None:
+    """CP-023-5: the Agent prompt states the prepared branch, PR, Issue,
+    contract, and Result paths, plus the explicit "don't discover/create
+    another branch or PR" policy - the exact context Task 022's daemon
+    attempt was missing."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(
+        repo.full_name,
+        51,
+        labels=["devbot:ready"],
+        body="- Contract: `tasks/023-x.md`\n- Produce `results/023-x.md`.\n",
+    )
+    linked_pr = _pull_request(44, issue_number=51, head_ref="task/023-x")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo,
+        branch="task/023-x",
+        issue_number=51,
+        pull_request=linked_pr,
+        contract_path="tasks/023-x.md",
+        result_path="results/023-x.md",
+    )
+
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=44, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    service.run_once()
+
+    prompt = agent_runner.run.call_args.args[1]
+    assert "task/023-x" in prompt
+    assert "#44" in prompt
+    assert "#51" in prompt
+    assert "tasks/023-x.md" in prompt
+    assert "results/023-x.md" in prompt
+    assert "do not create another branch" in prompt.lower()
+
+
+def test_implementation_does_not_require_agent_network_access(tmp_path: Path) -> None:
+    """CP-023-6: once the workspace is prepared, the Agent invocation
+    itself never needs to (re-)discover the branch/PR over the network -
+    `github_client.list_pull_requests` is called exactly once per Job
+    (inside `prepare_workspace`'s resolution, not again for delivery), and
+    the prompt tells the Agent so explicitly."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 52, labels=["devbot:ready"])
+    linked_pr = _pull_request(44, issue_number=52, head_ref="task/023-net")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    original_list_pull_requests = github_client.list_pull_requests
+    call_count = {"n": 0}
+
+    def counted(*args: object, **kwargs: object) -> list[PullRequest]:
+        call_count["n"] += 1
+        return original_list_pull_requests(*args, **kwargs)  # type: ignore[arg-type]
+
+    github_client.list_pull_requests = counted  # type: ignore[method-assign]
+
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch="task/023-net", issue_number=52, pull_request=linked_pr
+    )
+
+    def networkless_agent_run(repository: RepositoryConfig, prompt: str) -> AgentRunResult:
+        assert "git fetch" in prompt  # told explicitly it need not discover anything itself
+        assert str(prepared.worktree_path) in prompt
+        return AgentRunResult(executed=True, dry_run=False, message="implemented")
+
+    agent_runner = MagicMock()
+    agent_runner.run.side_effect = networkless_agent_run
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=44, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    assert call_count["n"] == 1
+
+
+def test_delivery_uses_prepared_worktree_branch(tmp_path: Path) -> None:
+    """CP-023-7: verification/commit/push/PR-reuse run against the prepared
+    worktree's `RepositoryConfig` (its `local_path`, not the operator
+    checkout's) and its resolved branch - never re-derived."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 53, labels=["devbot:ready"])
+    linked_pr = _pull_request(44, issue_number=53, head_ref="task/023-deliver")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    worktree_path = Path("/tmp/workspace/.devbot-worktrees/myrepo/issue-53")
+    prepared = _prepared_workspace(
+        repo,
+        branch="task/023-deliver",
+        issue_number=53,
+        pull_request=linked_pr,
+        worktree_path=worktree_path,
+    )
+
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=44, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    service.run_once()
+
+    delivery.deliver.assert_called_once()
+    args, kwargs = delivery.deliver.call_args
+    assert args[0].local_path == worktree_path
+    assert args[2] == "task/023-deliver"
+    assert kwargs["linked_pull_request"] is linked_pr
+    # the Agent ran in that same worktree, not the operator checkout.
+    assert agent_runner.run.call_args.args[0].local_path == worktree_path
+
+
+def test_workspace_preparation_failure_skips_agent_and_recovers_state(tmp_path: Path) -> None:
+    """CP-023-9: a workspace-preparation failure is classified explicitly,
+    never reaches the Agent or delivery, and restores the Issue to its
+    pre-claim stable state - never left stuck in `devbot:working`."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 54, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+
+    def failing_prepare(
+        repository: RepositoryConfig,
+        issue_arg: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+    ) -> PreparedWorkspace:
+        raise WorkspacePreparationError(
+            WorkspacePreparationFailure.WORKTREE_CREATION_FAILED,
+            "git worktree add failed: boom",
+        )
+
+    agent_runner = MagicMock()
+    delivery = MagicMock()
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=failing_prepare,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
+    assert "worktree_creation_failed" in result.message
+    agent_runner.run.assert_not_called()
+    delivery.deliver.assert_not_called()
+    assert write_client.set_labels.call_args_list[0].args == (repo, 54, ["devbot:working"])
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 54, ["devbot:ready"])
+
+
+def test_daemon_job_is_independent_of_operator_checkout_branch(tmp_path: Path) -> None:
+    """CP-023-11: a Job succeeds regardless of the operator checkout's
+    current branch or uncommitted files - the old `ensure_workspace_ready`
+    dirty/branch-sensitive preflight is never even called once
+    `prepare_workspace` is configured; only the isolated worktree matters."""
+    operator_path = tmp_path / "operator"
+    operator_path.mkdir()
+    (operator_path / ".git").mkdir()  # only needs to look like a checkout to the real preflight
+    repo = RepositoryConfig(owner="someone", repo="myrepo", enabled=True, local_path=operator_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 55, labels=["devbot:ready"])
+    linked_pr = _pull_request(44, issue_number=55, head_ref="task/023-independent")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch="task/023-independent", issue_number=55, pull_request=linked_pr
+    )
+
+    def poison_workspace_check(_repository: RepositoryConfig) -> None:
+        raise WorkspaceValidationError(
+            "operator checkout is dirty / on an unrelated branch - must never block a "
+            "worktree-based Job"
+        )
+
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=44, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=poison_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
 
 
 def test_implement_delivery_branch_invalid_does_not_mark_review() -> None:
