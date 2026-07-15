@@ -78,6 +78,7 @@ from devbot.reliability import build_diagnostic_report, session_limit_block_reas
 from devbot.review import ReviewService, has_review_marker_for_head
 from devbot.rework import ReworkService, find_unprocessed_devbot_comments
 from devbot.scheduler import select_jobs_with_exclusions
+from devbot.timeline import TimelineService, safe_end, safe_ready, safe_start
 from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
@@ -315,6 +316,11 @@ class PollingService:
     delivery: DeliveryService | None = None
     rework_service: ReworkService | None = None
     review_service: ReviewService | None = None
+    # Task 024: automatic `ready`/`dev:start`/`dev:end` recording for
+    # IMPLEMENT Jobs (REWORK/REVIEW record their own via `rework_service`/
+    # `review_service`). `None` (every existing caller/test that doesn't set
+    # this) is a silent no-op - see `devbot.timeline.safe_start`/`safe_end`.
+    timeline: TimelineService | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
     def __post_init__(self) -> None:
@@ -936,6 +942,25 @@ class PollingService:
                 status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
             )
 
+        # Task 024 CP-024-1/CP-024-2: `ready` (Queue start, idempotent - only
+        # the first-ever claim actually writes a marker) and `dev:start`
+        # (this cycle's Dev phase start) both happen right after claim,
+        # matching `docs/10-github-status-timeline.md` section 5's own
+        # definition of `dev:start` ("Implementer가 Issue를 claim하고
+        # 개발/수정을 시작"). Every downstream failure below - including a
+        # preflight `WORKSPACE_INVALID`/`WORKSPACE_PREPARATION_FAILED` that
+        # `_restore()`s the claim - must close this phase (CP-024-9), which
+        # is why this must happen before, not after, workspace validation.
+        safe_ready(self.timeline, repository, issue.number, logger=self.logger)
+        safe_start(
+            self.timeline,
+            repository,
+            issue.number,
+            phase="dev",
+            actor=self.config.implementer_agent,
+            logger=self.logger,
+        )
+
         try:
             return self._run_claimed_implement_job(repository, selected, issue, cycle_id)
         except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working` behind
@@ -951,6 +976,15 @@ class PollingService:
                 f"예상하지 못한 예외로 Job 중단: {exc!r}",
                 selected,
                 job_type=JobType.IMPLEMENT,
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                logger=self.logger,
             )
             if block_failure is not None:
                 return block_failure
@@ -1066,6 +1100,15 @@ class PollingService:
                 selected,
                 job_type=JobType.IMPLEMENT,
             )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="restored",
+                logger=self.logger,
+            )
             if restore_failure is not None:
                 return restore_failure
             return PollingResult(
@@ -1088,6 +1131,7 @@ class PollingService:
         # doesn't leaves this Job's behavior exactly as before Task 023).
         work_repository = repository
         prepared: PreparedWorkspace | None = None
+        linked_pull_request: PullRequest | None = None
         if self.prepare_workspace is not None:
             linked_pull_request = self._find_linked_pull_request_best_effort(
                 repository, selected, issue
@@ -1111,6 +1155,16 @@ class PollingService:
                     selected,
                     job_type=JobType.IMPLEMENT,
                 )
+                safe_end(
+                    self.timeline,
+                    repository,
+                    issue.number,
+                    phase="dev",
+                    actor=self.config.implementer_agent,
+                    result="restored",
+                    pr=linked_pull_request.number if linked_pull_request is not None else None,
+                    logger=self.logger,
+                )
                 if restore_failure is not None:
                     return restore_failure
                 return PollingResult(
@@ -1128,6 +1182,17 @@ class PollingService:
                     start=prep_start,
                 )
             work_repository = prepared.repository
+
+        # Task 024: best-effort PR number for `dev:end` markers recorded
+        # between here and delivery's own branch resolution below - `pr` is
+        # an optional Timeline field (`docs/10-github-status-timeline.md`
+        # section 4.2), so `None` here just means the Status Card fills it
+        # in from a later event (e.g. `review:start`) instead.
+        dev_pr_number = (
+            prepared.pull_request.number
+            if prepared is not None and prepared.pull_request is not None
+            else (linked_pull_request.number if linked_pull_request is not None else None)
+        )
 
         prompt = self.build_prompt(work_repository, issue, [])
         if prepared is not None:
@@ -1152,6 +1217,16 @@ class PollingService:
                 f"AgentRunner 실행 실패: {exc}",
                 selected,
                 job_type=JobType.IMPLEMENT,
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=dev_pr_number,
+                logger=self.logger,
             )
             if block_failure is not None:
                 return block_failure
@@ -1203,6 +1278,16 @@ class PollingService:
                 selected,
                 job_type=JobType.IMPLEMENT,
             )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=dev_pr_number,
+                logger=self.logger,
+            )
             if block_failure is not None:
                 return block_failure
             return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=message)
@@ -1221,6 +1306,16 @@ class PollingService:
             )
             block_failure = self._block(
                 repository, issue, block_reason, selected, job_type=JobType.IMPLEMENT
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=dev_pr_number,
+                logger=self.logger,
             )
             if block_failure is not None:
                 return block_failure
@@ -1261,6 +1356,16 @@ class PollingService:
                 return PollingResult(
                     status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
                 )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="manual-action",
+                pr=dev_pr_number,
+                logger=self.logger,
+            )
             return PollingResult(
                 status=PollingStatus.BLOCKED,
                 task=selected,
@@ -1277,6 +1382,16 @@ class PollingService:
             )
             block_failure = self._block(
                 repository, issue, reason, selected, job_type=JobType.IMPLEMENT
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=dev_pr_number,
+                logger=self.logger,
             )
             if block_failure is not None:
                 return block_failure
@@ -1336,6 +1451,16 @@ class PollingService:
                 selected,
                 job_type=JobType.IMPLEMENT,
             )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=linked_pull_request.number if linked_pull_request is not None else None,
+                logger=self.logger,
+            )
             if block_failure is not None:
                 return block_failure
             return PollingResult(
@@ -1365,6 +1490,16 @@ class PollingService:
                 selected,
                 job_type=JobType.IMPLEMENT,
             )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=linked_pull_request.number if linked_pull_request is not None else None,
+                logger=self.logger,
+            )
             if block_failure is not None:
                 return block_failure
             return PollingResult(
@@ -1373,6 +1508,16 @@ class PollingService:
 
         if delivery_result.dry_run:
             self.logger.info("Delivery 결과: %s", delivery_result.message)
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="pushed",
+                pr=linked_pull_request.number if linked_pull_request is not None else None,
+                logger=self.logger,
+            )
             return PollingResult(
                 status=PollingStatus.AGENT_COMPLETED, task=selected, message=delivery_result.message
             )
@@ -1411,6 +1556,16 @@ class PollingService:
                         status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
                     )
                 self.logger.info("Delivery 완료(변경 없음), 기존 PR 유지하며 review로 전환")
+                safe_end(
+                    self.timeline,
+                    repository,
+                    issue.number,
+                    phase="dev",
+                    actor=self.config.implementer_agent,
+                    result="pushed",
+                    pr=linked_pull_request.number,
+                    logger=self.logger,
+                )
                 return PollingResult(
                     status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
                 )
@@ -1454,6 +1609,16 @@ class PollingService:
                 return PollingResult(
                     status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
                 )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="manual-action",
+                pr=linked_pull_request.number if linked_pull_request is not None else None,
+                logger=self.logger,
+            )
             return PollingResult(
                 status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
             )
@@ -1476,6 +1641,16 @@ class PollingService:
                 selected,
                 job_type=JobType.IMPLEMENT,
             )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=linked_pull_request.number if linked_pull_request is not None else None,
+                logger=self.logger,
+            )
             if block_failure is not None:
                 return block_failure
             return PollingResult(
@@ -1495,6 +1670,16 @@ class PollingService:
             )
 
         self.logger.info("Delivery 완료, review로 전환: %s", delivery_result.message)
+        safe_end(
+            self.timeline,
+            repository,
+            issue.number,
+            phase="dev",
+            actor=self.config.implementer_agent,
+            result="pushed",
+            pr=delivery_result.pull_request.number,
+            logger=self.logger,
+        )
         return PollingResult(
             status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
         )

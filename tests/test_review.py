@@ -13,6 +13,7 @@ from devbot.review import (
     build_review_prompt,
     has_review_marker_for_head,
 )
+from devbot.timeline import TimelineService
 
 HEAD_SHA = "a1b2c3d4e5f6"
 
@@ -57,6 +58,8 @@ def _service(
     state_writer: MagicMock | None = None,
     write_client: MagicMock | None = None,
     dry_run: bool = False,
+    timeline: TimelineService | None = None,
+    actor: str | None = None,
 ) -> tuple[ReviewService, MagicMock, MagicMock, MagicMock]:
     reviewer_runner = reviewer_runner or MagicMock()
     state_writer = state_writer or MagicMock(spec=IssueStateWriter)
@@ -67,6 +70,8 @@ def _service(
         write_client=write_client,
         reviewer_runner=reviewer_runner,
         dry_run=dry_run,
+        timeline=timeline,
+        actor=actor,
     )
     return service, reviewer_runner, state_writer, write_client
 
@@ -391,3 +396,84 @@ def test_state_transition_failure_after_posting_comment_is_not_silently_lost() -
     assert result.issue_state is TaskState.BLOCKED
     state_writer.block.assert_called_once()
     write_client.create_comment.assert_called_once()
+
+
+# --- Task 024: automatic Timeline recording -------------------------------
+
+
+def test_review_job_records_review_start() -> None:
+    """CP-024-5: a REVIEW Job records `review:start` before the Reviewer
+    Agent runs, using the configured reviewer actor and the PR number."""
+    call_order: list[str] = []
+    timeline = MagicMock(spec=TimelineService)
+    timeline.start.side_effect = lambda *a, **k: call_order.append("start")
+
+    reviewer_runner = MagicMock()
+
+    def _run(repository, prompt):
+        call_order.append("run")
+        return AgentRunResult(
+            executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+        )
+
+    reviewer_runner.run.side_effect = _run
+    service, _, _, _ = _service(reviewer_runner=reviewer_runner, timeline=timeline, actor="codex")
+
+    _process(service)
+
+    timeline.start.assert_called_once_with(
+        _repo(), 17, phase="review", actor="codex", pr=16
+    )
+    assert call_order == ["start", "run"], "review:start는 Reviewer 실행 전에 기록되어야 한다"
+
+
+def test_review_job_records_review_end_result() -> None:
+    """CP-024-6: `review:end` carries `merge-ready`/`request-changes`
+    matching the parsed review result."""
+    timeline = MagicMock(spec=TimelineService)
+
+    merge_ready_runner = MagicMock()
+    merge_ready_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+    )
+    service, _, _, _ = _service(reviewer_runner=merge_ready_runner, timeline=timeline, actor="codex")
+    _process(service)
+    timeline.end.assert_called_once_with(
+        _repo(), 17, phase="review", actor="codex", result="merge-ready", pr=16
+    )
+
+    timeline.reset_mock()
+    request_changes_runner = MagicMock()
+    request_changes_runner.run.return_value = AgentRunResult(
+        executed=True,
+        dry_run=False,
+        message="# Review Summary\n\n## 상태\n\n- REQUEST CHANGES\n\ncode 수정이 필요합니다.",
+    )
+    service, _, _, _ = _service(
+        reviewer_runner=request_changes_runner, timeline=timeline, actor="codex"
+    )
+    _process(service)
+    timeline.end.assert_called_once_with(
+        _repo(), 17, phase="review", actor="codex", result="request-changes", pr=16
+    )
+
+
+def test_review_timeline_write_failure_preserves_primary_job_outcome() -> None:
+    """CP-024-10 (review side): a Timeline write failure never blocks or
+    otherwise changes the review's own GitHub outcome."""
+    timeline = MagicMock(spec=TimelineService)
+    timeline.start.side_effect = RuntimeError("timeline boom")
+    timeline.end.side_effect = RuntimeError("timeline boom")
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+    )
+    service, _, state_writer, _ = _service(
+        reviewer_runner=reviewer_runner, timeline=timeline, actor="codex"
+    )
+
+    result = _process(service)
+
+    assert result.status == "MERGE READY"
+    assert result.issue_state is TaskState.REVIEW
+    state_writer.mark_for_review.assert_called_once()

@@ -13,6 +13,7 @@ one Timeline comment, write back its full body" - callers (`devbot.main`'s
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -444,6 +445,28 @@ class TimelineService:
                 return label
         return None
 
+    def ready(
+        self,
+        repository: RepositoryConfig,
+        issue_number: int,
+        *,
+        actor: str | None = None,
+        pr: int | None = None,
+    ) -> TimelineOutcome:
+        """Record the initial `ready` event (Task 024 CP-024-1) - Queue
+        start. Idempotent: a second call for an Issue that already has a
+        `ready` marker is a no-op regardless of cycle (`ready` only ever
+        happens once, unlike `dev`/`review` which repeat per cycle)."""
+        return self._record(
+            repository,
+            issue_number,
+            phase="queue",
+            event_type="ready",
+            actor=actor,
+            pr=pr,
+            result="-",
+        )
+
     def start(
         self,
         repository: RepositoryConfig,
@@ -497,7 +520,7 @@ class TimelineService:
         *,
         phase: Phase,
         event_type: EventType,
-        actor: str,
+        actor: str | None,
         pr: int | None,
         result: str,
     ) -> TimelineOutcome:
@@ -509,6 +532,22 @@ class TimelineService:
         latest = _latest_for(events, phase, cycle)
         now = self.clock()
         state_label = self._state_label(issue)
+
+        if event_type == "ready" and any(
+            e.phase == "queue" and e.event == "ready" for e in events
+        ):
+            # CP-024-1: `ready` happens at most once per Issue (unlike
+            # `dev`/`review`, which repeat every cycle) - any replay is a
+            # no-op regardless of which cycle is currently active.
+            card = render_status_card(
+                events,
+                issue_number=issue_number,
+                pr_number=_latest_pr(events, pr),
+                state_label=state_label,
+                now=now,
+                tz=self.tz,
+            )
+            return TimelineOutcome(status_card=card, idempotent=True)
 
         if event_type == "start" and latest is not None and latest.event == "start":
             if latest.actor == actor and latest.pr == pr:
@@ -602,6 +641,82 @@ class TimelineService:
         return TimelineOutcome(status_card=card)
 
 
+# ---- Best-effort daemon recording (Task 024) --------------------------
+#
+# The daemon (`devbot.polling`, `devbot.review`, `devbot.rework`) records
+# Timeline events as a side effect of its normal lifecycle, never as a
+# precondition for it. CP-024-10 requires that a Timeline write failure
+# (GitHub API error, an unexpected overlapping-start/missing-start
+# conflict, ...) is diagnosed but never replaces or hides the primary Job
+# outcome and never raises into the caller. These three wrappers are the
+# single place that guarantee that for every automatic call site - callers
+# pass `timeline=None` (the default on every affected dataclass) to opt out
+# entirely, exactly reproducing pre-Task-024 behavior.
+
+
+def safe_ready(
+    timeline: TimelineService | None,
+    repository: RepositoryConfig,
+    issue_number: int,
+    *,
+    logger: logging.Logger | None = None,
+) -> None:
+    if timeline is None:
+        return
+    try:
+        timeline.ready(repository, issue_number)
+    except Exception as exc:  # noqa: BLE001 - CP-024-10: never corrupt the primary Job outcome
+        if logger is not None:
+            logger.warning("Timeline 자동 기록 실패 (ready, issue=#%d): %s", issue_number, exc)
+
+
+def safe_start(
+    timeline: TimelineService | None,
+    repository: RepositoryConfig,
+    issue_number: int,
+    *,
+    phase: Phase,
+    actor: str,
+    pr: int | None = None,
+    logger: logging.Logger | None = None,
+) -> None:
+    if timeline is None:
+        return
+    try:
+        timeline.start(repository, issue_number, phase=phase, actor=actor, pr=pr)
+    except Exception as exc:  # noqa: BLE001 - CP-024-10: never corrupt the primary Job outcome
+        if logger is not None:
+            logger.warning(
+                "Timeline 자동 기록 실패 (%s:start, issue=#%d): %s", phase, issue_number, exc
+            )
+
+
+def safe_end(
+    timeline: TimelineService | None,
+    repository: RepositoryConfig,
+    issue_number: int,
+    *,
+    phase: Phase,
+    actor: str,
+    result: str,
+    pr: int | None = None,
+    logger: logging.Logger | None = None,
+) -> None:
+    if timeline is None:
+        return
+    try:
+        timeline.end(repository, issue_number, phase=phase, actor=actor, result=result, pr=pr)
+    except Exception as exc:  # noqa: BLE001 - CP-024-10: never corrupt the primary Job outcome
+        if logger is not None:
+            logger.warning(
+                "Timeline 자동 기록 실패 (%s:end result=%s, issue=#%d): %s",
+                phase,
+                result,
+                issue_number,
+                exc,
+            )
+
+
 __all__ = [
     "COMMENT_MARKER",
     "EVENT_MARKER_NAME",
@@ -615,4 +730,7 @@ __all__ = [
     "parse_events",
     "render_comment_body",
     "render_status_card",
+    "safe_end",
+    "safe_ready",
+    "safe_start",
 ]

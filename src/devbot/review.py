@@ -27,6 +27,7 @@ never triggers rework.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
 from devbot.reliability import session_limit_block_reason
 from devbot.rework import ReworkActionScope, classify_rework_action_scope
+from devbot.timeline import TimelineService, safe_end, safe_start
 
 _MENTION = "@devbot"
 _MERGE_READY = "MERGE READY"
@@ -155,6 +157,12 @@ class ReviewService:
     reviewer_runner: AgentRunner
     dry_run: bool = False
     build_prompt: BuildReviewPromptFn = field(default=build_review_prompt)
+    # Task 024: automatic `review:start`/`review:end` recording. `None`
+    # (every existing caller/test that doesn't set this) is a silent no-op -
+    # see `devbot.timeline.safe_start`/`safe_end`.
+    timeline: TimelineService | None = None
+    actor: str | None = None
+    logger: logging.Logger = field(default_factory=lambda: logging.getLogger("devbot"))
 
     def process(
         self,
@@ -171,6 +179,28 @@ class ReviewService:
             )
 
         working_issue = self.state_writer.claim(repository, issue, job_type=JobType.REVIEW)
+        actor = self.actor or "unknown"
+        safe_start(
+            self.timeline,
+            repository,
+            issue.number,
+            phase="review",
+            actor=actor,
+            pr=pull_request.number,
+            logger=self.logger,
+        )
+
+        def _end(result: str) -> None:
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="review",
+                actor=actor,
+                result=result,
+                pr=pull_request.number,
+                logger=self.logger,
+            )
 
         prompt = self.build_prompt(repository, issue, pull_request)
 
@@ -179,6 +209,7 @@ class ReviewService:
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - record, then block
             reason = f"리뷰 Agent 실행 중 오류로 중단: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
+            _end("blocked")
             return ReviewResult(
                 triggered=True,
                 status=None,
@@ -197,6 +228,7 @@ class ReviewService:
             else:
                 message = "blocked: reviewer execution failed"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
+            _end("blocked")
             return ReviewResult(
                 triggered=True,
                 status=None,
@@ -212,6 +244,7 @@ class ReviewService:
                 f"`{_REQUEST_CHANGES}` 중 정확히 하나 필요):\n\n{review_text}"
             )
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
+            _end("blocked")
             return ReviewResult(
                 triggered=True,
                 status=None,
@@ -236,6 +269,7 @@ class ReviewService:
         except Exception as exc:  # noqa: BLE001 - record, then block
             reason = f"리뷰 결과 게시 실패: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
+            _end("blocked")
             return ReviewResult(
                 triggered=True,
                 status=status,
@@ -258,6 +292,7 @@ class ReviewService:
                         reason="REQUEST CHANGES 게시 완료",
                     )
                     issue_state = TaskState.REWORK
+                    timeline_result = "request-changes"
                 else:
                     self.state_writer.require_manual_action(
                         repository,
@@ -269,6 +304,7 @@ class ReviewService:
                         job_type=JobType.REVIEW,
                     )
                     issue_state = TaskState.MANUAL_ACTION
+                    timeline_result = "manual-action"
             else:
                 self.state_writer.mark_for_review(
                     repository,
@@ -277,9 +313,11 @@ class ReviewService:
                     reason="MERGE READY 게시 완료",
                 )
                 issue_state = TaskState.REVIEW
+                timeline_result = "merge-ready"
         except Exception as exc:  # noqa: BLE001 - visible comment already posted; block the claim
             reason = f"리뷰 결과 게시 후 상태 전이 실패: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
+            _end("blocked")
             return ReviewResult(
                 triggered=True,
                 status=status,
@@ -287,6 +325,7 @@ class ReviewService:
                 message="blocked: review state transition failed",
             )
 
+        _end(timeline_result)
         return ReviewResult(
             triggered=True,
             status=status,

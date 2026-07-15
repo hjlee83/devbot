@@ -360,6 +360,7 @@ def main(
             # write client exists (CP-019-8).
             log_startup_validation(logger, run_startup_checks(config))
             write_client = GitHubWriteClient(config.github_token)
+            github_client = GitHubClient(config.github_token)
             implementer_runner = build_agent_runner(
                 config.implementer_agent, dry_run=config.dry_run
             )
@@ -372,9 +373,18 @@ def main(
             # `config.workspace_root`, resolved and synchronized by DevBot
             # itself before the Agent ever runs (see `devbot.worktree`).
             worktree_manager = WorktreeManager(workspace_root=config.workspace_root)
+            # Task 024: automatic Timeline recording. `dry_run=config.dry_run`
+            # (not the manual `timeline` CLI's own `False` default - see
+            # `_run_timeline_command` above) so automatic writes obey the
+            # same global safety switch as every other daemon write path.
+            timeline_service = TimelineService(
+                read_client=github_client,
+                write_client=write_client,
+                dry_run=config.dry_run,
+            )
             polling_service = PollingService(
                 config=config,
-                github_client=GitHubClient(config.github_token),
+                github_client=github_client,
                 implementer_runner=implementer_runner,
                 reviewer_runner=reviewer_runner,
                 prepare_workspace=worktree_manager.prepare,
@@ -387,13 +397,20 @@ def main(
                         implementer_runner, repository, issue, comment
                     ),
                     dry_run=config.dry_run,
+                    timeline=timeline_service,
+                    actor=config.implementer_agent,
+                    logger=logger,
                 ),
                 review_service=ReviewService(
                     state_writer=state_writer,
                     write_client=write_client,
                     reviewer_runner=reviewer_runner,
                     dry_run=config.dry_run,
+                    timeline=timeline_service,
+                    actor=config.reviewer_agent,
+                    logger=logger,
                 ),
+                timeline=timeline_service,
                 logger=logger,
             )
 

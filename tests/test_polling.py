@@ -1,6 +1,6 @@
 import logging
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +16,7 @@ from devbot.models import DevBotConfig, RepositoryConfig, TaskState
 from devbot.polling import PollingService, PollingStatus
 from devbot.review import build_review_marker
 from devbot.rework import ReworkService
+from devbot.timeline import TimelineService, parse_events
 from devbot.workspace import WorkspaceValidationError
 from devbot.worktree import (
     PreparedWorkspace,
@@ -172,6 +173,48 @@ def _prepared_workspace(
         contract_path=contract_path,
         result_path=result_path,
     )
+
+
+class _TimelineBackend:
+    """Minimal in-memory Issue-comment store for wiring a real
+    `TimelineService` without HTTP mocking (Task 024) - duck-typed to only
+    the `read_client`/`write_client` methods `TimelineService` calls."""
+
+    def __init__(self, *, issue: GitHubIssue, seed_body: str | None = None) -> None:
+        self._issue = issue
+        self._comment_id: int | None = 1 if seed_body is not None else None
+        self._body = seed_body or ""
+        self.create_calls = 0
+        self.update_calls = 0
+
+    def get_issue(self, repository: RepositoryConfig, issue_number: int) -> GitHubIssue:
+        return self._issue
+
+    def list_issue_comments(self, repository: RepositoryConfig, issue_number: int):
+        if self._comment_id is None:
+            return []
+        return [
+            PullRequestComment(
+                id=self._comment_id,
+                author="devbot",
+                body=self._body,
+                created_at=self._issue.created_at,
+                reactions={},
+            )
+        ]
+
+    def create_comment(self, repository: RepositoryConfig, issue_number: int, body: str) -> None:
+        self._comment_id = 1
+        self._body = body
+        self.create_calls += 1
+
+    def update_comment(self, repository: RepositoryConfig, comment_id: int, body: str) -> None:
+        self._body = body
+        self.update_calls += 1
+
+    @property
+    def body(self) -> str:
+        return self._body
 
 
 def test_iteration_skips_when_working_task_exists() -> None:
@@ -2466,3 +2509,377 @@ def test_queue_summary_does_not_double_count_issue_state(
     assert conflicts[0].issue_number == 9
     assert conflicts[0].resolved_state == "review"
     assert set(conflicts[0].matched_states) == {"review", "blocked"}
+
+
+# --- Task 024: automatic Timeline recording -------------------------------
+
+
+def test_daemon_records_ready_event_once(tmp_path: Path) -> None:
+    """CP-024-1: the first daemon claim of a `devbot:ready` Issue records
+    exactly one `ready` event - a retried claim (e.g. after a workspace
+    preparation failure restores the Issue back to `devbot:ready`) must not
+    append a second one."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 60, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    backend = _TimelineBackend(issue=issue)
+    timeline = TimelineService(
+        read_client=backend,
+        write_client=backend,
+        dry_run=False,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    def failing_prepare(
+        repository: RepositoryConfig,
+        issue_arg: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+    ) -> PreparedWorkspace:
+        raise WorkspacePreparationError(
+            WorkspacePreparationFailure.WORKTREE_CREATION_FAILED, "boom"
+        )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=failing_prepare,
+        state_writer=state_writer,
+        delivery=MagicMock(),
+        timeline=timeline,
+    )
+
+    service.run_once()
+    service.run_once()
+
+    events = parse_events(backend.body)
+    ready_events = [e for e in events if e.phase == "queue" and e.event == "ready"]
+    assert len(ready_events) == 1
+    assert backend.create_calls == 1
+
+
+def test_implement_job_records_dev_start(tmp_path: Path) -> None:
+    """CP-024-2: an IMPLEMENT Job records `dev:start` before the
+    Implementer Agent runs."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 61, labels=["devbot:ready"])
+    linked_pr = _pull_request(45, issue_number=61, head_ref="task/024-dev-start")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch="task/024-dev-start", issue_number=61, pull_request=linked_pr
+    )
+    backend = _TimelineBackend(issue=issue)
+    timeline = TimelineService(
+        read_client=backend,
+        write_client=backend,
+        dry_run=False,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    call_order: list[str] = []
+    real_create_comment = backend.create_comment
+    real_update_comment = backend.update_comment
+
+    def _tracked_create(*args: object, **kwargs: object) -> None:
+        call_order.append("timeline_write")
+        real_create_comment(*args, **kwargs)  # type: ignore[arg-type]
+
+    def _tracked_update(*args: object, **kwargs: object) -> None:
+        call_order.append("timeline_write")
+        real_update_comment(*args, **kwargs)  # type: ignore[arg-type]
+
+    backend.create_comment = _tracked_create  # type: ignore[method-assign]
+    backend.update_comment = _tracked_update  # type: ignore[method-assign]
+
+    agent_runner = MagicMock()
+
+    def _run(repository: RepositoryConfig, prompt: str) -> AgentRunResult:
+        call_order.append("agent_run")
+        return AgentRunResult(executed=True, dry_run=False, message="ok")
+
+    agent_runner.run.side_effect = _run
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=45, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+        timeline=timeline,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    events = parse_events(backend.body)
+    dev_start_events = [e for e in events if e.phase == "dev" and e.event == "start"]
+    assert len(dev_start_events) == 1
+    assert dev_start_events[0].actor == config.implementer_agent
+    assert call_order.index("timeline_write") < call_order.index(
+        "agent_run"
+    ), "dev:start는 Implementer 실행 전에 기록되어야 한다"
+
+
+def test_implement_job_records_dev_end(tmp_path: Path) -> None:
+    """CP-024-3: a completed IMPLEMENT Job records `dev:end` with actor,
+    cycle, timestamp, and a normalized result."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 62, labels=["devbot:ready"])
+    linked_pr = _pull_request(46, issue_number=62, head_ref="task/024-dev-end")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch="task/024-dev-end", issue_number=62, pull_request=linked_pr
+    )
+    backend = _TimelineBackend(issue=issue)
+    fixed_now = datetime(2026, 1, 1, tzinfo=UTC)
+    timeline = TimelineService(
+        read_client=backend, write_client=backend, dry_run=False, clock=lambda: fixed_now
+    )
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=46, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+        timeline=timeline,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    events = parse_events(backend.body)
+    dev_end_events = [e for e in events if e.phase == "dev" and e.event == "end"]
+    assert len(dev_end_events) == 1
+    dev_end = dev_end_events[0]
+    assert dev_end.actor == config.implementer_agent
+    assert dev_end.cycle == 1
+    assert dev_end.result == "pushed"
+    assert dev_end.pr == 46
+    assert dev_end.at == fixed_now
+
+
+def test_timeline_uses_configured_agent_actor(tmp_path: Path) -> None:
+    """CP-024-7: Timeline events use the configured Implementer Agent name
+    as the actor, not a hardcoded product assumption."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo], implementer_agent="claude-custom")
+    issue = _issue(repo.full_name, 63, labels=["devbot:ready"])
+    linked_pr = _pull_request(47, issue_number=63, head_ref="task/024-actor")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch="task/024-actor", issue_number=63, pull_request=linked_pr
+    )
+    backend = _TimelineBackend(issue=issue)
+    timeline = TimelineService(
+        read_client=backend,
+        write_client=backend,
+        dry_run=False,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=47, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+        timeline=timeline,
+    )
+
+    service.run_once()
+
+    events = parse_events(backend.body)
+    actors = {e.actor for e in events if e.actor is not None}
+    assert actors == {"claude-custom"}
+
+
+def test_failed_job_closes_open_timeline_phase(tmp_path: Path) -> None:
+    """CP-024-9: an Agent execution failure closes the open `dev` phase
+    with a normalized `blocked` result instead of leaving it open."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 64, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    backend = _TimelineBackend(issue=issue)
+    timeline = TimelineService(
+        read_client=backend,
+        write_client=backend,
+        dry_run=False,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    agent_runner = MagicMock()
+    agent_runner.run.side_effect = RuntimeError("agent crashed")
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=MagicMock(),
+        timeline=timeline,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_FAILED
+    events = parse_events(backend.body)
+    dev_start_events = [e for e in events if e.phase == "dev" and e.event == "start"]
+    dev_end_events = [e for e in events if e.phase == "dev" and e.event == "end"]
+    assert len(dev_start_events) == 1
+    assert len(dev_end_events) == 1
+    assert dev_end_events[0].result == "blocked"
+
+
+def test_timeline_write_failure_preserves_primary_job_outcome(tmp_path: Path) -> None:
+    """CP-024-10: a GitHub Timeline write failure is diagnosed but never
+    replaces or hides the primary Job outcome, and never leaves the Issue
+    stuck in `devbot:working`."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 65, labels=["devbot:ready"])
+    linked_pr = _pull_request(48, issue_number=65, head_ref="task/024-timeline-fail")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch="task/024-timeline-fail", issue_number=65, pull_request=linked_pr
+    )
+    timeline = MagicMock(spec=TimelineService)
+    timeline.ready.side_effect = RuntimeError("timeline boom")
+    timeline.start.side_effect = RuntimeError("timeline boom")
+    timeline.end.side_effect = RuntimeError("timeline boom")
+
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=48, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+        timeline=timeline,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    labels_written = [call.args[2] for call in write_client.set_labels.call_args_list]
+    assert labels_written[-1] == ["devbot:review"]
+
+
+def test_existing_workflows_compatible_with_timeline_auto_recording(tmp_path: Path) -> None:
+    """CP-024-12: omitting `timeline` (the default) reproduces pre-Task-024
+    behavior exactly - queue selection, delivery, and the state machine are
+    unaffected by automatic Timeline recording being wired in."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    issue = _issue(repo.full_name, 66, labels=["devbot:ready"])
+    linked_pr = _pull_request(49, issue_number=66, head_ref="task/024-compat")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared = _prepared_workspace(
+        repo, branch="task/024-compat", issue_number=66, pull_request=linked_pr
+    )
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=49, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=state_writer,
+        delivery=delivery,
+        # `timeline` intentionally omitted - must default to `None`.
+    )
+
+    result = service.run_once()
+
+    assert service.timeline is None
+    assert result.status is PollingStatus.DELIVERED
