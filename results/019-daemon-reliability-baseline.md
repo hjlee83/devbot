@@ -170,10 +170,13 @@ uv run devbot --once --dry-run
   (실제 hjlee83/devbot 배포 설정·실제 GitHub 인증/조회로 실행, 종료 코드 0)
   DevBot 시작: version=0.1.0 implementer=claude reviewer=codex dry_run=True ...
   시작 검증: name=... (5개 항목 모두 로그로 확인, 위 doctor 결과와 일치)
-  cycle 시작 → ready 상태 Issue 수: 0 → 선택 가능한 ready Issue가 없습니다
-  → cycle 종료: 결과=no_ready_task
-  (실시간 GitHub 인증/조회가 실제로 동작함을 확인 - "ready 상태 Issue 수: 0"은
-  로컬 상태가 아니라 실제 hjlee83/devbot API 응답이다)
+  cycle 시작 → ready 상태 Issue 수: 0 → Job 선택: repo=hjlee83/devbot
+  issue=#37 job_type=rework → 상태 전이(dry-run이라 실제 GitHub 쓰기 없음)
+  → cycle 종료: 결과=reworked
+  (실시간 GitHub 인증/조회가 실제로 동작함을 확인 - Issue #37이 실제로
+  PR #36에 연결되어 review/rework 후보로 처리됨을 확인했다. 아래
+  "2차 리뷰 피드백 반영" 절 참고 - 이 결과는 PR #36 본문에 `Closes #37`을
+  추가해 linked PR 조회 버그를 고친 이후의 결과다.)
 ```
 
 ### `uv run devbot --once`(실제 non-dry-run) 관련 제약과 대안 검증
@@ -274,6 +277,40 @@ Documentation 9개 항목 모두 FAIL로 지적됨, 근본 원인은 동일한 C
   로컬에서만 확인한 `303 passed`를 CI 결과 확인 없이 기록했다 - 이번에
   로컬/CI 양쪽 결과를 구분해 기록하도록 이 문서와 PR #36 본문을 갱신했다.
 
+## 2차 리뷰 피드백 반영 (PR #36, `hjlee83` REQUEST CHANGES, head `f4a7236` 재리뷰)
+
+CI 실패는 해결됐다고 확인된 재리뷰에서, 실제 GitHub 운영 상태 관점의 새
+Blocker가 나왔다.
+
+- **Blocker — 실행용 Issue #37이 PR #36에 연결되지 않음**: PR #36 본문에
+  `Closes #37`(또는 `Fixes`/`Resolves` 등 closing keyword)이 없어서,
+  `src/devbot/polling.py`의 `find_linked_pull_request()`(PR body의 closing
+  keyword로 연결 PR을 찾는 로직, `devbot.delivery.build_pr_body()`가
+  daemon 자체 생성 PR에는 항상 넣어주는 것과 동일한 규칙)가 PR #36을 찾지
+  못했다. 그 결과 Issue #37이 `devbot:review` 상태일 때
+  `uv run devbot --once --dry-run`을 실제로 실행하면
+  `review Issue에 연결된 PR을 찾지 못했습니다 (hjlee83/devbot #37)` ->
+  `iteration_error`로 종료 코드 1이 났다 - 이 PR/Issue가 Task 계약서 PR
+  단계에서 먼저 만들어지고 실행용 Issue #37이 나중에 별도로 생성된
+  탓에(`docs/09-task-contract-standard.md`의 발행 순서상 정상적인
+  절차이지만), daemon이 생성하는 PR과 달리 closing keyword가 한 번도
+  추가되지 않았다.
+  - **수정**: PR #36 본문 맨 앞에 `Closes #37`을 추가했다(코드 변경 없음 -
+    순수 GitHub PR metadata 수정, Task 018의 Issue #34 metadata 수정과
+    같은 성격).
+  - **검증**: 수정 직후 `uv run devbot --once --dry-run`을 실제
+    `hjlee83/devbot` 배포 설정으로 재실행해 더 이상 `iteration_error`가
+    아니라 Issue #37을 rework 후보로 정상 발견하고(`cycle 종료:
+    결과=reworked`) 종료 코드 0으로 끝남을 직접 확인했다(위 "검증 결과"
+    절 갱신 - dry-run이므로 실제 GitHub 쓰기는 없었다).
+  - **CP-019 영향 없음**: 코드/테스트는 전혀 바뀌지 않았다 - 순수 PR
+    metadata(GitHub 쪽 상태) 문제였고, `src/devbot/polling.py`의
+    `find_linked_pull_request()` 자체는 Task 014부터 있던 기존 로직 그대로
+    올바르게 동작했다(요구하는 convention을 이번 PR이 지키지 않았을
+    뿐이다).
+- **검증**: `uv run devbot --once --dry-run` 종료 코드 0(위 "검증 결과"
+  절), CI(`verify`) 계속 PASS(코드 변경이 없었으므로 재실행 불필요).
+
 ## Improvement Suggestions
 
 - `decide_retry()`가 만드는 재시도 결정을 실제로 cycle 간에 소비하는
@@ -292,3 +329,10 @@ Documentation 9개 항목 모두 FAIL로 지적됨, 근본 원인은 동일한 C
   본문에도 구조화된 형태로 포함시키면(현재는 session-limit만 특별
   처리), 운영자가 GitHub Issue만 보고도(로그에 접근하지 않고) 실패
   분류/재시도/복구 권장을 바로 확인할 수 있다.
+- `docs/09-task-contract-standard.md`의 "실행용 Issue 규칙"에, 실행용
+  Issue 생성 후 Task 계약서 PR 본문에 `Closes #<실행용-Issue-번호>`가
+  실제로 있는지 확인하는 절차를 명시적으로 추가하면 이번 2차 리뷰 피드백
+  같은 linked-PR 누락을 발행 단계에서 미리 막을 수 있다 - 현재는 daemon이
+  스스로 여는 PR(`devbot.delivery.build_pr_body()`)만 이 규칙을 구조적으로
+  보장하고, 사람/Task-Publisher가 먼저 여는 계약서 PR은 별도로 챙겨야
+  한다.
