@@ -52,6 +52,13 @@ Implementer는 다음을 수행한다
 - Validation Gate를 모두 통과시킨다.
 - Result 문서를 작성한다.
 
+daemon이 자동으로 IMPLEMENT/REWORK Job을 실행할 때는, 기존 Branch/PR을
+스스로 `git fetch`/`gh`로 찾는 대신 DevBot host가 미리 준비한 격리
+worktree 위에서 계속 구현한다(Task 023, `docs/13-host-managed-workspace-preparation.md`) -
+"기존 Branch와 PR 위에서만 계속 구현한다"는 원칙 자체는 바뀌지 않고,
+그 Branch/PR을 누가(사람 Agent가 스스로, 혹은 host가 미리) 찾아 두는지만
+바뀐다.
+
 ### 1.3 Reviewer
 
 Reviewer는 다음을 수행한다 (`devbot.planner.REVIEWER_RESPONSIBILITIES`).

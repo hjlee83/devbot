@@ -1,6 +1,6 @@
 # DevBot AGENTS
 
-Version: 1.3.0
+Version: 1.4.0
 Last Updated: 2026-07-15
 
 > 이 문서는 DevBot 프로젝트의 최상위 운영 규칙이다.
@@ -359,3 +359,21 @@ cross-link한다.
 않는다 - Planner 워크플로 검증은 항상 명시적으로 수행되고, 기존 daemon
 구현/리뷰/rework/delivery/timeline/상태 머신/재시도 동작은 이 절로 인해
 바뀌지 않는다.
+
+---
+
+# 17. Host-Managed Workspace Preparation (Task 023)
+
+IMPLEMENT/REWORK Job은 Implementer Agent를 실행하기 전에 DevBot host가
+직접 linked Task Branch/PR을 해석하고, 원격을 동기화하며, 격리된 Git
+worktree(`<workspace-root>/.devbot-worktrees/<repo>/issue-<N>`)를
+준비한다(`src/devbot/worktree.py`, `docs/13-host-managed-workspace-preparation.md`).
+Agent는 이 준비된 worktree 안에서만 동작하며 `git fetch`/`gh`/`curl` 같은
+원격 discovery를 스스로 수행할 필요가 없다 - operator checkout의 현재
+branch나 미커밋 변경과도 무관하게 동작한다.
+
+`devbot worktree status`/`devbot worktree cleanup --issue <N>`이 이
+worktree의 조회/명시적 정리를 제공하고, `devbot doctor`는 저장소마다
+`worktree_health[...]` 항목으로 active/stale/conflicting worktree를
+보고한다. REVIEW Job과 기존 큐/상태 머신/재시도/Review Gate/Planner
+검증 동작은 이 Task로 바뀌지 않는다(`docs/13` 7절).

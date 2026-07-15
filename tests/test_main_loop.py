@@ -338,10 +338,26 @@ def test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero(
     (`claim()` before the agent runs, `block()` after it fails) must be
     mocked here too - otherwise this test would silently make real network
     requests to api.github.com instead of exercising the AGENT_FAILED path.
+
+    Task 023: `main.py` now always wires a real `WorktreeManager.prepare()`
+    ahead of the Agent, which shells out to `git` itself (`devbot.worktree`
+    imports the same process-wide `subprocess` module `devbot.agents.codex`
+    does, so a blanket `patch("devbot.agents.codex.subprocess.run")` would
+    intercept both). `origin_path` gives it a real remote to fetch from, and
+    the `side_effect` below only fakes the `codex` invocation itself,
+    letting every `git` subprocess call run for real.
     """
     workspace_root = tmp_path / "workspace"
     repo_path = workspace_root / "myrepo"
     _init_git_repo(repo_path)
+
+    origin_path = tmp_path / "origin.git"
+    origin_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(origin_path)], check=True, capture_output=True
+    )
+    _run_git("remote", "add", "origin", str(origin_path), cwd=repo_path)
+    _run_git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=repo_path)
 
     env_path = tmp_path / ".env"
     env_path.write_text(
@@ -367,13 +383,24 @@ def test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero(
         created_at=datetime(2026, 1, 1),
     )
 
+    real_subprocess_run = subprocess.run
+
+    def _fake_subprocess_run(args: object, *a: object, **kw: object) -> MagicMock:
+        # Only fake the `codex` invocation itself - `devbot.worktree`'s
+        # `git fetch`/`git worktree add` (Task 023) share the same
+        # process-wide `subprocess` module and must run for real against
+        # `origin_path` above.
+        if isinstance(args, (list, tuple)) and args and args[0] == "codex":
+            return MagicMock(returncode=1, stdout="", stderr="boom")
+        return real_subprocess_run(args, *a, **kw)  # type: ignore[arg-type]
+
     with (
         patch("devbot.github_client.GitHubClient.list_issues", return_value=[ready_issue]),
+        patch("devbot.github_client.GitHubClient.list_pull_requests", return_value=[]),
         patch("devbot.github_write_client.GitHubWriteClient.set_labels") as mock_set_labels,
         patch("devbot.github_write_client.GitHubWriteClient.create_comment") as mock_create_comment,
-        patch("devbot.agents.codex.subprocess.run") as mock_subprocess_run,
+        patch("devbot.agents.codex.subprocess.run", side_effect=_fake_subprocess_run),
     ):
-        mock_subprocess_run.return_value = MagicMock(returncode=1, stdout="", stderr="boom")
         exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 1

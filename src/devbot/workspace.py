@@ -136,6 +136,24 @@ def ensure_git_workspace_ready(repository: RepositoryConfig) -> None:
         )
 
 
+def ensure_repository_present(repository: RepositoryConfig) -> None:
+    """Lighter preflight than `ensure_git_workspace_ready()`: only confirms
+    `repository.local_path` exists and is a Git checkout (Task 023 Scope
+    §3/§11) - deliberately skips the uncommitted-changes check. A Job that
+    prepares its own isolated worktree (`devbot.worktree.WorktreeManager`)
+    no longer runs directly in this path; only host-managed `git fetch`/
+    `git worktree add` do, and neither needs - or should be blocked by - a
+    clean operator working tree or a particular checked-out branch."""
+    if not repository.local_path.is_dir():
+        raise WorkspaceValidationError(
+            f"Repository path does not exist: {repository.local_path} ({repository.full_name})"
+        )
+    if not (repository.local_path / ".git").exists():
+        raise NotAGitRepositoryError(
+            f"Not a Git repository: {repository.local_path} ({repository.full_name})"
+        )
+
+
 def generate_branch_name(repository: RepositoryConfig, issue_number: int, title: str) -> str:
     """Build a deterministic, Git-ref-safe branch name for an Issue.
 

@@ -127,3 +127,44 @@ case the Task 020 contract's examples do not cover. Surfacing the failure
 prominently was chosen over surfacing whichever job happens to be first in
 scheduling order, since a failure is normally the more actionable signal
 for an operator glancing at one `Cycle Result` line.
+
+## 2026-07-15 — Host-managed worktrees are keyed by Issue number, reused across failures, and never auto-removed
+Task 023's motivating incident (Issue #41 again, via Task 022's daemon
+attempt): the Implementer reached a real Agent invocation but had to
+discover the existing Task Branch/PR itself (`git fetch`/`gh`), which
+needed interactive network approval DevBot could not answer. Three
+narrower decisions inside `devbot.worktree.WorktreeManager` are worth
+recording because they are not obvious from the Task 023 contract text
+alone:
+
+- **Keyed by GitHub Issue number, not Task number.** A Job always has an
+  Issue number; the Task number is only recoverable by best-effort
+  regex-parsing the execution Issue body Planner rendered
+  (`devbot.planner.render_execution_issue_body`'s `` - Contract: `...` ``
+  line), which is not guaranteed for a manually authored Issue. Using the
+  Issue number as the worktree directory name (`issue-<N>`) avoids that
+  dependency entirely.
+- **A `prepare()` call never wipes an existing worktree for the same
+  Issue/branch, even a dirty one.** A failed Job's uncommitted changes are
+  exactly the evidence an operator needs to diagnose what happened
+  (Scope §8 "preserve on failure for diagnostics/recovery") - only a
+  *different* branch reusing the same path, while dirty, is treated as an
+  unsafe conflict and rejected.
+- **No code path ever calls `WorktreeManager.cleanup()` automatically** -
+  not even after a successful delivery. Automatic merge detection is
+  explicitly out of scope for this Task, and a worktree still backs the
+  open PR's branch until it merges, so removing it right after delivery
+  would delete exactly the Branch/PR content Delivery just pushed to.
+  Cleanup is only ever explicit (`devbot worktree cleanup`), left for a
+  human or a later Task once merge detection exists.
+
+Separately, `devbot.polling`'s pre-existing `ensure_workspace_ready`
+dirty/branch check on the *operator* checkout is skipped entirely for
+IMPLEMENT/REWORK Jobs once `prepare_workspace` is configured, replaced by
+a lighter `devbot.workspace.ensure_repository_present` (exists + is a Git
+checkout, no cleanliness requirement) - the operator checkout's branch and
+uncommitted files no longer gate a Job at all, only the isolated worktree
+does (CP-023-11). `PollingService.prepare_workspace` defaults to `None`,
+so this whole path - and every existing test that does not opt in - is
+unaffected; `devbot.main` always wires the real
+`WorktreeManager.prepare` in production.

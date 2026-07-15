@@ -146,3 +146,47 @@ def test_doctor_reports_configured_implementer_and_reviewer() -> None:
     assert check.ok is True
     assert "implementer=claude" in check.detail
     assert "reviewer=codex" in check.detail
+
+
+# ---- CP-023-10: doctor reports Job worktree health ----
+
+
+def test_doctor_reports_worktree_health(tmp_path: Path) -> None:
+    repo_path = tmp_path / "myrepo"
+    _init_git_repo(repo_path)
+    workspace_root = tmp_path / "workspace"
+    config = _config(
+        [_repo(repo_path)], workspace_root=workspace_root, lock_file=tmp_path / "devbot.lock"
+    )
+    check_name = f"worktree_health[{config.repositories[0].full_name}]"
+
+    with patch(
+        "devbot.github_client.GitHubClient.get_authenticated_user",
+        side_effect=ConnectionError("no network in this sandbox"),
+    ):
+        report = build_doctor_report(config)
+
+    check = next(c for c in report.checks if c.name == check_name)
+    assert check.ok is True
+    assert "active=0" in check.detail
+    assert "stale=0" in check.detail
+    assert "conflicting=0" in check.detail
+    assert report.safe_to_start is True
+
+    # An on-disk directory under the worktree root that Git itself does not
+    # know about is a real conflict (a future `prepare()` for that path
+    # would fail) - reported, but never fatal to the whole daemon.
+    orphaned = workspace_root / ".devbot-worktrees" / "myrepo" / "issue-99"
+    orphaned.mkdir(parents=True)
+
+    with patch(
+        "devbot.github_client.GitHubClient.get_authenticated_user",
+        side_effect=ConnectionError("no network in this sandbox"),
+    ):
+        report_with_conflict = build_doctor_report(config)
+
+    conflicting_check = next(c for c in report_with_conflict.checks if c.name == check_name)
+    assert conflicting_check.ok is False
+    assert "conflicting=1" in conflicting_check.detail
+    assert str(orphaned) in conflicting_check.detail
+    assert report_with_conflict.safe_to_start is True
