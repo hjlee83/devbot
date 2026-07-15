@@ -17,13 +17,19 @@ from devbot.worktree import (
 
 
 def _run_git(*args: str, cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+    completed = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed in {cwd}: {completed.stderr or completed.stdout}"
+        )
 
 
 def _git_output(*args: str, cwd: Path) -> str:
-    completed = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True
-    )
+    completed = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed in {cwd}: {completed.stderr or completed.stdout}"
+        )
     return completed.stdout
 
 
@@ -44,6 +50,15 @@ def _init_git_repo(path: Path) -> None:
 def _init_bare_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True, capture_output=True)
+    # `git init --bare`'s symbolic HEAD follows `init.defaultBranch`, which
+    # is unset (typically resolving to `master`) on a CI runner but often
+    # configured to `main` on a dev machine. Every `main` this file ever
+    # pushes to `origin` is named explicitly, but a plain `git clone
+    # <origin> <dest>` (`_clone()`, used by every throwaway-clone helper
+    # below) resolves the branch to check out from `origin`'s HEAD - fixing
+    # it to `main` up front keeps that resolution deterministic regardless
+    # of the runner's default.
+    _run_git("symbolic-ref", "HEAD", "refs/heads/main", cwd=path)
 
 
 def _make_operator_repo(tmp_path: Path, *, name: str = "myrepo") -> tuple[RepositoryConfig, Path]:
