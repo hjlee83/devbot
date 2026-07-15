@@ -22,18 +22,25 @@ from dataclasses import replace
 from pathlib import Path
 
 from devbot.agents import build_agent_runner
-from devbot.agents.base import AgentRunner
+from devbot.agents.base import AgentRunner, AgentSessionLimitError, is_session_limit_output
 from devbot.config import ConfigError, load_config
 from devbot.delivery import DeliveryService
+from devbot.doctor import build_doctor_report, render_doctor_report
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import DevBotConfig, IssueComment, RepositoryConfig
-from devbot.observability import LOG_LEVELS, install_secret_filter, log_startup
+from devbot.observability import (
+    LOG_LEVELS,
+    install_secret_filter,
+    log_startup,
+    log_startup_validation,
+)
 from devbot.polling import PollingService, PollingStatus, run_forever
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
+from devbot.startup import run_startup_checks
 from devbot.timeline import TimelineError, TimelineService
 from devbot.workspace import build_agent_prompt
 
@@ -61,6 +68,12 @@ def _apply_rework_changes(
     result = implementer_runner.run(repository, prompt)
     if result.failed:
         message = result.message or f"AgentRunner exited with code {result.returncode}"
+        if is_session_limit_output(message):
+            # Task 019 CP-019-9: a dedicated exception type lets
+            # `ReworkService.process()` (`devbot.rework`) classify this
+            # distinctly (a clear recovery hint) while still being caught by
+            # its existing generic `except (Exception, KeyboardInterrupt)`.
+            raise AgentSessionLimitError(message)
         raise RuntimeError(message)
 
 
@@ -136,6 +149,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command")
     _build_timeline_parser(subparsers)
+    subparsers.add_parser(
+        "doctor",
+        help=(
+            "설정/워크스페이스/GitHub 연결/Lock 상태를 점검하고 데몬 시작 가능 여부를 "
+            "보고합니다 (읽기 전용, GitHub에 쓰지 않음)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -222,6 +242,15 @@ def _run_timeline_command(args: argparse.Namespace, config: DevBotConfig) -> int
     return 0
 
 
+def _run_doctor_command(config: DevBotConfig) -> int:
+    """`devbot doctor` (Task 019 CP-019-5): read-only, never acquires the
+    daemon lock (`devbot.doctor.check_daemon_lock` only probes it), so it
+    is safe to run alongside an already-running DevBot process."""
+    report = build_doctor_report(config)
+    print(render_doctor_report(report))
+    return 0 if report.safe_to_start else 1
+
+
 def main(
     argv: Sequence[str] | None = None,
     env_path: Path | str | None = None,
@@ -245,9 +274,19 @@ def main(
     if args.command == "timeline":
         return _run_timeline_command(args, config)
 
+    if args.command == "doctor":
+        return _run_doctor_command(config)
+
     try:
         with ProcessLock(config.lock_file):
             log_startup(logger, config)
+            # Task 019 CP-019-4: informational only (see
+            # `devbot.startup`'s module docstring) - the two genuinely
+            # fatal startup conditions (bad config, a duplicate daemon
+            # instance) already stopped `main()` above this point via
+            # `ConfigError`/`LockAcquisitionError`, before any GitHub
+            # write client exists (CP-019-8).
+            log_startup_validation(logger, run_startup_checks(config))
             write_client = GitHubWriteClient(config.github_token)
             implementer_runner = build_agent_runner(
                 config.implementer_agent, dry_run=config.dry_run

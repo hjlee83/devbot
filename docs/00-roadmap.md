@@ -88,3 +88,15 @@
       Queue/Dev/Review/Waiting 구간과 actor별 작업 시간을 계산해 표시한다
       (`src/devbot/timeline.py`, `results/018-timeline-cli.md`). daemon 자동
       marker 기록은 후속 Task로 남긴다.
+- [x] Task 019: daemon reliability baseline. 9개 실패 분류
+      (`FailureCategory`), 분류별 재시도 정책, 복구 정책, 폴링 시작 전
+      시작 검증, `uv run devbot doctor`, 실패마다 남는 진단 보고서를
+      도입한다. 단일 Job 실행 경로(`max_concurrent_jobs=1`)가 예상 밖
+      예외로 daemon 전체를 죽일 수 있던 안전망 공백을 막고, Agent
+      세션/사용량 제한을 별도 분류해 자동 재시도 없이 명확한 복구 힌트와
+      함께 `devbot:blocked`로 보낸다(`src/devbot/reliability.py`,
+      `src/devbot/startup.py`, `src/devbot/doctor.py`,
+      `docs/11-daemon-reliability.md`,
+      `results/019-daemon-reliability-baseline.md`). Worktree 격리,
+      Timeline 자동 기록, 멀티 Agent failover, VPS 배포는 범위 밖으로
+      남긴다.

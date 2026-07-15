@@ -256,3 +256,31 @@ repo's Git history.
 적용된다. 운영 중인 데몬을 잠시 더 자세히 보고 싶을 때는 별도로 `--once
 --verbose`를 실행해 한 cycle만 상세 로그로 확인하는 편이 연속 실행 중인
 데몬의 `LOG_LEVEL`을 바꾸는 것보다 안전하다.
+
+## 시작 전/장애 진단 절차 (Task 019)
+
+데몬을 시작하기 전, 또는 이상 동작을 의심할 때는 먼저 아래를 실행한다.
+
+```bash
+uv run devbot doctor
+```
+
+읽기 전용이며 이미 실행 중인 데몬 옆에서도 안전하게 실행할 수 있다
+(GitHub에 쓰지 않고, daemon lock을 실제로 잡지 않는다 - probe 후 즉시
+release). 관리 저장소 목록, 저장소별 워크스페이스 상태(clean/dirty)와
+현재 branch, GitHub 연결/인증, daemon lock 점유 여부, 구성된
+implementer/reviewer, `safe_to_start` 여부를 한 번에 보여준다. 세부 항목과
+"무엇이 fatal인지"는 `docs/11-daemon-reliability.md` 4~5절을 참고한다.
+
+데몬이 시작되면 startup 로그 바로 뒤에 같은 검사가 다시 한번
+`시작 검증: name=... ok=... detail=...`로 기록된다 - 다만 이 로그는 항상
+WARNING 수준일 뿐 fatal이 아니다(워크스페이스가 아직 clone되지 않았거나
+dirty해도 데몬은 계속 시작한다). Job 실행 중 실패가 발생하면 `Job 실패
+요약` 바로 뒤에 `[DevBot Diagnostic Report]`로 시작하는 진단 보고서가
+ERROR 수준으로 남는다 - 실패 분류(`failure_category`), 재시도 여부, 복구
+권장 조치가 함께 나온다(`docs/11-daemon-reliability.md` 1~3, 6절).
+
+Agent 세션/사용량 제한으로 실패한 경우, 블로킹 댓글에
+`[failure_category=agent_session_limit]`와 함께 "제한 해제 후 이전
+상태로 되돌리라"는 안내가 붙는다 - 자동 재시도를 하지 않으므로 반드시
+사람이 확인 후 Issue를 되돌려야 한다.

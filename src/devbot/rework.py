@@ -30,6 +30,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from devbot.agents.base import AgentSessionLimitError
 from devbot.delivery import (
     CommitFn,
     CurrentBranchFn,
@@ -48,6 +49,7 @@ from devbot.github_client import GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
+from devbot.reliability import session_limit_block_reason
 
 _MENTION = "@devbot"
 _PROCESSED_REACTION = "eyes"
@@ -254,6 +256,21 @@ class ReworkService:
 
         try:
             self.apply_changes(repository, working_issue, comment)
+        except AgentSessionLimitError as exc:
+            # Task 019 CP-019-9: classify and add a clear recovery hint for
+            # a session/usage-limit failure; still ends in devbot:blocked,
+            # same as the generic Agent-failure path below.
+            reason = session_limit_block_reason(f"Agent 실행 중 오류로 rework 중단: {exc}")
+            self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=None,
+                issue_state=TaskState.BLOCKED,
+                action_scope=action_scope,
+                pr_reused=True,
+                message="blocked: agent session limit",
+            )
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - record, then block
             reason = f"Agent 실행 중 오류로 rework 중단: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)

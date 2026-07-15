@@ -234,6 +234,85 @@ def test_shutdown_signal_stops_loop_gracefully() -> None:
     assert sleep_calls == 1
 
 
+def test_daemon_survives_non_fatal_failure() -> None:
+    """CP-019-7: a non-fatal Job failure must not terminate the daemon
+    process, and the next cycle must still run.
+
+    An exception type `_run_unclaimed_implement_job`'s own
+    `except WorkspaceValidationError` does not catch (e.g. a bare `OSError`
+    from a misbehaving `ensure_workspace_ready`) previously escaped
+    uncaught all the way through `_execute_job` for the common single-job
+    cycle (`max_concurrent_jobs=1`, the default) - only the concurrent
+    (`ThreadPoolExecutor`) path had a safety net. `PollingService.run_once()`
+    must now convert it to `ITERATION_ERROR` instead of raising."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = GitHubIssue(
+        repository=repo.full_name,
+        number=9,
+        title="Do work",
+        body="",
+        state="open",
+        labels=("devbot:ready",),
+        created_at=datetime(2026, 1, 1),
+    )
+
+    class _SingleIssueGitHubClient:
+        def list_issues(self, repository: RepositoryConfig, **_kwargs: object) -> list:
+            return [issue]
+
+    def _raise_unexpected(_repository: RepositoryConfig) -> None:
+        raise OSError("disk unavailable")
+
+    service = PollingService(
+        config=config,
+        github_client=_SingleIssueGitHubClient(),
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_raise_unexpected,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.ITERATION_ERROR
+
+
+def test_run_forever_continues_after_run_once_raises() -> None:
+    """CP-019-7, `run_forever()` level: even if a cycle somehow still
+    raises, the loop must log it and continue into its next cycle rather
+    than crashing the daemon process."""
+    config = _config([_repo("myrepo")])
+    service = PollingService(
+        config=config, github_client=_EmptyGitHubClient(), implementer_runner=MagicMock()
+    )
+
+    call_count = 0
+
+    def _flaky_run_once() -> PollingResult:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated unexpected crash")
+        return PollingResult(status=PollingStatus.NO_READY_TASK)
+
+    service.run_once = _flaky_run_once  # type: ignore[method-assign]
+
+    class _StopLoop(Exception):
+        pass
+
+    sleep_calls: list[float] = []
+
+    def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        if len(sleep_calls) >= 2:
+            raise _StopLoop()
+
+    with pytest.raises(_StopLoop):
+        run_forever(service, poll_interval_seconds=5, sleep_fn=_fake_sleep)
+
+    assert call_count == 2
+    assert len(sleep_calls) == 2
+
+
 def _run_git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
 
@@ -318,6 +397,41 @@ def test_main_loop_respects_process_lock(tmp_path: Path) -> None:
         held_lock.release()
 
     assert exit_code == 1
+
+
+def test_daemon_stops_on_fatal_failure(tmp_path: Path) -> None:
+    """CP-019-8: a fatal configuration or startup failure (bad config, a
+    duplicate daemon instance) terminates safely before polling begins and
+    never mutates GitHub state - `GitHubWriteClient` is never even
+    constructed, so no write call is even possible."""
+    # 1. Fatal configuration failure: no WORKSPACE_ROOT/GITHUB_TOKEN at all.
+    empty_env_path = tmp_path / "empty.env"
+    empty_env_path.write_text("", encoding="utf-8")
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    with patch("devbot.main.GitHubWriteClient") as mock_write_client:
+        exit_code = main([], env_path=empty_env_path, repositories_path=repositories_path)
+
+    assert exit_code == 1
+    mock_write_client.assert_not_called()
+
+    # 2. Fatal startup failure: a duplicate daemon instance (lock already held).
+    lock_file = tmp_path / "devbot.lock"
+    env_path, repositories_path = _write_fixture(tmp_path, lock_file=lock_file)
+    held_lock = ProcessLock(lock_file)
+    held_lock.acquire()
+    try:
+        with patch("devbot.main.GitHubWriteClient") as mock_write_client:
+            exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
+    finally:
+        held_lock.release()
+
+    assert exit_code == 1
+    mock_write_client.assert_not_called()
 
 
 def test_apply_rework_changes_raises_when_agent_result_is_unexecuted_and_not_dry_run() -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import subprocess
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from devbot.github_client import GitHubIssue
@@ -65,6 +66,51 @@ def _has_uncommitted_changes(path: Path) -> bool:
         check=True,
     )
     return bool(result.stdout.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceStatus:
+    """Non-raising counterpart to `ensure_git_workspace_ready()`'s checks
+    (Task 019 CP-019-4/CP-019-6): reports what it found instead of raising
+    on the first violation, so startup validation and failure diagnostics
+    can describe a bad workspace without ever aborting on one."""
+
+    exists: bool
+    is_git_repository: bool
+    has_uncommitted_changes: bool | None
+    changed_files: tuple[str, ...] = ()
+
+
+def inspect_workspace(repository: RepositoryConfig) -> WorkspaceStatus:
+    """Best-effort workspace status for `repository.local_path`.
+    `has_uncommitted_changes`/`changed_files` are `None`/`()` when they
+    can't be determined (missing path, not a Git checkout, or the `git`
+    invocation itself failed) - never raises."""
+    if not repository.local_path.is_dir():
+        return WorkspaceStatus(exists=False, is_git_repository=False, has_uncommitted_changes=None)
+    if not (repository.local_path / ".git").exists():
+        return WorkspaceStatus(exists=True, is_git_repository=False, has_uncommitted_changes=None)
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repository.local_path),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return WorkspaceStatus(exists=True, is_git_repository=True, has_uncommitted_changes=None)
+
+    changed_files = tuple(
+        line[3:] if len(line) > 3 else line for line in result.stdout.splitlines() if line.strip()
+    )
+    return WorkspaceStatus(
+        exists=True,
+        is_git_repository=True,
+        has_uncommitted_changes=bool(changed_files),
+        changed_files=changed_files,
+    )
 
 
 def ensure_git_workspace_ready(repository: RepositoryConfig) -> None:

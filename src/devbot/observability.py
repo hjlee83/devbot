@@ -43,6 +43,8 @@ from importlib import metadata
 from typing import ParamSpec, TypeVar
 
 from devbot.models import CandidateExclusion, DevBotConfig, Job, JobType
+from devbot.reliability import DiagnosticReport, render_diagnostic_report
+from devbot.startup import StartupValidationReport
 
 LOG_LEVELS: dict[str, int] = {
     "DEBUG": logging.DEBUG,
@@ -624,5 +626,49 @@ def log_stage(
             "issue_number": issue_number,
             "stage": stage,
             "elapsed_ms": duration_ms,
+        },
+    )
+
+
+@_safe_log
+def log_startup_validation(logger: logging.Logger, report: StartupValidationReport) -> None:
+    """One line per `devbot.startup.run_startup_checks()` result (Task 019
+    CP-019-4), INFO when it passed and WARNING when it didn't - every check
+    here is informational (see `devbot.startup`'s module docstring), so a
+    failure never aborts startup; it only tells the operator where to
+    look."""
+    for check in report.checks:
+        level = logger.info if check.ok else logger.warning
+        level(
+            "시작 검증: name=%s ok=%s detail=%s",
+            check.name,
+            check.ok,
+            check.detail,
+            extra={
+                "event": "startup_validation",
+                "check_name": check.name,
+                "ok": check.ok,
+                "detail": check.detail,
+            },
+        )
+
+
+@_safe_log
+def log_diagnostic_report(logger: logging.Logger, report: DiagnosticReport) -> None:
+    """ERROR: the operator-friendly diagnostic report for one operational
+    failure (Task 019 CP-019-6), redacted the same as any other Job-failure
+    text (CP-013-10)."""
+    logger.error(
+        redact_secrets(render_diagnostic_report(report)),
+        extra={
+            "event": "diagnostic_report",
+            "repository": report.repository,
+            "issue_number": report.issue_number,
+            "pull_request_number": report.pull_request_number,
+            "current_branch": report.current_branch,
+            "workspace_status": report.workspace_status,
+            "failure_category": report.category.value,
+            "retry_should_retry": report.retry.should_retry,
+            "retry_backoff_seconds": report.retry.backoff_seconds,
         },
     )
