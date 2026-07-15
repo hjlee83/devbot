@@ -338,6 +338,11 @@ class DeliveryService:
             pull_request = PullRequestInfo(
                 number=linked_pull_request.number, html_url=linked_pull_request.html_url
             )
+            self.client.update_pull_request_body(
+                repository,
+                linked_pull_request.number,
+                build_pr_body(issue, checkpoint_evidence),
+            )
             self.client.create_comment(
                 repository, issue.number, f"Updated pull request: {pull_request.html_url}"
             )

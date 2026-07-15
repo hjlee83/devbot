@@ -115,6 +115,14 @@ Waiting 구간(Wait reviewer, Wait implementer)은 별도 이벤트가 아니라
 같은 Issue에 여러 cycle이 존재하면(rework 반복), 각 cycle은 독립된 `dev:start` ~
 `review:end` marker 집합을 가지며 `cycle` 필드로 구분한다.
 
+Task 026 이후 Agent timeout/interruption으로 worktree를 보존하고 다음
+bounded resume을 기다리는 경우 `dev:end`의 `result`는 `resumable`로 기록될
+수 있다. Resume attempt, branch, PR, changed-file summary 같은 상세 진단은
+Timeline marker schema를 늘리지 않고 별도 Issue comment marker
+`<!-- devbot-resume:v1 ... -->`에 기록한다. 이 marker는 Status Card의
+기본 phase 계산을 대체하지 않는 보조 evidence이며, Timeline write와
+마찬가지로 best-effort라서 기록 실패가 Job의 실제 outcome을 덮지 않는다.
+
 ---
 
 # 6. 시간 구간 계산 규칙

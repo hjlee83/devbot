@@ -66,6 +66,12 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
 - **재사용**: 같은 저장소/Issue/branch로 다시 `prepare()`가 호출되면 기존
   worktree를 그대로 재사용한다 - 이전 실행이 남긴 미커밋 변경도 그대로
   보존된다(진단/복구 목적).
+- **Resume 후보 표시**: Task 026 이후 `PreparedWorkspace`는 재사용 여부와
+  현재 dirty 여부를 함께 전달한다. `PollingService`는 repository/Issue/PR/
+  branch/contract metadata가 모두 맞고 기존 worktree가 dirty일 때만
+  continuation prompt를 추가한다. Contract metadata 누락, branch/PR
+  mismatch, unrelated dirty worktree는 삭제하지 않고 `manual-action`으로
+  보낸다.
 - **보존**: Job 실행/Delivery 실패 시 worktree를 자동으로 지우지 않는다.
   정리는 항상 명시적으로만 일어난다.
 - **명시적 정리**: `devbot worktree cleanup --issue <N> [--repo owner/repo]
@@ -101,6 +107,12 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
 - "원격 discovery는 이미 끝났으니 `git fetch`/`gh`/`curl`을 실행하지
   말라"는 명시적 문구
 - "다른 Branch나 PR을 만들지 말라"는 명시적 금지 문구
+
+Task 026의 resumed 실행에는 `render_resume_workspace_context()`가 그 앞에
+추가된다. 이 블록은 이전 timeout/interruption 이후의 continuation임을
+명시하고, 현재 diff/untracked file을 먼저 확인하며 완료된 작업을 reset,
+delete, overwrite, discard하지 말고 기존 branch/PR에 commit/push하라고
+지시한다.
 
 ## 5. 실패 분류 (Scope §9)
 

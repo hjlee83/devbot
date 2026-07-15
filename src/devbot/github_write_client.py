@@ -143,5 +143,15 @@ class GitHubWriteClient:
         ).json()
         return PullRequestInfo(number=payload["number"], html_url=payload["html_url"])
 
+    def update_pull_request_body(
+        self, repository: RepositoryConfig, pull_request_number: int, body: str
+    ) -> None:
+        """Replace a Pull Request body, used to refresh delivery evidence on
+        an existing Planner-owned PR."""
+        self._patch(
+            f"/repos/{repository.owner}/{repository.repo}/pulls/{pull_request_number}",
+            json={"body": body},
+        )
+
 
 __all__ = ["GitHubClientError", "GitHubWriteClient", "PullRequestInfo"]

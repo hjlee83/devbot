@@ -301,3 +301,13 @@ class IssueStateWriter:
         if not self.dry_run:
             self.client.create_comment(repository, issue.number, reason)
         return updated
+
+    def comment(
+        self,
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        body: str,
+    ) -> None:
+        """Post an informational Issue comment without changing labels."""
+        if not self.dry_run:
+            self.client.create_comment(repository, issue.number, body)

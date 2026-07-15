@@ -260,6 +260,50 @@ def test_delivery_uses_linked_pr_head_branch() -> None:
     assert result.pull_request.number == 30
 
 
+def test_delivery_updates_existing_pr_body_with_checkpoint_evidence() -> None:
+    """Regression: a resumed/prepared delivery that reuses an existing PR must
+    refresh the PR Evidence body after commit and push instead of only leaving
+    an Issue comment."""
+    client = MagicMock(spec=GitHubWriteClient)
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=MagicMock(),
+        push=MagicMock(),
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: True,
+        current_branch=lambda repository: "task/026-agent-resume-timeout-recovery",
+    )
+    linked_pull_request = _linked_pull_request(
+        number=51, head_ref="task/026-agent-resume-timeout-recovery", issue_number=52
+    )
+    repository = _repo(Path("/tmp/workspace/myrepo"))
+    issue = _issue(number=52, title="Execute Task 026")
+    evidence = [
+        CheckpointEvidence("CP-026-8", ("test_resumed_execution_completes_existing_pr_delivery",))
+    ]
+
+    result = service.deliver(
+        repository,
+        issue,
+        "devbot/myrepo-52-generated-name",
+        evidence,
+        linked_pull_request=linked_pull_request,
+    )
+
+    client.update_pull_request_body.assert_called_once()
+    assert client.update_pull_request_body.call_args.args[0] is repository
+    assert client.update_pull_request_body.call_args.args[1] == 51
+    updated_body = client.update_pull_request_body.call_args.args[2]
+    assert "Closes #52" in updated_body
+    assert "CP-026-8" in updated_body
+    assert "test_resumed_execution_completes_existing_pr_delivery" in updated_body
+    assert result.pushed is True
+    assert result.pull_request is not None
+    assert result.pull_request.number == 51
+
+
 def test_delivery_rejects_branch_mismatch_before_commit() -> None:
     """Task 023 Scope §7 (PR #44 REQUEST CHANGES, CP-023-7): if the
     worktree is actually checked out on a different branch than the

@@ -157,3 +157,10 @@
       branch 생성 없이 workspace preparation failure로 중단하며, Planner
       metadata가 없는 legacy Issue만 기존 fallback branch 생성을 유지한다
       (`results/025-planner-linked-pr-resolution.md`).
+- [x] Task 026: agent resume and timeout recovery. Agent timeout/
+      interruption을 `resumable_interruption`으로 구조화하고, prepared
+      worktree의 dirty 재사용 상태가 Issue/PR/branch/contract metadata와
+      일치할 때만 continuation prompt를 붙여 같은 Branch/PR에서 이어서
+      실행한다. Resume attempt는 Issue comment marker로 제한하며 cap 초과
+      또는 unsafe metadata는 worktree를 삭제하지 않고 `manual-action`으로
+      보낸다(`results/026-agent-resume-timeout-recovery.md`).

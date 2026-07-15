@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from devbot.agents.claude import ClaudeRunner
-from devbot.models import RepositoryConfig
+from devbot.models import AgentOutcome, RepositoryConfig
 
 
 def _repository() -> RepositoryConfig:
@@ -87,6 +87,7 @@ def test_claude_runner_reports_timeout() -> None:
     assert result.executed is False
     assert result.dry_run is False
     assert "5" in result.message
+    assert result.outcome_hint is AgentOutcome.RESUMABLE_INTERRUPTION
 
 
 def test_claude_runner_reports_nonzero_exit() -> None:

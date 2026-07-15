@@ -65,6 +65,19 @@ def test_update_comment_sends_patch_with_body() -> None:
     assert kwargs["json"] == {"body": "updated body"}
 
 
+def test_update_pull_request_body_sends_patch_with_body() -> None:
+    session = MagicMock()
+    session.patch.return_value = _mock_response(json_data={})
+    client = GitHubWriteClient("token123", session=session)
+
+    client.update_pull_request_body(_repository(), 99, "updated evidence")
+
+    session.patch.assert_called_once()
+    args, kwargs = session.patch.call_args
+    assert args[0].endswith("/repos/someone/myrepo/pulls/99")
+    assert kwargs["json"] == {"body": "updated evidence"}
+
+
 def test_add_reaction_to_comment_sends_post_with_content() -> None:
     session = MagicMock()
     session.post.return_value = _mock_response(json_data={})

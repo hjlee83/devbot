@@ -29,6 +29,7 @@ def test_agent_outcome_classification() -> None:
         "approval_required",
         "network_blocked",
         "session_limit",
+        "resumable_interruption",
         "repository_locked",
         "agent_failed",
         "unknown",
@@ -76,6 +77,16 @@ def test_agent_outcome_classification() -> None:
         )
     )
     assert skipped.outcome is AgentOutcome.IMPLEMENTATION_SKIPPED
+
+    timeout = classify_agent_outcome(
+        AgentRunResult(
+            executed=False,
+            dry_run=False,
+            message="timeout",
+            outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
+        )
+    )
+    assert timeout.outcome is AgentOutcome.RESUMABLE_INTERRUPTION
 
 
 def test_agent_outcome_classification_prefers_structured_signal() -> None:
