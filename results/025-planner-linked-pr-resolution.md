@@ -13,6 +13,8 @@
 - host-managed workspace 문서에 Planner PR 해석 우선순위와 mismatch 거부
   규칙을 기록했다.
 - Roadmap에 Task 025 완료 범위와 Planner-linked PR hardening 동작을 기록했다.
+- Re-review 반영으로 Task 024는 완료가 아니라 PR #46 / Issue #47에서 진행
+  중인 pending 작업으로 Roadmap에 표시했다.
 
 ## 수정 파일
 

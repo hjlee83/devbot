@@ -139,11 +139,10 @@
       dirty 상태와 무관하게 기존 Task branch/PR을 재사용한다
       (`docs/13-host-managed-workspace-preparation.md`,
       `results/023-host-managed-workspace-preparation.md`).
-- [x] Task 024: timeline auto recording. Task 017/018 Timeline protocol을
-      daemon lifecycle에 연결해 ready/dev/review/rework 이벤트를 단일 Timeline
-      comment에 자동 기록한다. Timeline 기록 실패는 primary Job outcome을
-      가리지 않으며, 기존 queue/state-machine/worktree/delivery/review/rework
-      동작은 유지한다(`results/024-timeline-auto-recording.md`).
+- [ ] Task 024: timeline auto recording. Task 017/018 Timeline protocol을
+      daemon lifecycle에 연결하는 작업은 PR #46 / Issue #47에서 계속 진행
+      중이며, Task 025의 Planner-linked PR resolution hardening이 완료된 뒤
+      기존 branch/PR workspace에서 재개된다.
 - [x] Task 025: planner-linked PR resolution hardening. 실행 Issue의
       `Pull Request: #<number>` Planner metadata를 PR body closing keyword보다
       먼저 신뢰하고, resolved PR head branch를 host-managed worktree 준비에
