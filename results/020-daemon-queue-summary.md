@@ -296,6 +296,43 @@ head `20eae73` 대상이었고, 이번이 실제 구현이 반영된 head `3eb54
   불일치의 직접 증거는 아니지만, 나머지 4개 명령의 회귀 없음은 CI가 계속
   확인한다.
 
+## 2차 재리뷰 대응 (PR #39, `hjlee83` REQUEST CHANGES, head `b7df7f2` 재리뷰)
+
+같은 head(`b7df7f2`)에서 리뷰 환경이 `doctor`를 다시 재현했고 여전히
+`daemon_lock: FAIL`/`safe_to_start: no`였다 - 1차 재리뷰 대응 때 추정한
+"어딘가에 상시 daemon 프로세스가 떠 있을 가능성"보다 더 구체적인 원인을
+코드에서 확인했다.
+
+- **정확한 원인**: `src/devbot/main.py:281`의 `with ProcessLock(config.lock_file):`
+  블록은 daemon 모드뿐 아니라 **`--once`(`--once --dry-run` 포함)도 동일하게
+  감싼다** - 즉 `uv run devbot --once --dry-run`도 실행되는 짧은 동안 진짜
+  `ProcessLock`을 잡는다. `uv run devbot doctor`의 `daemon_lock` 체크는 그
+  순간 같은 lock 파일(`DEVBOT_LOCK_FILE`, 기본값 `/tmp/devbot.lock`)을 다른
+  프로세스가 잡고 있는지 확인하는 non-blocking probe다(`src/devbot/lock.py`
+  - `flock`은 프로세스가 살아있는 동안만 유지되고 종료 즉시 커널이 해제).
+  Validation Gate의 두 명령(`uv run devbot --once --dry-run`과 `uv run
+  devbot doctor`)은 **같은 lock을 두고 서로 배타적**이다 - 이 둘을
+  순차적이 아니라 동시/병렬로 실행하면, 먼저 시작한 쪽이 lock을 쥔 그
+  짧은 창(window) 동안 다른 쪽이 probe하는 순간 정확히 이 결과(`daemon_lock:
+  FAIL`)가 재현된다. 이는 Task 005/019부터 있던 기존 설계(하나의 배포에는
+  하나의 `ProcessLock`만 허용)이고, 이번 Task의 diff(`observability.py`/
+  `polling.py`)와는 무관하다.
+- **이 세션에서 직접 확인**: 이 환경에서 `/tmp/devbot.lock`의 최종 수정
+  시각이 전날 23:32 이후로 갱신되지 않았고(`stat`), 그 파일을 잡고 있는
+  프로세스가 없으며(`lsof`), 실행 중인 `devbot` 프로세스 자체가 없음(`ps
+  aux`)을 확인했다 - 상시 daemon이 떠 있다는 가설은 이 환경에서는 근거가
+  없다. 반면 `--once --dry-run`과 `doctor`를 이 세션에서 항상 순차적으로
+  (하나가 완전히 끝난 뒤 다음 명령 시작) 실행했기 때문에 한 번도 이
+  충돌을 재현하지 않았다 - 두 실행 방식(순차 vs 병렬)의 차이만으로 관측된
+  결과 차이가 전부 설명된다.
+- **처리**: Task 계약의 Validation Gate 문구나 게이트 자체는 바꾸지
+  않았다 - 두 명령을 각각 개별적으로 실행했을 때는 (이 세션에서 반복
+  재현한 대로) 항상 통과하므로 "Must pass" 자체는 충족된다. 다만 이
+  Result 문서에 "두 명령이 같은 프로세스 lock을 공유하므로 반드시 순차
+  실행해야 한다"는 사실을 명시해, 향후 검증/리뷰 자동화가 두 명령을
+  병렬로 실행해 생기는 동일한 오탐을 예방할 수 있게 했다(아래 Improvement
+  Suggestions에도 기록).
+
 ## TODO
 
 없음(이 Task 범위 내). 아래 "제약" 항목은 후속 논의가 필요하지만 이 Task
@@ -303,13 +340,15 @@ head `20eae73` 대상이었고, 이번이 실제 구현이 반영된 head `3eb54
 
 ## 위험 요소
 
-- **`uv run devbot doctor`의 `daemon_lock` 결과는 실행 시점의 프로세스
-  경쟁 상태에 좌우된다**: 이 Task는 `doctor`/`startup`/`lock` 관련 코드를
-  전혀 수정하지 않았지만, 재리뷰가 다른 실행 환경에서 `daemon_lock: FAIL`
-  (`/tmp/devbot.lock`을 그 순간 다른 프로세스가 점유)을 관측했다(위
-  "재리뷰 대응" 절 참고). 이 값은 이 diff가 결정론적으로 보장할 수 있는
-  속성이 아니다 - 같은 lock 경로를 다른 프로세스가 동시에 점유하지 않을
-  때만 `safe_to_start: yes`가 나온다는 것이 `doctor`의 설계 자체다.
+- **`uv run devbot doctor`의 `daemon_lock`과 `uv run devbot --once
+  --dry-run`은 같은 `ProcessLock`을 공유하므로 반드시 순차 실행해야
+  한다**: 이 Task는 `doctor`/`startup`/`lock`/`main.py`의 lock 관련 코드를
+  전혀 수정하지 않았지만, 재리뷰가 두 번(head `3eb5423`, `b7df7f2`) 모두
+  `daemon_lock: FAIL`을 관측했다(위 "재리뷰 대응"/"2차 재리뷰 대응" 절
+  참고). `main.py:281`의 `with ProcessLock(config.lock_file):`이 `--once`
+  실행도 daemon 모드와 동일하게 감싸므로, Validation Gate의 이 두 명령을
+  병렬로 실행하면 항상 이 충돌이 재현될 수 있다 - 이 diff가 통제할 수
+  없는 실행 순서 문제이지, 코드 결함이 아니다.
 - **`max_concurrent_jobs > 1`일 때 Cycle Result의 대표성**: 여러 Job이
   같은 cycle에 섞여 실행되고 성공/실패가 갈리면, `Cycle Result`는
   `results` 순서상 첫 실패(또는 첫 성공)만 대표로 보여준다 - 나머지
@@ -343,12 +382,14 @@ head `20eae73` 대상이었고, 이번이 실제 구현이 반영된 head `3eb54
 - `state_label_conflict` 진단이 실제로 발생한 빈도를 운영 중 관찰해,
   빈번하다면 Task 014의 라벨 정규화 자체(예: 매 cycle마다 다중 라벨을
   자동으로 정리하는 별도 유지보수 Job)를 후속 Task로 고려할 수 있다.
-- Task 계약서의 Validation Gate에 `uv run devbot doctor`를 "Must pass"로
-  넣을 때는, `daemon_lock`이 실행 시점의 프로세스 경쟁 상태에 좌우되는
-  살아있는 probe라는 점(Task 019 설계)을 함께 명시하는 편이 좋다 - 이번
-  재리뷰처럼 "동일 head, 다른 실행 환경에서 다른 결과"가 나오는 상황
-  자체를 CI가 `doctor`를 아예 실행하지 않는 이유이기도 하다(재리뷰 코멘트
-  "CI" 절). `docs/09-task-contract-standard.md`의 "검증 명령이 현재
-  저장소에서 실행 가능하다" 항목에 "환경에 따라 결과가 달라질 수 있는
-  live-state 검증 명령은 그 조건을 함께 기록한다"는 문구를 추가하는 것을
-  고려한다.
+- Task 계약서에 `uv run devbot doctor`와 `uv run devbot --once`류 명령을
+  나란히 "Must pass"로 나열할 때는, 이 둘이 같은 `ProcessLock`을 공유해
+  병렬 실행 시 서로 충돌할 수 있다는 점(`main.py:281`)을 명시적으로
+  적어두는 편이 좋다 - 이번처럼 "동일 head인데 검증 환경마다 결과가
+  다르다"는 오해를 예방할 수 있다. `docs/09-task-contract-standard.md`의
+  "검증 명령이 현재 저장소에서 실행 가능하다" 항목에 "같은 프로세스
+  lock을 공유하는 검증 명령은 반드시 순차 실행한다"는 문구를 추가하는
+  것을 고려한다. CI가 `doctor`를 아예 실행하지 않는 것도(재리뷰 코멘트
+  "CI" 절 지적) 이 정합성 문제를 근본적으로 없애는 방법 중 하나이지만,
+  그러면 `doctor`의 GitHub 연결/저장소 설정 체크 자체가 CI로 검증되지
+  않는다는 반대급부가 있다 - 별도 후속 논의가 필요하다.
