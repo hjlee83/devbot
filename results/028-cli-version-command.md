@@ -38,15 +38,16 @@
 
 ## Validation 결과
 
-- `PYTHONPATH=src /Users/luna/workspace/devbot/.venv/bin/ruff check .`: PASS
-- `PYTHONPATH=src /Users/luna/workspace/devbot/.venv/bin/pytest tests/test_main.py tests/test_main_loop.py`: PASS, 21 passed
-- `PYTHONPATH=src /Users/luna/workspace/devbot/.venv/bin/pytest`: PASS, 423 passed
-- `PYTHONPATH=src /Users/luna/workspace/devbot/.venv/bin/python -c "from devbot.main import main; raise SystemExit(main(['--version']))"`: PASS, `devbot 0.1.0`
-- 임시 config/lock 파일로 `main(['--once', '--dry-run'])`: PASS, `no_managed_repositories`
+- `python3 -m uv sync`: PASS
+- `python3 -m uv run ruff check .`: PASS
+- `python3 -m uv run pytest`: PASS, 423 passed
+- `python3 -m uv run devbot --version`: PASS, `devbot 0.1.0`
+- `python3 -m uv run devbot --once --dry-run`: PASS, `NO_RUNNABLE_TASK`
 
-`uv sync`, `uv run ruff check .`, `uv run pytest`는 sandbox의 네트워크 제한 때문에
-의존성 다운로드 단계에서 실패했다. 같은 checkout 코드는 기존 로컬 venv와
-`PYTHONPATH=src`로 검증했다.
+위 명령은 모두 Task 028의 PreparedWorkspace인
+`/Users/luna/workspace/.devbot-worktrees/devbot/issue-57`에서 실행했다.
+`devbot --once --dry-run`은 현재 큐의 `manual-action : 1` 상태를 관측한 뒤
+실행 가능한 ready/review/rework 작업이 없어 `no_ready_task`로 정상 종료했다.
 
 ## 수동 검증 결과
 
@@ -57,9 +58,7 @@
 
 ## 남은 TODO와 제한
 
-- PR Evidence는 GitHub PR 본문 metadata이므로 이 sandbox에서 갱신하지 못했다. PR #58
-  본문에는 위 Validation 결과와 checkpoint evidence를 반영해야 한다.
-- 실제 `uv sync`/`uv run ...` validation은 네트워크 접근 가능한 환경에서 재실행해야 한다.
+- PR #58 본문 Evidence에 위 Validation 결과와 checkpoint evidence를 반영했다.
 
 ## 위험 요소
 
@@ -68,5 +67,5 @@
 
 ## Improvement Suggestions
 
-- Validation runner가 sandbox 환경에서 `UV_CACHE_DIR=.uv-cache`와 사전 동기화된 venv를
-  일관되게 사용하도록 표준화하면 네트워크 제약 환경의 재현성이 좋아진다.
+- Validation runner가 PreparedWorkspace 경로와 실행 명령을 Result에 자동 기록하면
+  Workspace Contract 증명이 더 명확해진다.
