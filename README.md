@@ -66,6 +66,7 @@ uv run devbot --once             # one polling iteration, then exit
 uv run devbot --once --dry-run   # same, but force dry-run regardless of DRY_RUN
 uv run devbot                    # continuous polling until SIGINT/SIGTERM
 uv run devbot --once --verbose   # same, but force DEBUG-level logs for this run only
+uv run devbot --version          # print the installed package version and exit
 ```
 
 Each iteration enforces one globally active Task and selects the next runnable
