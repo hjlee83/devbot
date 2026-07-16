@@ -1,49 +1,80 @@
 # DevBot AGENTS
 
-Version: 1.4.0
-Last Updated: 2026-07-15
+Version: 2.0.0
+Last Updated: 2026-07-16
 
-> 이 문서는 DevBot 프로젝트의 최상위 운영 규칙이다.
-> 구현 역할과 리뷰 역할을 수행하는 모든 Agent는 작업을 시작하기 전에 반드시 이 문서를
-> 먼저 읽는다. 이 문서와 DevBot의 라벨·상태 전이·오케스트레이션 코드는 특정 Agent
-> 제품명이나 모델명에 종속되지 않는다 — 어떤 벤더의 Agent를 구현/리뷰 역할에 배정할지는
-> `IMPLEMENTER_AGENT`/`REVIEWER_AGENT` 설정값만으로 결정한다(`docs/04-agent-system.md`).
+> 이 문서는 DevBot 프로젝트에서 AI Agent가 따라야 하는 실행 규칙과 SOP를 정의한다.
+> 안정적인 프로젝트 원칙은 `CONSTITUTION.md`가 최상위 기준이다.
+> 충돌이 있으면 `CONSTITUTION.md`를 따르고, 구현 상세는 이 문서와 관련 `docs/`를 따른다.
+
+이 규칙은 특정 제품이나 모델에 종속되지 않는다. Planner, Implementer,
+Reviewer는 역할이며, 실제 Agent는 설정으로 교체할 수 있다.
 
 ---
 
-# 1. 언어 정책
+# 1. 고정 운영 경계
 
-사람이 읽는 모든 출력은 반드시 한국어로 작성한다.
+## Human-first Planning
 
-## 한국어 대상
+- 아이디어, 아키텍처, 범위, 위험, Acceptance Criteria는 프로젝트 소유자와 ChatGPT가 대화로 결정한다.
+- Planner는 승인되지 않은 요구사항을 만들거나 범위를 확장하지 않는다.
+- 프로젝트 소유자의 명시적 승인 후에만 Planner 산출물을 생성한다.
 
-- Task 결과
-- Result 문서
-- PR 제목 및 설명
-- PR 리뷰
+## Planner
+
+Planner는 승인된 설계를 다음 산출물로 변환한다.
+
+- Task Issue 1개
+- Task Branch 1개
+- Task Contract 1개
+- Pull Request 1개
+- 초기 라벨과 상호 링크
+
+별도 Execution Issue는 생성하지 않는다.
+
+## DevBot
+
+Task가 `devbot:ready`가 된 뒤 DevBot은 다음 흐름을 소유한다.
+
+```text
+IMPLEMENT
+→ REVIEW
+→ REWORK when required
+→ REVIEW
+→ READY TO MERGE
+```
+
+Merge는 프로젝트 소유자가 정책을 명시적으로 바꾸기 전까지 사람이 수행한다.
+
+---
+
+# 2. 언어 정책
+
+사람이 읽는 출력은 한국어로 작성한다.
+
+한국어 대상:
+
+- Task 결과와 Result
+- PR 제목, 설명, 리뷰
 - Issue 댓글
 - Commit 설명
-- 최종 보고
-- 개선 제안
+- 최종 보고와 개선 제안
 - 에러 원인 설명
 
-## 영어 사용 허용
+영어 사용 허용:
 
-- 소스코드
-- 클래스명
-- 함수명
-- 변수명
+- 소스코드와 식별자
 - 테스트 함수명
 - API 이름
 - GitHub Label
 - Branch 이름
-- Conventional Commit Type (feat, fix, refactor...)
+- Conventional Commit type
 
 ---
 
-# 2. 개발 환경
+# 3. 개발 환경
 
-필수 환경
+필수 환경:
 
 - Python 3.13
 - uv
@@ -51,161 +82,194 @@ Last Updated: 2026-07-15
 - ruff
 
 모든 공개 API는 타입 힌트를 작성한다.
-
-프로젝트는 다음 환경을 모두 지원해야 한다.
-
-- macOS
-- Linux VPS
+macOS와 Linux VPS를 지원한다.
 
 ---
 
-# 3. 안전 규칙
+# 4. 안전 규칙
 
 - Secret, Token, API Key를 Commit하지 않는다.
-- 기본 실행 모드는 DRY_RUN=true 이다.
-- main/master 브랜치에는 직접 Commit하거나 Push하지 않는다.
-- 항상 작업 브랜치를 사용한다.
-- 검증이 실패한 상태에서는 Task를 완료로 판단하지 않는다.
+- 기본 실행 모드는 `DRY_RUN=true`다.
+- main/master에 직접 Commit하거나 Push하지 않는다.
+- 항상 Task Branch를 사용한다.
+- 검증 실패 상태를 완료로 판단하지 않는다.
+- 자동화가 확신할 수 없는 경우 안전한 실패 또는 `devbot:manual-action`으로 전환한다.
+- 실패 시 작업물을 삭제하거나 초기화하지 않는다.
+- 같은 Task에 두 번째 Issue, Branch, Contract, PR을 만들지 않는다.
 
 ---
 
-# 4. Context Loading 순서
+# 5. Context Loading 순서
 
-새로운 작업을 시작하면 반드시 아래 순서로 Context를 읽는다.
+새 작업은 다음 순서로 읽는다.
 
-1. AGENTS.md
-2. docs/
-3. 이전 Task의 Result
-4. 현재 Task
-5. Source Code
+1. `CONSTITUTION.md`
+2. `AGENTS.md`
+3. 현재 Task Contract
+4. 관련 `docs/`
+5. 이전 Result와 현재 Result
+6. Pull Request Evidence와 CI
+7. Source Code
 
-이 순서를 변경하지 않는다.
+불필요한 전체 문서 스캔보다 현재 Task와 직접 관련된 문서를 우선한다.
 
 ---
 
-# 5. 구현 역할 표준 절차 (SOP)
+# 6. Single Task Model
 
-새로운 Task를 시작하면 반드시 아래 절차를 수행한다.
+한 Task는 정확히 다음 산출물을 사용한다.
 
-1. AGENTS.md 읽기
-2. docs 읽기
-3. 이전 Result 읽기
-4. 현재 Task 읽기
-5. Task 범위만 구현
-6. Task의 모든 품질 게이트를 만족하는 단위 테스트 작성
-7. Task에 정의된 필수 테스트 이름은 변경하지 않는다.
-8. 아래 검증 명령을 모두 수행한다.
+```text
+1 Task Issue
+1 Task Branch
+1 Task Contract
+1 Pull Request
+```
+
+명명 규칙:
+
+- Branch: `task/<task-number>-<slug>`
+- Contract: `tasks/<task-number>-<slug>.md`
+- Result: `results/<task-number>-<slug>.md`
+- PR title: `Task <task-number>: <title>`
+
+GitHub Issue 번호와 PR 번호는 Task 번호와 독립적이다.
+모든 구현, 테스트, Result, 리뷰 반영은 같은 Branch와 PR에서 계속한다.
+
+---
+
+# 7. Workspace Contract
+
+`WorktreeManager.prepare()`가 `PreparedWorkspace`를 반환한 뒤에는 모든 Agent와 실행 단계가 그 workspace만 사용한다.
+
+적용 대상:
+
+- Implementer
+- Reviewer
+- Reworker
+- Validation
+- Delivery
+- 향후 추가되는 Agent 역할
+
+금지 사항:
+
+- 준비된 workspace가 있는데 host repository를 검증하거나 실행 대상으로 사용하는 것
+- Agent가 별도로 Branch/PR을 discovery하는 것
+- operator checkout의 현재 Branch나 미커밋 변경에 의존하는 것
+
+필수 원칙:
+
+```python
+prepared = worktree_manager.prepare(...)
+validate(prepared.repository)
+runner.run(prepared.repository, ...)
+deliver(prepared.repository, ...)
+```
+
+실제 함수 형태는 달라도 검증, 실행, 전달이 같은 `PreparedWorkspace`를 사용해야 한다.
+
+---
+
+# 8. 구현 역할 SOP
+
+Implementer는 다음을 수행한다.
+
+1. 현재 Task Issue, Contract, Branch, PR 연결을 확인한다.
+2. 준비된 workspace에서만 작업한다.
+3. Task 범위만 구현한다.
+4. Contract의 필수 테스트 이름을 변경하지 않는다.
+5. 각 Checkpoint를 증명하는 테스트를 작성한다.
+6. Happy Path, Failure Path, Boundary Condition을 포함한다.
+7. 필요한 Regression Test를 추가한다.
+8. Validation Gate를 실행한다.
+9. Result와 PR Evidence를 실제 변경 사항에 맞게 갱신한다.
+10. 기존 Branch와 PR에 Commit하고 Push한다.
+
+새 Branch, PR, Issue를 생성하지 않는다.
+
+---
+
+# 9. Validation Gate
+
+기본 검증:
 
 ```bash
 uv sync
 uv run ruff check .
 uv run pytest
-uv run devbot
+uv run devbot doctor
+uv run devbot --once --dry-run
 ```
 
-9. 실패한 검증이 있으면 수정 후 다시 검증한다.
-10. results 문서를 작성한다.
-11. 작업 브랜치에 Commit한다.
-12. Push한다.
-13. Pull Request를 생성한다.
-14. 개선 사항은 Result 문서의 Improvement Suggestions 섹션에 기록한다.
+Task Contract가 다른 명령을 요구하면 함께 수행한다.
+검증 결과는 Result와 PR Evidence에 기록한다.
 
 ---
 
-# 6. 품질 게이트
+# 10. Result 작성 규칙
 
-- 모든 Checkpoint를 만족해야 한다.
-- 각 Checkpoint에는 최소 하나 이상의 테스트가 존재해야 한다.
-- 테스트는 실제 동작을 검증해야 한다.
-- 반드시 아래를 포함한다.
+모든 Task는 `results/`에 Result를 작성한다.
 
-- Happy Path
-- Failure Path
-- Boundary Condition
-
-필요하면 Regression Test를 추가한다.
-
----
-
-# 7. Result 작성 규칙
-
-모든 Task는 반드시 results 폴더에 Result 문서를 작성한다.
-
-반드시 포함한다.
+필수 항목:
 
 - 완료 내용
+- 주요 설계 결정
 - 수정 파일
-- Checkpoint별 테스트
-- 검증 결과
-- TODO
+- Checkpoint별 구현과 테스트 Evidence
+- Validation 결과
+- 수동 검증 결과
+- 남은 TODO와 제한
 - 위험 요소
 - Improvement Suggestions
 
+Result는 실제 코드와 PR Evidence와 일치해야 한다.
+
 ---
 
-# 8. 리뷰 역할 표준 절차 (SOP)
+# 11. 리뷰 역할 SOP
 
-Pull Request를 리뷰할 때 반드시 아래 순서를 따른다.
+Reviewer는 다음 순서로 검토한다.
 
-1. AGENTS.md
-2. 현재 Task
-3. Result
-4. Pull Request
+1. `CONSTITUTION.md`
+2. `AGENTS.md`
+3. Task Contract
+4. Result
+5. PR diff와 현재 head SHA
+6. PR Evidence
+7. CI/check status
+8. 관련 운영 문서
 
-그리고 아래 항목을 확인한다.
+검토 항목:
 
 - 계약 범위
-- 품질 게이트
-- 필수 테스트
-- 테스트 품질
-- PR Evidence
-- Result
-- CI
+- Checkpoint와 필수 테스트
+- Happy/Failure/Boundary 테스트 품질
+- Workspace Contract 준수
+- 상태 전이와 idempotency
 - 보안
+- Result와 PR Evidence 일치
+- CI
 - 문서
 
----
-
-# 9. 리뷰 기준
-
-다음을 모두 만족해야 한다.
-
-- Task 범위를 벗어나지 않았다.
-- 모든 Checkpoint에 대응하는 테스트가 존재한다.
-- 테스트가 실제 동작을 검증한다.
-- Happy Path를 검증한다.
-- Failure Path를 검증한다.
-- Boundary Condition을 검증한다.
-- Result 문서가 최신이다.
-- PR Evidence가 최신이다.
-- CI가 성공했다.
-- Task 계약, Result, PR Evidence, CI, 운영 정책이 서로 일치한다.
-
-하나라도 만족하지 않으면 코드와 테스트가 통과했더라도 `REQUEST CHANGES`로 판단한다.
-이 기준은 구현 관여 여부와 관계없이 모든 리뷰어에게 예외 없이 적용되는 기본값이다.
-구현에 관여했는지, 어떤 Agent가 Reviewer 역할을 맡았는지에 따라 기준을 완화하거나
-강화하지 않는다. 모든 Reviewer는 PR Evidence와 Result가 실제 변경 사항을 빠짐없이
-증명하는지 같은 strict gate를 적용한다.
+Reviewer는 코드를 수정하거나 Merge하지 않는다.
 
 ---
 
-# 10. 리뷰 결과
+# 12. 리뷰 결과
 
-리뷰 역할은 Pull Request를 Merge하지 않는다.
+리뷰는 정확히 다음 중 하나로 끝난다.
 
-반드시 아래 형식으로 종료한다.
-
-# Review Summary
-
-## 상태
-
-- MERGE READY
+```text
+MERGE READY
+```
 
 또는
 
-- REQUEST CHANGES
+```text
+REQUEST CHANGES
+```
 
-## 필수 포함 항목
+Review Summary 필수 항목:
 
 - 계약 검토
 - 품질 게이트
@@ -217,163 +281,87 @@ Pull Request를 리뷰할 때 반드시 아래 순서를 따른다.
 - Warning
 - 비고
 
-최종 Merge는 사람이 수행한다.
+하나라도 충족하지 않으면 코드와 테스트가 통과해도 `REQUEST CHANGES`다.
+같은 기준을 모든 Reviewer에게 적용한다.
 
 ---
 
-# 11. 자동 트리거 규칙
+# 13. Autonomous Review Loop
 
-폴링 데몬은 `devbot:*` 상태 라벨만 보고 구현 역할과 리뷰 역할을 자동으로 연결한다.
-사람이 "Task-XXX 수행해"/"PR-XXX 리뷰해"라고 직접 요청하지 않아도 아래 릴레이가
-자동으로 돈다.
+폴링 데몬은 상태 라벨과 현재 PR head를 기준으로 자동 릴레이한다.
 
-1. `devbot:ready` Issue는 구현 역할이 자동으로 가져가 구현, 검증, Commit, Push,
-   Pull Request 생성까지 수행하고 Issue를 `devbot:review`로 전환한다.
-2. Issue가 `devbot:review`이고 연결된 Pull Request의 현재 head commit이 아직
-   자동 리뷰되지 않았으면, 리뷰 역할이 자동으로 그 head를 리뷰하고 Pull Request에
-   `# Review Summary`를 게시한다. 같은 head commit은 두 번 리뷰하지 않는다.
-3. 그 Review Summary가 `REQUEST CHANGES`이면 게시된 댓글 자체에 `@devbot` 언급이
-   포함되어, 기존 PR 피드백 rework 경로(8절)가 다음 폴링에서 그 댓글을 감지해
-   같은 Issue/Branch/Pull Request를 재사용해 자동으로 수정한다. 수정된 head는
-   리뷰 역할이 다시 자동 리뷰한다.
-4. 그 Review Summary가 `MERGE READY`이면 `@devbot` 언급을 포함하지 않는다 -
-   자동 rework를 트리거하지 않고, Issue는 `devbot:review` 상태로 남아 사람의
-   Merge를 기다린다.
-5. 자동 Merge와 자동 Issue Close는 어떤 경우에도 수행하지 않는다. 최종 Merge는
-   항상 사람이 수행한다(10절).
-6. 이 릴레이는 특정 Agent 제품명이나 모델명에 의존하지 않는다 - 어떤 벤더가
-   구현/리뷰 역할을 맡는지는 설정값(`IMPLEMENTER_AGENT`/`REVIEWER_AGENT`)만
-   바꾸면 된다.
+1. `devbot:ready` → IMPLEMENT
+2. 성공한 IMPLEMENT delivery → REVIEW
+3. `REQUEST CHANGES` → 같은 Issue/Branch/PR에서 REWORK
+4. 성공한 REWORK delivery → 새 head에 대해 REVIEW
+5. 현재 head에 대한 유효한 `MERGE READY`와 merge-readiness gate 통과 → PR에 `devbot:ready-to-merge`
+6. stale review, 불일치, 반복 한도 초과, 안전하지 않은 상태 → retry, blocked, 또는 manual-action
+
+동일 head와 동일 feedback은 중복 처리하지 않는다.
+Review/Rework 반복은 bounded하고 idempotent해야 한다.
+
+자동 Merge와 자동 Issue Close는 현재 범위가 아니다.
 
 ---
 
-# 12. Prompt Contract
+# 14. Prompt Contract
 
-## 구현 역할
+## 구현
 
-사용자가
+사용자가 다음처럼 요청하면 추가 설명 없이 현재 Task와 연결된 산출물을 찾아 SOP를 수행한다.
 
-```
+```text
 Task-XXX 수행해.
 ```
 
-라고 요청하면 추가 설명을 요구하지 말고 구현 SOP를 수행한다.
+Task가 실제로 모호할 때만 질문한다.
 
-Task가 모호한 경우에만 질문한다.
+## 리뷰
 
----
+다음 요청만으로 충분하다.
 
-## 리뷰 역할
-
-사용자가
-
-```
-PR-XXX 리뷰해.
-```
-
-라고 요청하면 리뷰 SOP를 수행한다.
-
-Merge하지 않고 Review Summary를 작성한다.
-
-저장소 컨텍스트(이 저장소를 Clone/Checkout한 상태)가 있으면
-
-```
+```text
 Review PR #<number>.
 ```
 
-만으로도 충분하다 - 추가 설명을 요구하지 않고 16절 "최소 리뷰 진입
-계약"에 따라 필요한 문서와 Evidence를 스스로 찾아 읽는다.
+Reviewer는 Contract, Result, PR Evidence, CI를 스스로 찾아 읽는다.
+
+## Planner
+
+프로젝트 소유자가 설계를 승인한 뒤 Planner 실행을 요청하면 승인된 내용만 산출물로 변환한다.
+별도 Execution Issue를 생성하지 않는다.
 
 ---
 
-# 13. 문서 규칙
+# 15. 문서 규칙
 
-- 구현과 문서는 항상 함께 수정한다.
-- 설계 변경은 docs에 기록한다.
-- 중요한 설계 결정은 docs/07-decisions.md에 기록한다.
-- Task를 수정하면 Result도 함께 수정한다.
+- 안정 원칙은 `CONSTITUTION.md`에 기록한다.
+- Agent 실행 규칙과 SOP는 `AGENTS.md`에 기록한다.
+- 상세 설계와 운영 절차는 `docs/`에 기록한다.
+- 중요한 설계 결정은 `docs/07-decisions.md`에 기록한다.
+- 구현과 관련 문서는 함께 수정한다.
+- Task를 수정하면 Result와 PR Evidence도 함께 수정한다.
+- 문서 간 중복은 최소화하고 Source of Truth를 명시한다.
 
 ---
 
-# 14. DevBot 철학
+# 16. 상태 질문 응답 규칙
+
+현재 상태 질문은 GitHub Issue, Pull Request, Label, Comment, Check, Commit을 기준으로 답한다.
+
+- 로컬/VPS 로그는 사용자가 요청했을 때 보조 자료로만 사용한다.
+- Timeline marker가 없는 구간은 GitHub timestamp 기반 추정임을 명시한다.
+- 가능한 경우 `docs/10-github-status-timeline.md`의 상태 카드 형식을 따른다.
+
+---
+
+# 17. DevBot 철학
 
 - Task는 계약이다.
-- Checkpoint는 품질 게이트이다.
+- Checkpoint는 품질 게이트다.
 - Test는 계약을 증명한다.
-- Result는 다음 작업자를 위한 인수인계 문서이다.
-- Review는 계약 준수 여부를 검증한다.
-- 구현 역할과 리뷰 역할을 맡은 모든 Agent는 동일한 규칙을 따른다.
-- 사람은 최종 Merge만 수행한다.
-
----
-
-# 15. 상태 질문 응답 규칙
-
-"현재 상태" 또는 이에 준하는 질문("지금 어디까지 됐어", "Task-XXX 진행 상황")을 받으면
-반드시 아래를 따른다 (상세 규격은 `docs/10-github-status-timeline.md`).
-
-- GitHub Issue, Pull Request, Label, Comment, Check(CI), Commit을 기준으로 답한다.
-- VPS나 로컬 DevBot 로그는 사용자가 명시적으로 요청했을 때만 참고 자료로 사용한다.
-  로그를 상태 질문의 기본 근거로 삼지 않는다.
-- 답변은 가능한 한 `docs/10-github-status-timeline.md`의 상태 카드(Status Card) 형식을
-  따른다 — `State`, `Waiting`, `Queue`, cycle별 `Dev`/`Wait reviewer`/`Review`/
-  `Wait implementer`/`Result`, `Total active`, `Total waiting`, `Total elapsed`.
-- 타임라인 marker(`<!-- devbot-timeline:v1 ... -->`)가 아직 기록되지 않은 구간은 GitHub
-  라벨 변경/댓글/커밋/리뷰 타임스탬프로 최선 추정한 것임을 답변에 명시한다.
-
----
-
-# 16. Planner 워크플로 (Task 022)
-
-Task 계약 발행과 실행 준비는 Planner 역할이 소유한다. 상세 규격은
-`docs/12-planner-workflow.md`에 정의되어 있고, 이를 기계로 검증하는
-헬퍼는 `src/devbot/planner.py` (`devbot.planner`)에 있다.
-
-## 역할 경계
-
-- **Planner** - Task 번호/제목, 범위, Checkpoint, Validation Gate를
-  정의하고 Branch, 계약서 파일, Pull Request, 실행용 Issue를 생성하며
-  네 식별자를 서로 명시적으로 cross-link한다.
-- **Implementer** - Planner가 만든 기존 Branch와 PR 위에서만 계속
-  구현한다. Task에 이미 Planner-owned 작업공간이 있으면 두 번째 Branch나
-  PR을 만들지 않는다(단일 Task 작업공간 정책, 1 Task = 1 Branch = 1 PR).
-- **Reviewer** - 최소 리뷰 요청(`Review PR #<number>.`)만으로 저장소
-  Review Gate, 연결된 Task 계약서, Result, PR Evidence, CI를 스스로
-  찾아 읽는다(`docs/12-planner-workflow.md` 2절 "최소 리뷰 진입 계약").
-- **Operator** - 최종 Merge와 `devbot:manual-action` 등 사람이 판단해야
-  하는 상태를 처리한다.
-
-## 명명 규칙
-
-Branch `task/<task-number>-<slug>`, 계약서
-`tasks/<task-number>-<slug>.md`, Result `results/<task-number>-<slug>.md`,
-PR 제목 `Task <task-number>: <title>`, 실행용 Issue 제목
-`Execute Task <task-number>: <title>`. GitHub Issue 번호와 PR 번호는 Task
-번호와 독립적인 식별자이며 일치시키려 하지 않는다 - 대신 서로를 명시적으로
-cross-link한다.
-
-## 적용 범위
-
-`devbot.planner`는 순수 검증/템플릿 헬퍼이며 daemon 자동 폴링
-루프(`devbot.polling`, `devbot.scheduler`, `devbot.main`)에서 호출되지
-않는다 - Planner 워크플로 검증은 항상 명시적으로 수행되고, 기존 daemon
-구현/리뷰/rework/delivery/timeline/상태 머신/재시도 동작은 이 절로 인해
-바뀌지 않는다.
-
----
-
-# 17. Host-Managed Workspace Preparation (Task 023)
-
-IMPLEMENT/REWORK Job은 Implementer Agent를 실행하기 전에 DevBot host가
-직접 linked Task Branch/PR을 해석하고, 원격을 동기화하며, 격리된 Git
-worktree(`<workspace-root>/.devbot-worktrees/<repo>/issue-<N>`)를
-준비한다(`src/devbot/worktree.py`, `docs/13-host-managed-workspace-preparation.md`).
-Agent는 이 준비된 worktree 안에서만 동작하며 `git fetch`/`gh`/`curl` 같은
-원격 discovery를 스스로 수행할 필요가 없다 - operator checkout의 현재
-branch나 미커밋 변경과도 무관하게 동작한다.
-
-`devbot worktree status`/`devbot worktree cleanup --issue <N>`이 이
-worktree의 조회/명시적 정리를 제공하고, `devbot doctor`는 저장소마다
-`worktree_health[...]` 항목으로 active/stale/conflicting worktree를
-보고한다. REVIEW Job과 기존 큐/상태 머신/재시도/Review Gate/Planner
-검증 동작은 이 Task로 바뀌지 않는다(`docs/13` 7절).
+- Result는 인수인계와 Evidence다.
+- Review는 계약 준수를 검증한다.
+- 역할은 Agent 제품이나 모델보다 우선한다.
+- 자동화는 traceability와 safety를 약화시키면 안 된다.
+- 사람은 Planning과 최종 Merge 결정을 소유한다.
