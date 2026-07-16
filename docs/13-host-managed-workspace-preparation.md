@@ -140,10 +140,18 @@ worktree 수. `conflicting`(Git이 모르는, worktree root 아래의 디스크
 
 `PollingService.prepare_workspace`는 선택적 의존성이다 - 주입하지 않으면
 (테스트를 포함한 모든 기존 호출자) 이 Task 이전과 동일하게 operator
-checkout 위에서 직접 Agent/Delivery를 실행한다. `devbot.main`은 실제
+checkout 위에서 직접 Agent/Delivery/Review를 실행한다. `devbot.main`은 실제
 배포에서 항상 `WorktreeManager.prepare`를 주입하므로, 운영 daemon은 항상
-새 경로를 탄다. REVIEW Job은 이 Task의 범위 밖이며(Scope §1) 계속
-operator checkout 위에서 동작한다.
+새 경로를 탄다. Task 027 이후 REVIEW Job도 linked PR 기준으로 준비된
+worktree를 검증/사용하며, host operator checkout의 현재 branch나 미커밋
+파일은 REVIEW 실행을 막지 않는다.
+
+Task 027 workspace invariant: after `WorktreeManager.prepare()` returns a
+`PreparedWorkspace`, all Agent roles must execute exclusively against
+`PreparedWorkspace.repository`. IMPLEMENT, REVIEW, REWORK, Delivery,
+Validation, and future Agent roles must not independently fall back to the
+configured host repository. The host checkout is only a source for Git
+worktree management such as fetch/add/list operations.
 
 ## 8. 범위 밖 (Out of Scope)
 
