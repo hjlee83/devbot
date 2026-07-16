@@ -75,6 +75,7 @@ class PreparedWorkspace:
     pull_request: PullRequest | None
     worktree_path: Path
     reused: bool
+    dirty: bool = False
     contract_path: str | None = None
     result_path: str | None = None
 
@@ -171,6 +172,32 @@ def render_prepared_workspace_context(prepared: PreparedWorkspace) -> str:
             "Remote discovery is already complete - do not run `git fetch`, `gh`, "
             "`curl`, or any other network/discovery command. Do not create another "
             "branch or Pull Request; continue on the branch and Pull Request above.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_resume_workspace_context(prepared: PreparedWorkspace, *, attempt: int) -> str:
+    """Render continuation instructions for a dirty reused Job worktree."""
+    lines = [
+        "## Resume Context (Task 026)",
+        "",
+        f"- Resume attempt: {attempt}",
+        f"- Reusing preserved worktree: `{prepared.worktree_path}`",
+        f"- Existing branch: `{prepared.branch}`",
+    ]
+    if prepared.pull_request is not None:
+        lines.append(f"- Existing Pull Request: #{prepared.pull_request.number}")
+    lines.extend(
+        [
+            "",
+            "This is a continuation after a previous Agent timeout or interruption.",
+            "Before editing, inspect the current repository diff and untracked files.",
+            "Preserve completed work. Do not recreate, reset, delete, overwrite, or discard "
+            "the existing changes unless the Task contract explicitly requires that edit.",
+            "Finish only the remaining Task scope, run the required validation, commit the "
+            "completed work, and push to the existing branch/PR above.",
+            "Do not create a fallback `devbot/devbot-*` branch and do not create another PR.",
         ]
     )
     return "\n".join(lines)
@@ -409,6 +436,7 @@ class WorktreeManager:
             pull_request=linked_pull_request,
             worktree_path=target,
             reused=reused,
+            dirty=self.is_dirty(target),
             contract_path=parse_contract_path_from_issue_body(issue.body),
             result_path=parse_result_path_from_issue_body(issue.body),
         )

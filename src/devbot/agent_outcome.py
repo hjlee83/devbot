@@ -179,6 +179,9 @@ class AgentOutcomeTransition:
       (`devbot.polling`, not this module) - the destination depends on
       whether the reused PR carries implementation evidence beyond its
       pre-existing contract-only commit.
+    - `RESUMABLE_INTERRUPTION`: the caller decides whether the bounded
+      resume attempt can restore the Issue to its prior stable state or
+      must route it to manual action.
 
     Every other outcome never leaves an Issue in `devbot:working` and never
     targets it either - `target_state` is always a stable terminal-for-
@@ -233,6 +236,15 @@ AGENT_OUTCOME_TRANSITIONS: dict[AgentOutcome, AgentOutcomeTransition] = {
         recovery_hint=(
             "Agent 세션/사용량 제한입니다. 자동 재시도하지 않습니다. "
             "제한이 해제된 뒤 Issue를 devbot:ready(또는 이전 상태)로 되돌리세요."
+        ),
+    ),
+    AgentOutcome.RESUMABLE_INTERRUPTION: AgentOutcomeTransition(
+        proceeds_to_delivery=False,
+        target_state=None,
+        retryable=True,
+        recovery_hint=(
+            "Agent 실행이 타임아웃/중단되어 기존 worktree 변경을 보존했습니다. "
+            "다음 bounded resume 시도에서 같은 Branch/PR/worktree를 이어서 사용합니다."
         ),
     ),
     AgentOutcome.AGENT_FAILED: AgentOutcomeTransition(

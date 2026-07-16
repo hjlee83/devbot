@@ -12,8 +12,13 @@ from devbot.delivery import DeliveryResult, VerificationResult
 from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
 from devbot.issue_state import IssueStateWriter
-from devbot.models import DevBotConfig, RepositoryConfig, TaskState
-from devbot.polling import PollingService, PollingStatus, find_linked_pull_request
+from devbot.models import AgentOutcome, DevBotConfig, RepositoryConfig, TaskState
+from devbot.polling import (
+    RESUME_ATTEMPT_LIMIT,
+    PollingService,
+    PollingStatus,
+    find_linked_pull_request,
+)
 from devbot.review import build_review_marker
 from devbot.rework import ReworkService
 from devbot.timeline import TimelineService, parse_events
@@ -165,6 +170,8 @@ def _prepared_workspace(
     worktree_path: Path | None = None,
     contract_path: str | None = None,
     result_path: str | None = None,
+    reused: bool = False,
+    dirty: bool = False,
 ) -> PreparedWorkspace:
     """A canned `WorktreeManager.prepare()` outcome (Task 023) for tests
     that inject a fake `prepare_workspace` instead of running real Git."""
@@ -178,7 +185,8 @@ def _prepared_workspace(
         issue_number=issue_number,
         pull_request=pull_request,
         worktree_path=path,
-        reused=False,
+        reused=reused,
+        dirty=dirty,
         contract_path=contract_path,
         result_path=result_path,
     )
@@ -1560,6 +1568,481 @@ def test_delivery_uses_prepared_worktree_branch(tmp_path: Path) -> None:
     assert kwargs["linked_pull_request"] is linked_pr
     # the Agent ran in that same worktree, not the operator checkout.
     assert agent_runner.run.call_args.args[0].local_path == worktree_path
+
+
+def test_agent_timeout_is_classified_resumable(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    branch = "task/026-resume"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+    )
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(
+        executed=False,
+        dry_run=False,
+        message="Agent timed out",
+        outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
+    )
+    delivery = MagicMock()
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=write_client, dry_run=False),
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_FAILED
+    assert "resumable_interruption" in result.message
+    delivery.deliver.assert_not_called()
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 52, ["devbot:ready"])
+    comment = write_client.create_comment.call_args.args[2]
+    assert "devbot-resume:v1" in comment
+    assert "attempt=1" in comment
+    assert "reason=timeout" in comment
+
+
+def test_timeout_preserves_unfinished_worktree(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    worktree_path = tmp_path / ".devbot-worktrees" / "myrepo" / "issue-52"
+    worktree_path.mkdir(parents=True)
+    unfinished = worktree_path / "unfinished.txt"
+    unfinished.write_text("kept\n", encoding="utf-8")
+    branch = "task/026-resume"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        worktree_path=worktree_path,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+        dirty=True,
+    )
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(
+        executed=False,
+        dry_run=False,
+        message="timeout",
+        outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
+    )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=MagicMock(spec=GitHubWriteClient), dry_run=False),
+        delivery=MagicMock(),
+    )
+
+    service.run_once()
+
+    assert unfinished.read_text(encoding="utf-8") == "kept\n"
+    assert worktree_path.exists()
+
+
+def test_matching_dirty_worktree_is_detected_as_resumable(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    branch = "task/026-resume"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+        reused=True,
+        dirty=True,
+    )
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="done")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=51, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=MagicMock(spec=GitHubWriteClient), dry_run=False),
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    prompt = runner.run.call_args.args[1]
+    assert "Resume Context (Task 026)" in prompt
+    assert "Resume attempt: 1" in prompt
+    assert "inspect the current repository diff" in prompt
+
+
+def test_resume_prompt_includes_existing_work_instructions(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    branch = "task/026-resume"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+        reused=True,
+        dirty=True,
+    )
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="done")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=51, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=MagicMock(spec=GitHubWriteClient), dry_run=False),
+        delivery=delivery,
+    )
+
+    service.run_once()
+
+    prompt = runner.run.call_args.args[1].lower()
+    assert "preserve completed work" in prompt
+    assert "do not recreate, reset, delete, overwrite, or discard" in prompt
+    assert "do not create a fallback `devbot/devbot-*` branch" in prompt
+
+
+def test_resume_reuses_existing_branch_and_pr(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    branch = "task/026-agent-resume-timeout-recovery"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+        reused=True,
+        dirty=True,
+    )
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="done")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=51, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=MagicMock(spec=GitHubWriteClient), dry_run=False),
+        delivery=delivery,
+    )
+
+    service.run_once()
+
+    delivery.deliver.assert_called_once()
+    args, kwargs = delivery.deliver.call_args
+    assert args[2] == branch
+    assert kwargs["linked_pull_request"] is linked_pr
+
+
+def test_resume_attempt_limit_requires_manual_action(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    branch = "task/026-resume"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    marker = (
+        "<!-- devbot-resume:v1 issue=52 pr=51 "
+        f"attempt={RESUME_ATTEMPT_LIMIT} branch={branch} reason=timeout -->"
+    )
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+        reused=True,
+        dirty=True,
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    runner = MagicMock()
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]},
+            comments_by_issue={(repo.full_name, 52): [_comment(body=marker)]},
+            pull_requests_by_repo={repo.full_name: [linked_pr]},
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=write_client, dry_run=False),
+        delivery=MagicMock(),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    runner.run.assert_not_called()
+    assert write_client.set_labels.call_args_list[-1].args == (
+        repo,
+        52,
+        ["devbot:manual-action"],
+    )
+    assert "resume attempt limit exceeded" in write_client.create_comment.call_args.args[2]
+
+
+def test_timeout_and_resume_are_recorded_idempotently(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    branch = "task/026-resume"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    marker = "<!-- devbot-resume:v1 issue=52 pr=51 attempt=1 branch=other reason=timeout -->"
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+        dirty=True,
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(
+        executed=False,
+        dry_run=False,
+        message="timeout",
+        outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
+    )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]},
+            comments_by_issue={(repo.full_name, 52): [_comment(body=marker)]},
+            pull_requests_by_repo={repo.full_name: [linked_pr]},
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=write_client, dry_run=False),
+        delivery=MagicMock(),
+    )
+
+    service.run_once()
+
+    comment = write_client.create_comment.call_args.args[2]
+    assert "devbot-resume:v1 issue=52 pr=51 attempt=1" in comment
+    assert "branch=task/026-resume" in comment
+    assert "failure_category: agent_execution_failed" in comment
+    assert "changed_files:" in comment
+
+
+def test_resumed_execution_completes_existing_pr_delivery(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    branch = "task/026-resume"
+    issue = _issue(
+        repo.full_name,
+        52,
+        labels=["devbot:ready"],
+        body=_planner_issue_body(branch=branch, pr_number=51),
+    )
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        contract_path="tasks/026-agent-resume-timeout-recovery.md",
+        reused=True,
+        dirty=True,
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="completed")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=51, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=write_client, dry_run=False),
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.DELIVERED
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 52, ["devbot:review"])
+    assert delivery.deliver.call_args.kwargs["linked_pull_request"] is linked_pr
+
+
+def test_unsafe_resume_is_rejected_without_deleting_work(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    worktree_path = tmp_path / ".devbot-worktrees" / "myrepo" / "issue-52"
+    worktree_path.mkdir(parents=True)
+    kept = worktree_path / "kept.txt"
+    kept.write_text("do not delete\n", encoding="utf-8")
+    branch = "task/026-resume"
+    issue = _issue(repo.full_name, 52, labels=["devbot:ready"], body=f"- Branch: `{branch}`\n")
+    linked_pr = _pull_request(51, issue_number=52, head_ref=branch)
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=52,
+        pull_request=linked_pr,
+        worktree_path=worktree_path,
+        reused=True,
+        dirty=True,
+        contract_path=None,
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    runner = MagicMock()
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient(
+            {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+        ),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        state_writer=IssueStateWriter(client=write_client, dry_run=False),
+        delivery=MagicMock(),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    runner.run.assert_not_called()
+    assert kept.read_text(encoding="utf-8") == "do not delete\n"
+    assert write_client.set_labels.call_args_list[-1].args == (
+        repo,
+        52,
+        ["devbot:manual-action"],
+    )
+
+
+def test_existing_workflows_compatible_with_resume_recovery(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    issue = _issue(repo.full_name, 60, labels=["devbot:ready"])
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient({repo.full_name: [issue]}),
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_COMPLETED
+    assert "Resume Context (Task 026)" not in runner.run.call_args.args[1]
 
 
 def test_workspace_preparation_failure_skips_agent_and_recovers_state(tmp_path: Path) -> None:

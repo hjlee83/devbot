@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 
 from devbot.agents.base import AgentRunner, AgentRunResult
-from devbot.models import RepositoryConfig
+from devbot.models import AgentOutcome, RepositoryConfig
 
 CLAUDE_COMMAND = "claude"
 DEFAULT_TIMEOUT_SECONDS = 1800.0
@@ -60,6 +60,7 @@ class ClaudeRunner(AgentRunner):
                 executed=False,
                 dry_run=False,
                 message=f"Claude CLI 실행이 {self.timeout_seconds}초 안에 끝나지 않았습니다.",
+                outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
             )
 
         return AgentRunResult(

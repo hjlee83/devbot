@@ -19,7 +19,7 @@
 | `workspace_invalid` | 로컬 워크스페이스가 없거나 Git 저장소가 아니거나 미커밋 변경이 있음 |
 | `startup_validation_failed` | 시작 검증 항목 실패 (현재는 항상 WARNING, 2절 참고) |
 | `agent_session_limit` | Agent 세션/사용량 제한 (`devbot.agents.base.is_session_limit_output`) |
-| `agent_execution_failed` | Agent 실행 자체가 실패(CLI 없음/타임아웃/nonzero 종료) |
+| `agent_execution_failed` | Agent 실행 자체가 실패(CLI 없음/nonzero 종료). Task 026 이후 CLI timeout/interruption은 먼저 `resumable_interruption` Agent outcome으로 분류되어 worktree 보존/resume 경로를 탄다. |
 | `delivery_failed` | 검증/커밋/푸시/PR 단계 실패 |
 | `review_failed` | 리뷰 Agent 실행 실패 또는 잘못된 Review Summary |
 | `github_api_error` | GitHub API 조회/쓰기 실패 |
@@ -60,6 +60,16 @@ Task 019 계약의 최소 규칙을 그대로 구현한다.
 결정하는 선언적 테이블이며, 실제 폴링 재시도 여부는 여전히
 `devbot:blocked`/`devbot:working` 상태 전이(3절)로 강제된다.
 
+Task 026의 timeout/resume은 이 전역 retry table을 직접 재사용하지 않는다.
+Agent runner가 `AgentOutcome.RESUMABLE_INTERRUPTION`을 반환하면
+`PollingService`는 prepared worktree를 삭제하지 않고 Issue를 이전 안정
+상태(`ready`/`rework`)로 복구한다. 다음 cycle은 같은 Issue/PR/branch/
+contract metadata로 재사용된 dirty worktree만 resume 후보로 보고,
+Issue comment의 `devbot-resume:v1` marker에서 attempt 수를 읽어 기본
+3회(`RESUME_ATTEMPT_LIMIT`)까지만 continuation prompt를 붙인다. Cap 초과
+또는 contract metadata 누락 같은 unsafe resume은 worktree를 보존한 채
+`devbot:manual-action`으로 전환한다.
+
 ## 3. 복구 정책 (Recovery Policy)
 
 `devbot.reliability.RECOVERY_POLICY` / `recovery_outcome_for(category)`는
@@ -72,6 +82,10 @@ Task 019 계약의 최소 규칙을 그대로 구현한다.
 - `workspace_invalid`: claim 직후 preflight 실패 → `RESTORE` (이전 안정
   상태로 복구).
 - 나머지 8개 분류: `BLOCKED`.
+- `resumable_interruption`은 `FailureCategory`가 아니라 `AgentOutcome`이다.
+  claimed workflow는 `RESTORE`로 이전 안정 상태에 돌아가 다음 bounded
+  resume cycle을 기다리며, cap 초과/unsafe metadata만 `MANUAL_ACTION`으로
+  전환한다.
 
 `MANUAL_ACTION`/`REVIEW`는 이 9개 실패 분류 어디에도 매핑되지 않는다 -
 `manual-action`은 실패가 아니라 액션 스코프 분류(Task 016)의 결과이고,

@@ -260,6 +260,49 @@ def test_delivery_uses_linked_pr_head_branch() -> None:
     assert result.pull_request.number == 30
 
 
+def test_delivery_comments_existing_pr_evidence_without_replacing_body() -> None:
+    """Regression: a resumed/prepared delivery that reuses an existing PR must
+    publish fresh PR Evidence without replacing the Planner-owned PR body."""
+    client = MagicMock(spec=GitHubWriteClient)
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=lambda repository: VerificationResult(passed=True),
+        commit=MagicMock(),
+        push=MagicMock(),
+        has_changes=lambda repository: True,
+        branch_exists=lambda repository, branch: True,
+        current_branch=lambda repository: "task/026-agent-resume-timeout-recovery",
+    )
+    linked_pull_request = _linked_pull_request(
+        number=51, head_ref="task/026-agent-resume-timeout-recovery", issue_number=52
+    )
+    repository = _repo(Path("/tmp/workspace/myrepo"))
+    issue = _issue(number=52, title="Execute Task 026")
+    evidence = [
+        CheckpointEvidence("CP-026-8", ("test_resumed_execution_completes_existing_pr_delivery",))
+    ]
+
+    result = service.deliver(
+        repository,
+        issue,
+        "devbot/myrepo-52-generated-name",
+        evidence,
+        linked_pull_request=linked_pull_request,
+    )
+
+    assert not hasattr(client, "update_pull_request_body")
+    client.create_comment.assert_called_once()
+    comment = client.create_comment.call_args.args[2]
+    assert "Updated pull request: https://github.com/someone/myrepo/pull/51" in comment
+    assert "Closes #52" in comment
+    assert "CP-026-8" in comment
+    assert "test_resumed_execution_completes_existing_pr_delivery" in comment
+    assert result.pushed is True
+    assert result.pull_request is not None
+    assert result.pull_request.number == 51
+
+
 def test_delivery_rejects_branch_mismatch_before_commit() -> None:
     """Task 023 Scope §7 (PR #44 REQUEST CHANGES, CP-023-7): if the
     worktree is actually checked out on a different branch than the

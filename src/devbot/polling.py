@@ -48,6 +48,7 @@ from __future__ import annotations
 import logging
 import re
 import signal
+import subprocess
 import time
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -74,7 +75,11 @@ from devbot.models import (
     RepositoryConfig,
     TaskState,
 )
-from devbot.reliability import build_diagnostic_report, session_limit_block_reason
+from devbot.reliability import (
+    build_diagnostic_report,
+    render_diagnostic_report,
+    session_limit_block_reason,
+)
 from devbot.review import ReviewService, has_review_marker_for_head
 from devbot.rework import ReworkService, find_unprocessed_devbot_comments
 from devbot.scheduler import select_jobs_with_exclusions
@@ -93,6 +98,7 @@ from devbot.worktree import (
     parse_branch_from_issue_body,
     parse_pull_request_number_from_issue_body,
     render_prepared_workspace_context,
+    render_resume_workspace_context,
 )
 
 _STATE_LABEL_PREFIX = "devbot:"
@@ -113,6 +119,90 @@ _MANUAL_ACTION_OUTCOMES = frozenset(
         AgentOutcome.IMPLEMENTATION_SKIPPED,
     }
 )
+
+RESUME_ATTEMPT_LIMIT = 3
+_RESUME_MARKER_RE = re.compile(
+    r"<!-- devbot-resume:v1 issue=(?P<issue>\d+) pr=(?P<pr>\d+|-) "
+    r"attempt=(?P<attempt>\d+) branch=(?P<branch>[^ ]+) reason=(?P<reason>[^ ]+) -->"
+)
+
+
+def _resume_attempt_from_comments(
+    comments: Sequence[IssueComment | PullRequestComment],
+    *,
+    issue_number: int,
+    branch: str,
+    pr_number: int | None,
+) -> int:
+    expected_pr = str(pr_number) if pr_number is not None else "-"
+    attempts: list[int] = []
+    for comment in comments:
+        for match in _RESUME_MARKER_RE.finditer(comment.body):
+            if (
+                int(match.group("issue")) == issue_number
+                and match.group("branch") == branch
+                and match.group("pr") == expected_pr
+            ):
+                attempts.append(int(match.group("attempt")))
+    return max(attempts, default=0)
+
+
+def _changed_files(repository: RepositoryConfig) -> tuple[str, ...]:
+    if not repository.local_path.exists():
+        return ()
+    completed = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(repository.local_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return ()
+    files: list[str] = []
+    for line in completed.stdout.splitlines():
+        if not line:
+            continue
+        path = line[3:] if len(line) > 3 else line
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        files.append(path)
+    return tuple(files)
+
+
+def _render_resume_marker(
+    *,
+    repository: RepositoryConfig,
+    issue: GitHubIssue,
+    prepared: PreparedWorkspace,
+    attempt: int,
+    reason: str,
+) -> str:
+    pr = prepared.pull_request.number if prepared.pull_request is not None else None
+    report = build_diagnostic_report(
+        repository=repository.full_name,
+        category=FailureCategory.AGENT_EXECUTION_FAILED,
+        issue_number=issue.number,
+        pull_request_number=pr,
+        current_branch=prepared.branch,
+        workspace_status="dirty" if prepared.dirty else "clean",
+        changed_files=_changed_files(prepared.repository),
+        attempt=attempt,
+    )
+    marker = (
+        f"<!-- devbot-resume:v1 issue={issue.number} pr={pr if pr is not None else '-'} "
+        f"attempt={attempt} branch={prepared.branch} reason={reason} -->"
+    )
+    return "\n\n".join(
+        [
+            marker,
+            "[DevBot Resume Recovery]",
+            f"reason: {reason}",
+            f"resume_attempt: {attempt}/{RESUME_ATTEMPT_LIMIT}",
+            "worktree: preserved",
+            render_diagnostic_report(report),
+        ]
+    )
 
 
 class PollingStatus(Enum):
@@ -1259,9 +1349,88 @@ class PollingService:
             else (linked_pull_request.number if linked_pull_request is not None else None)
         )
 
+        issue_comments: Sequence[IssueComment | PullRequestComment] = ()
+        resume_attempt = 0
+        if prepared is not None:
+            try:
+                issue_comments = self.github_client.list_issue_comments(repository, issue.number)
+            except Exception as exc:  # noqa: BLE001 - comments are diagnostic only
+                self.logger.warning(
+                    "Resume marker 댓글 조회 실패 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    exc,
+                )
+            resume_attempt = _resume_attempt_from_comments(
+                issue_comments,
+                issue_number=issue.number,
+                branch=prepared.branch,
+                pr_number=(
+                    prepared.pull_request.number if prepared.pull_request is not None else None
+                ),
+            )
+            if prepared.reused and prepared.dirty:
+                if not prepared.contract_path:
+                    reason = (
+                        "dirty worktree가 있지만 Task contract metadata가 없어 안전하게 "
+                        "resume할 수 없습니다. 기존 작업은 삭제하지 않았습니다."
+                    )
+                    try:
+                        self.state_writer.require_manual_action(  # type: ignore[union-attr]
+                            repository, issue, reason, job_type=JobType.IMPLEMENT
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        return PollingResult(
+                            status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                        )
+                    safe_end(
+                        self.timeline,
+                        repository,
+                        issue.number,
+                        phase="dev",
+                        actor=self.config.implementer_agent,
+                        result="manual-action",
+                        pr=dev_pr_number,
+                        logger=self.logger,
+                    )
+                    return PollingResult(
+                        status=PollingStatus.BLOCKED, task=selected, message=reason
+                    )
+                if resume_attempt >= RESUME_ATTEMPT_LIMIT:
+                    reason = (
+                        f"resume attempt limit exceeded ({resume_attempt}/{RESUME_ATTEMPT_LIMIT}). "
+                        "보존된 worktree를 삭제하지 않고 manual-action으로 전환합니다."
+                    )
+                    try:
+                        self.state_writer.require_manual_action(  # type: ignore[union-attr]
+                            repository, issue, reason, job_type=JobType.IMPLEMENT
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        return PollingResult(
+                            status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+                        )
+                    safe_end(
+                        self.timeline,
+                        repository,
+                        issue.number,
+                        phase="dev",
+                        actor=self.config.implementer_agent,
+                        result="manual-action",
+                        pr=dev_pr_number,
+                        logger=self.logger,
+                    )
+                    return PollingResult(
+                        status=PollingStatus.BLOCKED, task=selected, message=reason
+                    )
+
         prompt = self.build_prompt(work_repository, issue, [])
         if prepared is not None:
             prompt = f"{render_prepared_workspace_context(prepared)}\n\n{prompt}"
+            if prepared.reused and prepared.dirty:
+                prompt = (
+                    f"{render_resume_workspace_context(prepared, attempt=resume_attempt + 1)}"
+                    f"\n\n{prompt}"
+                )
 
         self.logger.info(
             "AgentRunner 실행: implementer=%s dry_run=%s",
@@ -1272,7 +1441,68 @@ class PollingService:
         agent_start = time.monotonic()
         try:
             agent_result = self.implementer_runner.run(work_repository, prompt)
-        except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - must not crash the loop
+        except KeyboardInterrupt as exc:
+            self.logger.error(
+                "AgentRunner 실행 중단 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            if prepared is not None:
+                comment = _render_resume_marker(
+                    repository=repository,
+                    issue=issue,
+                    prepared=prepared,
+                    attempt=resume_attempt + 1,
+                    reason="interrupted",
+                )
+                try:
+                    self.state_writer.comment(repository, issue, comment)  # type: ignore[union-attr]
+                except Exception as comment_exc:  # noqa: BLE001
+                    self.logger.warning("Resume 진단 댓글 기록 실패: %s", comment_exc)
+                restore_failure = self._restore(
+                    repository,
+                    issue,
+                    selected.state,
+                    f"Agent 실행이 중단되어 worktree를 보존하고 resume 대기: {exc}",
+                    selected,
+                    job_type=JobType.IMPLEMENT,
+                )
+                safe_end(
+                    self.timeline,
+                    repository,
+                    issue.number,
+                    phase="dev",
+                    actor=self.config.implementer_agent,
+                    result="resumable",
+                    pr=dev_pr_number,
+                    logger=self.logger,
+                )
+                if restore_failure is not None:
+                    return restore_failure
+                return PollingResult(
+                    status=PollingStatus.AGENT_FAILED,
+                    task=selected,
+                    message=f"resumable_interruption: {exc}",
+                )
+            block_failure = self._block(
+                repository,
+                issue,
+                f"AgentRunner 실행 중단: {exc}",
+                selected,
+                job_type=JobType.IMPLEMENT,
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="blocked",
+                pr=dev_pr_number,
+                logger=self.logger,
+            )
+            if block_failure is not None:
+                return block_failure
+            return PollingResult(status=PollingStatus.AGENT_FAILED, task=selected, message=str(exc))
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "AgentRunner 실행 실패 (%s #%d): %s", selected.repository, selected.number, exc
             )
@@ -1318,6 +1548,72 @@ class PollingService:
         self.logger.info(
             "실행 결과: %s (agent_outcome=%s)", agent_result.message, classification.outcome.value
         )
+
+        if classification.outcome is AgentOutcome.RESUMABLE_INTERRUPTION:
+            if prepared is None:
+                block_failure = self._block(
+                    repository,
+                    issue,
+                    "Agent 실행이 resumable interruption으로 분류되었지만 prepared "
+                    f"worktree가 없음: {classification.matched_reason}",
+                    selected,
+                    job_type=JobType.IMPLEMENT,
+                )
+                safe_end(
+                    self.timeline,
+                    repository,
+                    issue.number,
+                    phase="dev",
+                    actor=self.config.implementer_agent,
+                    result="blocked",
+                    pr=dev_pr_number,
+                    logger=self.logger,
+                )
+                if block_failure is not None:
+                    return block_failure
+                return PollingResult(
+                    status=PollingStatus.AGENT_FAILED,
+                    task=selected,
+                    message=f"resumable_interruption_without_worktree: {agent_result.message}",
+                )
+            attempt = resume_attempt + 1
+            comment = _render_resume_marker(
+                repository=repository,
+                issue=issue,
+                prepared=prepared,
+                attempt=attempt,
+                reason="timeout",
+            )
+            try:
+                self.state_writer.comment(repository, issue, comment)  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 - diagnostics are best-effort
+                self.logger.warning("Resume 진단 댓글 기록 실패: %s", exc)
+            restore_failure = self._restore(
+                repository,
+                issue,
+                selected.state,
+                f"Agent timeout/interruption: worktree 보존 후 resume 대기 "
+                f"(attempt {attempt}/{RESUME_ATTEMPT_LIMIT})",
+                selected,
+                job_type=JobType.IMPLEMENT,
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="resumable",
+                pr=dev_pr_number,
+                logger=self.logger,
+            )
+            if restore_failure is not None:
+                return restore_failure
+            return PollingResult(
+                status=PollingStatus.AGENT_FAILED,
+                task=selected,
+                message=f"resumable_interruption: {agent_result.message}",
+            )
 
         if classification.outcome is AgentOutcome.AGENT_FAILED:
             message = (

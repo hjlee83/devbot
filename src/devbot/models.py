@@ -85,6 +85,7 @@ class AgentOutcome(StrEnum):
     APPROVAL_REQUIRED = "approval_required"
     NETWORK_BLOCKED = "network_blocked"
     SESSION_LIMIT = "session_limit"
+    RESUMABLE_INTERRUPTION = "resumable_interruption"
     REPOSITORY_LOCKED = "repository_locked"
     AGENT_FAILED = "agent_failed"
     UNKNOWN = "unknown"
