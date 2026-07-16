@@ -36,13 +36,18 @@ def _issue(*, labels: tuple[str, ...] = ("devbot:review",)) -> GitHubIssue:
     )
 
 
-def _pull_request(*, head_sha: str = HEAD_SHA) -> PullRequest:
+def _pull_request(
+    *,
+    head_sha: str = HEAD_SHA,
+    labels: tuple[str, ...] = (),
+) -> PullRequest:
     return PullRequest(
         number=16,
         head_ref="feature/add-x",
         head_sha=head_sha,
         body="Closes #17",
         html_url="https://github.com/someone/myrepo/pull/16",
+        labels=labels,
     )
 
 
@@ -523,11 +528,15 @@ def test_merge_ready_applies_exclusive_ready_to_merge_label() -> None:
     )
     service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
 
-    result = _process(service)
+    result = service.process(
+        _repo(),
+        _issue(),
+        _pull_request(labels=("team:backend", "devbot:review", "priority:high")),
+    )
 
     assert result.issue_state is TaskState.REVIEW
     write_client.set_pull_request_labels.assert_called_once_with(
-        _repo(), 16, ["devbot:ready-to-merge"]
+        _repo(), 16, ["team:backend", "priority:high", "devbot:ready-to-merge"]
     )
     state_writer.mark_for_review.assert_called_once()
 
@@ -549,10 +558,19 @@ def test_merge_readiness_gate_rejects_incomplete_pr() -> None:
 
 
 def test_stale_merge_ready_result_does_not_mark_pr_ready() -> None:
-    assert has_review_marker_for_head(
-        [_comment(body=f"# Review Summary\n\n{build_review_marker('old-head')}")],
-        HEAD_SHA,
-    ) is False
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+    service.current_head_sha = lambda repository, pull_request: "newer-head"
+
+    result = _process(service)
+
+    assert result.issue_state is TaskState.MANUAL_ACTION
+    assert "next_action=manual-action" in result.diagnostic
+    state_writer.require_manual_action.assert_called_once()
+    write_client.set_pull_request_labels.assert_not_called()
 
 
 def test_review_loop_records_actors_and_cycles_idempotently() -> None:

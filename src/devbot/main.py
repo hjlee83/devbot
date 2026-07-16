@@ -409,6 +409,11 @@ def main(
                     timeline=timeline_service,
                     actor=config.reviewer_agent,
                     logger=logger,
+                    current_head_sha=lambda repository, pull_request: next(
+                        candidate.head_sha
+                        for candidate in github_client.list_pull_requests(repository)
+                        if candidate.number == pull_request.number
+                    ),
                 ),
                 timeline=timeline_service,
                 logger=logger,

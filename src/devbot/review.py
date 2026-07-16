@@ -165,6 +165,16 @@ def _parse_review_status(review_text: str) -> str | None:
 
 
 BuildReviewPromptFn = Callable[[RepositoryConfig, GitHubIssue, PullRequest], str]
+CurrentHeadShaFn = Callable[[RepositoryConfig, PullRequest], str]
+
+
+def _snapshot_head_sha(_repository: RepositoryConfig, pull_request: PullRequest) -> str:
+    """Default current-head source for tests/backward-compatible callers.
+
+    Production polling wires a GitHub-backed verifier so ready-to-merge is
+    checked against the latest PR head immediately before labeling.
+    """
+    return pull_request.head_sha
 
 
 @dataclass
@@ -183,6 +193,7 @@ class ReviewService:
     actor: str | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("devbot"))
     review_loop_limit: int = DEFAULT_REVIEW_LOOP_LIMIT
+    current_head_sha: CurrentHeadShaFn = field(default=_snapshot_head_sha)
 
     def process(
         self,
@@ -353,17 +364,22 @@ class ReviewService:
                     issue_state = TaskState.MANUAL_ACTION
                     timeline_result = "manual-action"
             else:
-                stale_marker = build_review_marker(pull_request.head_sha) not in comment_body
+                try:
+                    current_head_sha = self.current_head_sha(repository, pull_request)
+                except Exception as exc:  # noqa: BLE001 - gate failure, not a crash
+                    current_head_sha = ""
+                    self.logger.warning("현재 PR head 확인 실패: %s", exc)
+                stale_head = current_head_sha != pull_request.head_sha
                 unprocessed_feedback = find_unprocessed_devbot_comments(comments)
                 metadata_ok = (
                     pull_request.number is not None
                     and f"devbot:{TaskState.BLOCKED.value}" not in issue.labels
                     and f"devbot:{TaskState.MANUAL_ACTION.value}" not in issue.labels
                 )
-                if stale_marker or unprocessed_feedback or not metadata_ok:
+                if stale_head or unprocessed_feedback or not metadata_ok:
                     reason = (
                         "MERGE READY 결과가 ready-to-merge 게이트를 통과하지 못했습니다: "
-                        f"stale_head={stale_marker}, "
+                        f"stale_head={stale_head}, "
                         f"unprocessed_feedback={len(unprocessed_feedback)}, "
                         f"metadata_ok={metadata_ok}"
                     )
@@ -378,7 +394,7 @@ class ReviewService:
                         pull_request.number,
                         [
                             label
-                            for label in pull_request_labels(issue)
+                            for label in pull_request_labels(pull_request)
                             if label not in _PR_STATE_LABELS
                         ]
                         + ["devbot:ready-to-merge"],
@@ -424,12 +440,6 @@ class ReviewService:
         )
 
 
-def pull_request_labels(issue: GitHubIssue) -> list[str]:
-    """Best-effort existing label source for tests and issue-like PR data.
-
-    The read model currently does not expose PR labels separately. In
-    production this keeps non-DevBot labels only when the PR was surfaced
-    with labels in issue metadata; otherwise the exclusive DevBot PR state
-    label is still applied deterministically.
-    """
-    return [label for label in issue.labels if not label.startswith("devbot:")]
+def pull_request_labels(pull_request: PullRequest) -> list[str]:
+    """Existing labels on the PR itself, not the linked execution Issue."""
+    return list(pull_request.labels)

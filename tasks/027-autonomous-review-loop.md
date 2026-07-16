@@ -35,6 +35,9 @@ Make the review lifecycle autonomous from successful implementation delivery unt
 - Record configured Implementer/Reviewer actors and cycle transitions in Timeline.
 - Route unsafe, contradictory, or exhausted loops to `devbot:manual-action` without discarding work.
 - Produce diagnostic output that explains the current loop cycle, last outcome, retry count, and next action.
+- Establish a single prepared-workspace invariant: after `WorktreeManager.prepare()` returns a
+  `PreparedWorkspace`, every Agent role must execute exclusively against
+  `PreparedWorkspace.repository` rather than the configured host checkout.
 
 ## Out of Scope
 
@@ -172,6 +175,16 @@ Required test: `test_existing_workflows_remain_compatible_with_autonomous_review
 ### CP-027-13 — Evidence and documentation
 
 Update relevant workflow/state/Timeline documentation, `docs/00-roadmap.md`, PR Evidence, and produce `results/027-autonomous-review-loop.md`.
+
+### CP-027-14 — Prepared workspace invariant
+
+All Agent roles that run after `WorktreeManager.prepare()` use `PreparedWorkspace.repository`.
+Dirty host checkout with a clean prepared worktree succeeds; clean host checkout with a dirty
+prepared worktree fails before Agent execution.
+
+Required tests: `test_review_uses_prepared_pr_worktree_for_workspace_validation`,
+`test_review_rejects_dirty_prepared_worktree_even_when_host_is_clean`,
+`test_autonomous_review_rework_rereview_loop_runs_without_manual_commands`
 
 ## Validation Gate
 

@@ -16,6 +16,8 @@ Task 027의 review → rework → re-review 자동 루프를 기존 `PollingServ
   독점 갱신한다.
 - 미처리 `@devbot` 피드백, blocked/manual-action metadata, stale marker는
   ready-to-merge를 적용하지 않는다.
+- `devbot:ready-to-merge` 적용 시 PR의 non-DevBot labels를 보존하고, 최신 PR
+  head가 리뷰 대상 head와 다르면 ready label을 적용하지 않고 manual-action으로 보낸다.
 - Timeline actor/cycle 기록은 기존 `safe_start`/`safe_end`를 유지하며,
   `ReviewResult.diagnostic`에 cycle, last outcome, retry count, next action을
   노출한다.
@@ -60,9 +62,12 @@ Task 027의 review → rework → re-review 자동 루프를 기존 `PollingServ
 | REVIEW worktree regression | `test_review_uses_prepared_pr_worktree_for_workspace_validation` |
 | Prepared dirty rejection | `test_review_rejects_dirty_prepared_worktree_even_when_host_is_clean` |
 | Full loop regression | `test_autonomous_review_rework_rereview_loop_runs_without_manual_commands` |
+| PR label preservation | `test_merge_ready_applies_exclusive_ready_to_merge_label` |
+| Current-head gate | `test_stale_merge_ready_result_does_not_mark_pr_ready` |
 
 ## 검증 결과
 
+- `python3 -m uv run pytest tests/test_review.py::test_merge_ready_applies_exclusive_ready_to_merge_label tests/test_review.py::test_stale_merge_ready_result_does_not_mark_pr_ready tests/test_github_client.py::test_list_pull_requests_follows_pagination_and_parses_head_ref -q` 성공: 3 passed.
 - `python3 -m uv run pytest tests/test_polling.py::test_review_uses_prepared_pr_worktree_for_workspace_validation tests/test_polling.py::test_review_rejects_dirty_prepared_worktree_even_when_host_is_clean tests/test_polling.py::test_autonomous_review_rework_rereview_loop_runs_without_manual_commands tests/test_review.py::test_autonomous_review_loop_supports_multiple_cycles -q` 성공: 4 passed.
 - `python3 -m uv run ruff check .` 성공.
 - `python3 -m uv run pytest -q` 성공: 416 passed.
@@ -90,7 +95,9 @@ Task 027의 review → rework → re-review 자동 루프를 기존 `PollingServ
 - 두 번째 cycle: 이전 head marker가 있는 comments와 새 head에서 `cycle=2`
   diagnostic이 생성되는 테스트로 확인했다.
 - Current-head MERGE READY: current head marker가 포함된 결과만
-  `devbot:ready-to-merge` PR 라벨을 적용한다.
+  `devbot:ready-to-merge` PR 라벨을 적용한다. `ReviewService.current_head_sha`는
+  production polling에서 GitHub 최신 PR head를 재조회하도록 wiring되어 stale
+  MERGE READY가 라벨을 쓰지 못하게 한다.
 - Stale/failed gate: stale marker 또는 미처리 피드백은 ready-to-merge를 적용하지
   않는다.
 - Loop exhaustion: review marker 수가 기본 limit을 초과하면 Reviewer를 실행하지
