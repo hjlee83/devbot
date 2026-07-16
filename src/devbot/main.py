@@ -19,6 +19,7 @@ import logging
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
+from importlib.metadata import version as package_version
 from pathlib import Path
 
 from devbot.agents import build_agent_runner
@@ -201,6 +202,11 @@ def _run_worktree_command(args: argparse.Namespace, config: DevBotConfig) -> int
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="devbot")
     parser.add_argument(
+        "--version",
+        action="store_true",
+        help="DevBot 패키지 버전을 출력하고 종료합니다.",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="한 번만 폴링하고 종료합니다.",
@@ -326,6 +332,10 @@ def main(
     repositories_path: Path | str | None = None,
 ) -> int:
     args = _parse_args(argv)
+    if args.version:
+        print(f"devbot {package_version('devbot')}")
+        return 0
+
     logger = _configure_logging()
 
     try:

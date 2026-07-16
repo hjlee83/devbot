@@ -172,3 +172,7 @@
       `devbot:ready-to-merge`로 독점 갱신하며, 미처리 피드백이나 안전하지 않은
       metadata 상태는 ready 표시 대신 manual-action 진단을 남긴다
       (`results/027-autonomous-review-loop.md`).
+- [x] Task 028: CLI version command. `devbot --version`이 패키지
+      metadata의 단일 버전 소스에서 값을 읽고, `.env`/repository config,
+      daemon lock, GitHub client, polling service, Agent runner 초기화 없이
+      즉시 출력 후 종료한다(`results/028-cli-version-command.md`).
