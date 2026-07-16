@@ -43,8 +43,7 @@
 - CP-026-9: `test_unsafe_resume_is_rejected_without_deleting_work`
 - CP-026-10: `test_existing_workflows_compatible_with_resume_recovery`
 - CP-026-11: 문서 및 Result 갱신
-- Delivery regression: `test_delivery_updates_existing_pr_body_with_checkpoint_evidence`
-- GitHub write regression: `test_update_pull_request_body_sends_patch_with_body`
+- Delivery regression: `test_delivery_comments_existing_pr_evidence_without_replacing_body`
 
 ## 검증 결과
 
@@ -54,7 +53,7 @@
 - `PYTHONPATH=src /Users/luna/workspace/devbot/.venv/bin/python -m ruff check .` 통과.
 - `PYTHONPATH=src /Users/luna/workspace/devbot/.venv/bin/devbot doctor` 실행: 명령은 동작했으나 현재 환경의 `/tmp/devbot.lock` 점유, GitHub DNS 제한, 원본 checkout의 `.env.backup.20260716-075550` 미커밋 파일로 `safe_to_start: no`.
 - `PYTHONPATH=src /Users/luna/workspace/devbot/.venv/bin/devbot --once --dry-run` 실행: 현재 환경의 `/tmp/devbot.lock` 점유로 시작 전 실패.
-- Delivery failure 조사 중 기존 PR 재사용 경로의 PR Evidence body 미갱신 회귀를 재현하고 수정했다. 기존 PR delivery는 이제 commit/push 후 `PATCH /pulls/{number}`로 PR body를 최신 checkpoint evidence로 갱신한다.
+- Delivery failure 조사 중 기존 PR 재사용 경로의 Evidence 미갱신 회귀를 재현하고 수정했다. 리뷰 반영 후 기존 PR delivery는 Planner가 작성한 PR body를 덮어쓰지 않고, commit/push 후 최신 checkpoint evidence를 Issue/PR comment로 남긴다.
 
 ## TODO
 

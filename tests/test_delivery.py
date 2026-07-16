@@ -260,10 +260,9 @@ def test_delivery_uses_linked_pr_head_branch() -> None:
     assert result.pull_request.number == 30
 
 
-def test_delivery_updates_existing_pr_body_with_checkpoint_evidence() -> None:
+def test_delivery_comments_existing_pr_evidence_without_replacing_body() -> None:
     """Regression: a resumed/prepared delivery that reuses an existing PR must
-    refresh the PR Evidence body after commit and push instead of only leaving
-    an Issue comment."""
+    publish fresh PR Evidence without replacing the Planner-owned PR body."""
     client = MagicMock(spec=GitHubWriteClient)
     service = DeliveryService(
         client=client,
@@ -292,13 +291,13 @@ def test_delivery_updates_existing_pr_body_with_checkpoint_evidence() -> None:
         linked_pull_request=linked_pull_request,
     )
 
-    client.update_pull_request_body.assert_called_once()
-    assert client.update_pull_request_body.call_args.args[0] is repository
-    assert client.update_pull_request_body.call_args.args[1] == 51
-    updated_body = client.update_pull_request_body.call_args.args[2]
-    assert "Closes #52" in updated_body
-    assert "CP-026-8" in updated_body
-    assert "test_resumed_execution_completes_existing_pr_delivery" in updated_body
+    assert not hasattr(client, "update_pull_request_body")
+    client.create_comment.assert_called_once()
+    comment = client.create_comment.call_args.args[2]
+    assert "Updated pull request: https://github.com/someone/myrepo/pull/51" in comment
+    assert "Closes #52" in comment
+    assert "CP-026-8" in comment
+    assert "test_resumed_execution_completes_existing_pr_delivery" in comment
     assert result.pushed is True
     assert result.pull_request is not None
     assert result.pull_request.number == 51
