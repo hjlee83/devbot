@@ -187,6 +187,17 @@ def test_job_uses_isolated_worktree(tmp_path: Path) -> None:
     assert _git_output("status", "--porcelain", cwd=repository.local_path).strip() == ""
 
 
+def test_prepared_workspace_preserves_host_checkout_path(tmp_path: Path) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=59)
+
+    prepared = manager.prepare(repository, issue, None)
+
+    assert prepared.repository.local_path == prepared.worktree_path
+    assert prepared.repository.host_checkout_path == repository.local_path
+
+
 # ---- CP-023-4: existing branch reuse ----
 
 

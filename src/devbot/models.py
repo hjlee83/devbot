@@ -118,6 +118,7 @@ class RepositoryConfig:
     enabled: bool
     local_path: Path
     default_branch: str = "main"
+    host_checkout_path: Path | None = None
 
     @property
     def full_name(self) -> str:
