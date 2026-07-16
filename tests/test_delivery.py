@@ -278,7 +278,7 @@ def test_delivery_comments_existing_pr_evidence_without_replacing_body() -> None
         number=51, head_ref="task/026-agent-resume-timeout-recovery", issue_number=52
     )
     repository = _repo(Path("/tmp/workspace/myrepo"))
-    issue = _issue(number=52, title="Execute Task 026")
+    issue = _issue(number=52, title="Task 026")
     evidence = [
         CheckpointEvidence("CP-026-8", ("test_resumed_execution_completes_existing_pr_delivery",))
     ]

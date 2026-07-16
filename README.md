@@ -1,12 +1,43 @@
 # DevBot
 
-DevBot is a local, GitHub-issue-driven coding agent orchestrator. It polls
-managed repositories, enforces one globally active task, runs a configured
-coding agent (Codex first), and drives the change through to a reviewable
-PR. See `docs/` for the full design and `tasks/` for the task contracts
-that drive implementation.
+DevBot is a local, GitHub-issue-driven coding agent orchestrator.
+Planning and architecture decisions are intentionally human-driven. After an
+approved Task receives `devbot:ready`, DevBot runs the configured Implementer
+and Reviewer roles and drives the existing Task Issue, Branch, Contract, and
+Pull Request through implementation, review, rework, and a merge-ready state.
+
+The stable operating principles are defined in [`CONSTITUTION.md`](CONSTITUTION.md).
+Agent execution rules are defined in [`AGENTS.md`](AGENTS.md). See `docs/` for
+the detailed design and `tasks/` for the Task Contracts that drive
+implementation.
+
+## Architecture at a glance
+
+```text
+Project owner + ChatGPT
+  idea → architecture → scope → acceptance criteria → approval
+
+Planner
+  one Task Issue + one Branch + one Contract + one Pull Request
+
+DevBot
+  IMPLEMENT → REVIEW → REWORK when required → REVIEW → READY TO MERGE
+
+Operator
+  final merge decision
+```
+
+Key invariants:
+
+- planning is human-first;
+- one Task uses one Issue, one Branch, one Contract, and one Pull Request;
+- separate Execution Issues are not used;
+- after workspace preparation, every Agent and execution stage uses the same
+  `PreparedWorkspace`;
+- merge remains manual unless the project owner explicitly changes that policy.
 
 ## Requirements
+
 - Python 3.13
 - [`uv`](https://docs.astral.sh/uv/)
 
@@ -21,8 +52,8 @@ cp .env.example .env
 
 `UV_CACHE_DIR` defaults to `.uv-cache` in `.env.example` and the bundled
 verification scripts. Keeping the `uv` cache inside the repository avoids
-permission errors in sandboxed review/agent environments that cannot read
-or write `~/.cache/uv`.
+permission errors in sandboxed review/agent environments that cannot read or
+write `~/.cache/uv`.
 
 Edit `config/repositories.yaml` to list the repositories DevBot manages.
 `local_path` for each repository is derived as `WORKSPACE_ROOT / repo`.
@@ -37,60 +68,57 @@ uv run devbot                    # continuous polling until SIGINT/SIGTERM
 uv run devbot --once --verbose   # same, but force DEBUG-level logs for this run only
 ```
 
-Each iteration: if any repository has a `devbot:working` Issue, skip. If a
-`devbot:rework` Issue has an unprocessed `@devbot` PR comment, rework it on
-the *existing* branch/PR (no new branch or PR); if it has none, wait. If a
-`devbot:review` Issue's PR head has no auto-review marker yet, review it -
-`REQUEST CHANGES` moves the Issue to `devbot:rework`, `MERGE READY` leaves
-it `devbot:review` for a human Merge. Otherwise select the
-highest-priority (then oldest) `devbot:ready` Issue across every enabled
-repository, claim it (`ready` -> `working`), validate its local Git
-workspace, and hand it to the configured `AgentRunner`. A claim always
-happens before the workspace check; if that check fails, the claim is
-undone back to the Issue's prior state instead of leaving it `working`
-(Task 014). On success, verify (`uv run ruff check .` then `uv run
-pytest` in the target repository), commit, push the task branch, open a
-PR, and move the Issue to `review`. On agent, verification, or delivery
-failure, move the Issue to `blocked` with the failure as a comment - and
-any unexpected exception during a claimed Job is caught and blocked too,
-never left `working`. `DRY_RUN=true` (the default; `--dry-run` forces it)
-still runs verification but performs no agent process, Git write, or
-GitHub write. See `docs/08-beta-runbook.md` for a walkthrough and an
-operational checklist.
+Each iteration enforces one globally active Task and selects the next runnable
+Job from the managed repositories. DevBot reuses the Task's existing Branch and
+Pull Request, prepares an isolated worktree, and runs the configured Agent role
+against that prepared workspace.
+
+The normal workflow is:
+
+```text
+devbot:ready
+→ IMPLEMENT
+→ devbot:review
+→ REVIEW
+→ devbot:rework when changes are requested
+→ REVIEW after successful rework
+→ devbot:ready-to-merge
+```
+
+Claims occur before workspace preparation. If preparation or validation fails,
+DevBot restores or safely transitions the Issue instead of leaving it stuck in
+`devbot:working`. Verification and delivery failures produce visible
+diagnostics and preserve work. `DRY_RUN=true` is the default; `--dry-run`
+forces it for one run and prevents Agent, Git, and GitHub writes.
+
+See `docs/08-beta-runbook.md` for the operational walkthrough and checklist.
 
 Verification commands are currently hardcoded to `uv run ruff check .` and
-`uv run pytest` (see `src/devbot/delivery.py`), so target repositories must
-themselves be `uv`-managed Python projects with those commands available.
+`uv run pytest` (see `src/devbot/delivery.py`), so target repositories must be
+`uv`-managed Python projects with those commands available.
 
 ## Logging
 
-`LOG_LEVEL` (`.env`, default `INFO`) sets the daemon's log level; allowed
-values are `DEBUG`, `INFO`, `WARNING`, `ERROR` (case-insensitive - an
-unrecognized value fails config loading with a clear error instead of
-silently falling back). `--verbose` overrides it to `DEBUG` for that one
-process only, without touching `.env` or the environment.
+`LOG_LEVEL` (`.env`, default `INFO`) sets the daemon's log level; allowed values
+are `DEBUG`, `INFO`, `WARNING`, `ERROR` (case-insensitive). An unrecognized
+value fails configuration loading instead of silently falling back.
+`--verbose` overrides the level to `DEBUG` for that process only.
 
-- `INFO` (default): startup configuration, managed repositories, cycle
-  start/end summaries, one **Queue Summary** per cycle, the **Selected**
-  job (if any), the normalized **Cycle Result**, and failures - what an
-  operator needs during normal operation.
-- `DEBUG`: adds per-repository search conditions and result counts, every
-  candidate Job found or excluded (with a structured reason code such as
-  `repository_busy`, `already_reviewed_head`, or `concurrency_limit`), and
-  per-stage elapsed time within a Job.
+- `INFO`: startup configuration, managed repositories, cycle summaries, one
+  **Queue Summary**, the selected Job, the normalized **Cycle Result**, and
+  failures.
+- `DEBUG`: adds per-repository search conditions, candidate inclusion/exclusion
+  reasons, and per-stage elapsed time.
 
-Every log line in one polling cycle shares a `cycle_id` so related lines
-can be correlated. Zero *managed* (enabled) repositories logs a distinct
-`no_managed_repositories` diagnostic and skips that cycle without any
-GitHub call - it is never conflated with "no ready Issue found". Secrets
-(`GITHUB_TOKEN`, `Authorization`/`Bearer` header values) are never written
-to any log line, at any level. See `docs/08-beta-runbook.md` for a
-diagnostic walkthrough.
+Every log line in one polling cycle shares a `cycle_id`. Zero managed
+repositories produces a distinct `no_managed_repositories` diagnostic and no
+GitHub call. Secrets such as `GITHUB_TOKEN` and authorization header values are
+never written to logs. See `docs/08-beta-runbook.md` for a diagnostic
+walkthrough.
 
-### Queue Summary / Selected / Cycle Result (Task 020)
+### Queue Summary / Selected / Cycle Result
 
-Each cycle emits exactly one operator-facing report with three parts,
-instead of the several overlapping free-form lines earlier versions logged:
+Each cycle emits one operator-facing report:
 
 ```text
 Queue Summary
@@ -112,22 +140,15 @@ Cycle Result
   elapsed: 402ms
 ```
 
-- **Queue Summary**: a count for every stable workflow state
-  (`ready`/`review`/`rework`/`blocked`/`manual-action`/`working`) across
-  every managed repository. Each Issue is counted into exactly one bucket,
-  even if its GitHub labels are ambiguous (`state_label_conflict`, DEBUG,
-  logs the anomaly without changing the count).
-- **Selected**: only present when a Job was actually chosen to run this
-  cycle - repository, Issue, PR (when already known), and job type.
-- **Cycle Result**: one normalized, uppercase outcome -
-  `NO_RUNNABLE_TASK` when nothing was runnable, `IMPLEMENT`/`REVIEW`/
-  `REWORK` when a Job ran and succeeded, or the Job's `FailureCategory`
-  (e.g. `AGENT_EXECUTION_FAILED`) when it failed - independent of the
-  Queue Summary's counts.
+- **Queue Summary** counts every stable workflow state across managed
+  repositories. Each Issue is counted once.
+- **Selected** appears only when a Job was chosen and identifies the repository,
+  Issue, Pull Request when known, and Job type.
+- **Cycle Result** reports one normalized outcome such as
+  `NO_RUNNABLE_TASK`, `IMPLEMENT`, `REVIEW`, `REWORK`, or a failure category.
 
-DEBUG-level candidate diagnostics (`repository_search`, `candidate_found`,
-`candidate_excluded`) and the existing Task 013 `cycle_start`/`cycle_end`
-structured logs are unchanged.
+DEBUG candidate diagnostics and structured cycle logs remain available for
+investigation.
 
 ## Development
 
@@ -141,24 +162,30 @@ uv run devbot --once --dry-run
 ## Project layout
 
 ```text
+CONSTITUTION.md          stable project principles
+AGENTS.md                AI Agent rules and SOPs
+docs/                    architecture, standards, runbooks, decisions
+tasks/                   Task Contracts
+results/                 implementation evidence and handoff records
 src/devbot/
   main.py                CLI entry point (--once / --dry-run / continuous)
-  config.py               .env + config/repositories.yaml loader
-  lock.py                 single-process file lock
-  models.py                configuration and queue data structures
-  queue.py                 global queue selection rules (no network)
-  github_client.py         authenticated GitHub REST API read client (users, Issues, comments)
-  github_write_client.py   authenticated GitHub REST API write client (labels, comments, PRs, reactions)
-  issue_state.py            devbot:* label state machine (claim/restore/block/mark_for_review/send_to_rework)
-  workspace.py             Git workspace checks, branch naming, prompt building
-  delivery.py              verify -> commit -> push -> PR -> Issue comment
-  rework.py                 @devbot PR feedback -> rework on the same branch/PR
-  polling.py               PollingService (one iteration, wired end to end) and the continuous loop
-  observability.py          structured startup/cycle/Job logging, secret redaction, LOG_LEVEL/--verbose support
+  config.py              .env + config/repositories.yaml loader
+  lock.py                single-process file lock
+  models.py              configuration and queue data structures
+  queue.py               global queue selection rules (no network)
+  github_client.py       authenticated GitHub REST API read client
+  github_write_client.py authenticated GitHub REST API write client
+  issue_state.py         devbot:* label state machine
+  workspace.py           Git workspace checks, naming, prompt building
+  worktree.py            host-managed PreparedWorkspace lifecycle
+  delivery.py            verify → commit → push → PR → Issue updates
+  rework.py              review feedback → rework on the same Branch/PR
+  polling.py             polling, Job selection, execution, review loop
+  observability.py       structured logging and secret redaction
   agents/
-    base.py               AgentRunner interface
-    codex.py               Codex CLI runner (dry-run by default)
+    base.py              AgentRunner interface
+    codex.py             Codex CLI runner
 ```
 
-Target repositories supply their own root `AGENTS.md`; DevBot does not
-duplicate project-specific rules into its own configuration.
+Target repositories may supply their own root `AGENTS.md`. DevBot does not
+copy target-specific rules into configuration.

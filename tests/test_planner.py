@@ -25,8 +25,8 @@ from devbot.planner import (
     canonical_result_path,
     contract_file_exists,
     find_duplicate_workspaces,
-    render_execution_issue_body,
     render_pr_body,
+    render_task_issue_body,
     resolve_review_entry,
     validate_naming_and_numbering,
     validate_planner_workspace,
@@ -64,7 +64,7 @@ def test_planner_role_contract() -> None:
 
     assert "branch_creation" in PLANNER_RESPONSIBILITIES
     assert "pull_request_creation" in PLANNER_RESPONSIBILITIES
-    assert "execution_issue_creation" in PLANNER_RESPONSIBILITIES
+    assert "task_issue_creation" in PLANNER_RESPONSIBILITIES
     assert "cross_linking" in PLANNER_RESPONSIBILITIES
     assert "continue_on_existing_branch_and_pr" in IMPLEMENTER_RESPONSIBILITIES
     assert "return_merge_ready_or_request_changes" in REVIEWER_RESPONSIBILITIES
@@ -79,7 +79,7 @@ def test_planner_role_contract() -> None:
         "Branch 생성",
         "계약서 파일 생성",
         "Pull Request 생성",
-        "실행용 Issue 생성",
+        "Task Issue 생성",
         "코드를 수정하거나 Merge하지 않는다",
         "최종 Merge를 수행한다",
     ]:
@@ -94,7 +94,7 @@ def test_planner_role_contract() -> None:
 
 def test_single_task_workspace_policy() -> None:
     text = PLANNER_DOC.read_text(encoding="utf-8")
-    assert "1 Task = 1 Branch = 1 Pull Request" in text
+    assert "1 Task = 1 Issue = 1 Branch = 1 Contract = 1 Pull Request" in text
     assert "단일 Task 작업공간 정책" in text or "단일 Task 추적 정책" in text
 
     # Same branch/PR reused across cycles is not flagged - only a genuine
@@ -130,7 +130,7 @@ def test_planner_naming_and_numbering_policy() -> None:
         "Task 022: Planner Workflow Standard"
     )
     assert canonical_issue_title(22, "Planner Workflow Standard") == (
-        "Execute Task 022: Planner Workflow Standard"
+        "Task 022: Planner Workflow Standard"
     )
 
     # Happy path: a workspace that matches canonical naming validates clean,
@@ -159,8 +159,8 @@ def test_planner_naming_and_numbering_policy() -> None:
     assert "독립적인 식별자" in text
 
 
-def test_execution_issue_contract_template() -> None:
-    body = render_execution_issue_body(SAMPLE_WORKSPACE)
+def test_task_issue_contract_template() -> None:
+    body = render_task_issue_body(SAMPLE_WORKSPACE)
 
     assert "tasks/022-planner-workflow-standard.md" in body
     assert "task/022-planner-workflow-standard" in body
@@ -173,7 +173,7 @@ def test_execution_issue_contract_template() -> None:
 
     # Boundary: a single Checkpoint renders without "through".
     single_checkpoint = replace(SAMPLE_WORKSPACE, checkpoints=("CP-022-1",))
-    single_body = render_execution_issue_body(single_checkpoint)
+    single_body = render_task_issue_body(single_checkpoint)
     assert "Satisfy CP-022-1." in single_body
     assert "through" not in single_body
 
@@ -189,10 +189,10 @@ def test_planner_pr_contract_template() -> None:
     assert "Closes #43" in body
 
 
-def test_planner_pr_template_includes_execution_issue_closing_link() -> None:
-    body = render_pr_body(SAMPLE_WORKSPACE, scope="Planner PR links execution Issue.")
+def test_planner_pr_template_includes_task_issue_closing_link() -> None:
+    body = render_pr_body(SAMPLE_WORKSPACE, scope="Planner PR links Task Issue.")
 
-    assert "- Execution Issue: #43" in body
+    assert "- Task Issue: #43" in body
     assert "Closes #43" in body
 
 
@@ -280,7 +280,7 @@ def test_planner_contract_missing_evidence() -> None:
     assert "missing Checkpoints" in errors
     assert "missing Validation Gate" in errors
     assert "missing Result path" in errors
-    assert "missing execution Issue cross-link" in errors
+    assert "missing Task Issue cross-link" in errors
     assert "missing Pull Request cross-link" in errors
 
     result = validate_planner_workspace(incomplete)
@@ -293,7 +293,7 @@ def test_planner_contract_missing_evidence() -> None:
     # Boundary: only the Issue cross-link is missing.
     only_missing_issue = replace(SAMPLE_WORKSPACE, issue_number=None)
     errors = validate_workspace_evidence(only_missing_issue)
-    assert errors == ["missing execution Issue cross-link"]
+    assert errors == ["missing Task Issue cross-link"]
 
     # Failure path (Task 022 Scope §6: "missing contract file" is its own,
     # separate detection item from cross-links): the contract file itself

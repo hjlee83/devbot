@@ -427,7 +427,7 @@ def test_parse_contract_and_result_path_from_issue_body() -> None:
     )
 
 
-def test_execution_issue_pr_number_is_parsed() -> None:
+def test_task_issue_pr_number_is_parsed() -> None:
     body = (
         "Implement Task 025 according to the approved contract.\n\n"
         "- Contract: `tasks/025-planner-linked-pr-resolution.md`\n"

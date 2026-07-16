@@ -115,7 +115,7 @@ class GitHubWriteClient:
         GitHub exposes PR labels through the Issues API because every PR
         is also an issue conversation. Keeping this as a named method lets
         callers make PR-state writes without pretending they are changing
-        the execution Issue.
+        the linked Task Issue.
         """
         self.set_labels(repository, pull_request_number, labels)
 

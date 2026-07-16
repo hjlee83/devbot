@@ -123,9 +123,9 @@
       구현 커밋 증거가 있을 때만 허용한다(`src/devbot/agent_outcome.py`,
       `results/021-agent-outcome-classification.md`).
 - [x] Task 022: Planner workflow standard. Planner-owned contract-first
-      워크플로(1 Task = 1 Branch = 1 Pull Request = 1 실행용 Issue)를
+      워크플로(1 Task = 1 Issue = 1 Branch = 1 Contract = 1 Pull Request)를
       저장소 정책으로 고정하고 기계 검증 가능하게 만든다. Planner/
-      Implementer/Reviewer/Operator 역할 경계, 명명·번호 규칙, 실행용
+      Implementer/Reviewer/Operator 역할 경계, 명명·번호 규칙, Task
       Issue/PR 템플릿, 최소 리뷰 진입 계약(`Review PR #<number>.`), 중복
       작업공간·누락 Evidence 검증을 `docs/12-planner-workflow.md`와
       `src/devbot/planner.py`로 도입한다. daemon 자동 폴링 루프에는

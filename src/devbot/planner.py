@@ -1,8 +1,8 @@
 """Task 022: Planner Workflow Standard.
 
 Machine-checkable helpers for the Planner-owned, contract-first workflow
-documented in ``docs/12-planner-workflow.md``: one Task = one branch = one
-Pull Request = one execution Issue, canonical naming, the execution Issue /
+documented in ``docs/12-planner-workflow.md``: one Task = one Issue, one
+branch, one contract, one Pull Request, canonical naming, the Task Issue /
 PR templates, the minimal review entry contract, and workspace validation
 (naming/numbering, missing evidence, duplicate workspaces).
 
@@ -32,7 +32,7 @@ PLANNER_RESPONSIBILITIES: tuple[str, ...] = (
     "branch_creation",
     "contract_file_creation",
     "pull_request_creation",
-    "execution_issue_creation",
+    "task_issue_creation",
     "cross_linking",
 )
 
@@ -81,7 +81,7 @@ def canonical_pr_title(task_number: int, title: str) -> str:
 
 
 def canonical_issue_title(task_number: int, title: str) -> str:
-    return f"Execute Task {task_number:03d}: {title}"
+    return f"Task {task_number:03d}: {title}"
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ def validate_workspace_evidence(
     if not workspace.result_path:
         errors.append("missing Result path")
     if workspace.issue_number is None:
-        errors.append("missing execution Issue cross-link")
+        errors.append("missing Task Issue cross-link")
     if workspace.pr_number is None:
         errors.append("missing Pull Request cross-link")
 
@@ -247,7 +247,7 @@ def validate_planner_workspace(
 
 
 # ---------------------------------------------------------------------------
-# Execution Issue template (CP-022-4, docs/12-planner-workflow.md section 5)
+# Task Issue template (CP-022-4, docs/12-planner-workflow.md section 5)
 # ---------------------------------------------------------------------------
 
 
@@ -259,8 +259,8 @@ def _checkpoint_range_label(checkpoints: tuple[str, ...]) -> str:
     return f"{checkpoints[0]} through {checkpoints[-1]}"
 
 
-def render_execution_issue_body(workspace: PlannerWorkspace) -> str:
-    """Render the canonical execution Issue body for a Planner-owned
+def render_task_issue_body(workspace: PlannerWorkspace) -> str:
+    """Render the canonical Task Issue body for a Planner-owned
     workspace (CP-022-4). Contains contract path, branch name, PR number,
     Checkpoint range, Validation Gate requirement, Result path, and an
     explicit prohibition on creating another branch or PR."""
@@ -289,8 +289,8 @@ def render_execution_issue_body(workspace: PlannerWorkspace) -> str:
 
 def render_pr_body(workspace: PlannerWorkspace, *, scope: str) -> str:
     """Render the canonical Planner-created PR body (CP-022-5). Contains the
-    contract path, branch/PR continuation policy, scope, and the execution
-    Issue link."""
+    contract path, branch/PR continuation policy, scope, and the Task Issue
+    link."""
     return (
         "## Summary\n\n"
         f"Define and implement Task {workspace.task_number:03d}: {workspace.title}.\n\n"
@@ -303,7 +303,7 @@ def render_pr_body(workspace: PlannerWorkspace, *, scope: str) -> str:
         "this same branch and PR.\n\n"
         f"- Branch: `{workspace.branch}`\n"
         f"- Pull Request: #{workspace.pr_number}\n"
-        f"- Execution Issue: #{workspace.issue_number}\n\n"
+        f"- Task Issue: #{workspace.issue_number}\n\n"
         "Do not create another implementation branch or PR.\n\n"
         f"Closes #{workspace.issue_number}\n"
     )
