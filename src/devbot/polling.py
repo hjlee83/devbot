@@ -2226,7 +2226,7 @@ class PollingService:
             )
 
         issue = issues_by_key[(selected.repository, selected.number)]
-        linked_pull_request, _pr_comments, error = self._fetch_linked_pull_request_and_comments(
+        linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
             repository, selected, issue, cycle_id
         )
         if error is not None:
@@ -2235,7 +2235,7 @@ class PollingService:
         review_start = time.monotonic()
         try:
             review_result = self.review_service.process(  # type: ignore[union-attr]
-                repository, issue, linked_pull_request
+                repository, issue, linked_pull_request, comments=pr_comments
             )
         except ClaimConflictError as exc:  # CP-014-8: another Job already owns this Issue
             self.logger.warning(

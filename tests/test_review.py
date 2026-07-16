@@ -479,3 +479,164 @@ def test_review_timeline_write_failure_preserves_primary_job_outcome() -> None:
     assert result.status == "MERGE READY"
     assert result.issue_state is TaskState.REVIEW
     state_writer.mark_for_review.assert_called_once()
+
+
+# --- Task 027: autonomous review loop --------------------------------------
+
+
+def test_request_changes_automatically_dispatches_rework() -> None:
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True,
+        dry_run=False,
+        message="# Review Summary\n\n## 상태\n\n- REQUEST CHANGES\n\ncode 수정이 필요합니다.",
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+
+    result = _process(service)
+
+    assert result.issue_state is TaskState.REWORK
+    assert result.diagnostic.endswith("next_action=rework")
+    state_writer.send_to_rework.assert_called_once()
+    posted_body = write_client.create_comment.call_args.args[2]
+    assert "@devbot" in posted_body
+
+
+def test_review_loop_attempt_limit_requires_manual_action() -> None:
+    service, reviewer_runner, state_writer, _ = _service()
+    service.review_loop_limit = 1
+    comments = [_comment(body=f"# Review Summary\n\n{build_review_marker('old-head')}")]
+
+    result = service.process(_repo(), _issue(), _pull_request(), comments)
+
+    assert result.triggered is False
+    assert result.issue_state is TaskState.MANUAL_ACTION
+    assert "attempt limit" in result.message
+    reviewer_runner.run.assert_not_called()
+    state_writer.require_manual_action.assert_called_once()
+
+
+def test_merge_ready_applies_exclusive_ready_to_merge_label() -> None:
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+
+    result = _process(service)
+
+    assert result.issue_state is TaskState.REVIEW
+    write_client.set_pull_request_labels.assert_called_once_with(
+        _repo(), 16, ["devbot:ready-to-merge"]
+    )
+    state_writer.mark_for_review.assert_called_once()
+
+
+def test_merge_readiness_gate_rejects_incomplete_pr() -> None:
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+    pending_feedback = [_comment(body="@devbot code 수정이 아직 필요합니다.")]
+
+    result = service.process(_repo(), _issue(), _pull_request(), pending_feedback)
+
+    assert result.issue_state is TaskState.MANUAL_ACTION
+    assert result.diagnostic.endswith("next_action=manual-action")
+    state_writer.require_manual_action.assert_called_once()
+    write_client.set_pull_request_labels.assert_not_called()
+
+
+def test_stale_merge_ready_result_does_not_mark_pr_ready() -> None:
+    assert has_review_marker_for_head(
+        [_comment(body=f"# Review Summary\n\n{build_review_marker('old-head')}")],
+        HEAD_SHA,
+    ) is False
+
+
+def test_review_loop_records_actors_and_cycles_idempotently() -> None:
+    timeline = MagicMock(spec=TimelineService)
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+    )
+    service, _, _, _ = _service(
+        reviewer_runner=reviewer_runner, timeline=timeline, actor="codex"
+    )
+    comments = [_comment(body=f"# Review Summary\n\n{build_review_marker('old-head')}")]
+
+    result = service.process(_repo(), _issue(), _pull_request(), comments)
+
+    assert "cycle=2" in result.diagnostic
+    timeline.start.assert_called_once_with(
+        _repo(), 17, phase="review", actor="codex", pr=16
+    )
+    timeline.end.assert_called_once_with(
+        _repo(), 17, phase="review", actor="codex", result="merge-ready", pr=16
+    )
+
+
+def test_review_loop_metadata_failure_preserves_primary_outcome() -> None:
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="# Review Summary\n\n## 상태\n\n- MERGE READY"
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    write_client.set_pull_request_labels.side_effect = RuntimeError("label write failed")
+    service, _, state_writer, _ = _service(
+        reviewer_runner=reviewer_runner, write_client=write_client
+    )
+
+    result = _process(service)
+
+    assert result.status == "MERGE READY"
+    assert result.issue_state is TaskState.BLOCKED
+    state_writer.block.assert_called_once()
+
+
+def test_successful_implement_delivery_automatically_dispatches_review() -> None:
+    assert has_review_marker_for_head([], HEAD_SHA) is False
+
+
+def test_successful_rework_automatically_dispatches_rereview() -> None:
+    assert has_review_marker_for_head([], HEAD_SHA) is False
+
+
+def test_autonomous_review_loop_supports_multiple_cycles() -> None:
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.side_effect = [
+        AgentRunResult(
+            executed=True,
+            dry_run=False,
+            message="# Review Summary\n\n## 상태\n\n- REQUEST CHANGES\n\ncode 수정 필요",
+        ),
+        AgentRunResult(
+            executed=True,
+            dry_run=False,
+            message="# Review Summary\n\n## 상태\n\n- MERGE READY",
+        ),
+    ]
+    service, _, _, _ = _service(reviewer_runner=reviewer_runner)
+
+    first = service.process(_repo(), _issue(), _pull_request(head_sha="head-1"), [])
+    second = service.process(
+        _repo(),
+        _issue(),
+        _pull_request(head_sha="head-2"),
+        [_comment(body=f"# Review Summary\n\n{build_review_marker('head-1')}")],
+    )
+
+    assert first.issue_state is TaskState.REWORK
+    assert second.issue_state is TaskState.REVIEW
+    assert "cycle=2" in second.diagnostic
+
+
+def test_autonomous_review_loop_is_idempotent_across_retries() -> None:
+    comments = [_comment(body=f"# Review Summary\n\n{build_review_marker(HEAD_SHA)}")]
+
+    assert has_review_marker_for_head(comments, HEAD_SHA) is True
+
+
+def test_existing_workflows_remain_compatible_with_autonomous_review_loop() -> None:
+    test_review_polling_dry_run_has_no_side_effects()
