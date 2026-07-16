@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from devbot.delivery import (
+    DEFAULT_VERIFICATION_COMMANDS,
     CheckpointEvidence,
     DeliveryError,
     DeliveryService,
@@ -13,10 +14,12 @@ from devbot.delivery import (
     local_branch_exists,
     push_task_branch,
     repository_has_changes,
+    run_verification_commands,
 )
 from devbot.github_client import GitHubIssue, PullRequest
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
 from devbot.models import RepositoryConfig
+from devbot.validation import ValidationFailureCategory
 
 
 def _repo(local_path: Path, *, default_branch: str = "main") -> RepositoryConfig:
@@ -93,6 +96,44 @@ def test_failed_verification_prevents_commit() -> None:
     push.assert_not_called()
     client.create_pull_request.assert_not_called()
     client.create_comment.assert_not_called()
+
+
+def test_verification_prepares_workspace_environment_and_ignores_host_venv() -> None:
+    repository = _repo(Path("/tmp/prepared-workspace/myrepo"))
+    calls: list[tuple[list[str], str, dict[str, str]]] = []
+
+    def _run(args, *, cwd, env, capture_output, text, check):
+        calls.append((args, cwd, env))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    host_env = {"PATH": "/usr/bin", "VIRTUAL_ENV": "/host/.venv"}
+    with patch.dict("devbot.validation.os.environ", host_env):
+        with patch("devbot.validation.subprocess.run", side_effect=_run):
+            result = run_verification_commands(repository)
+
+    assert result.passed is True
+    assert result.workspace_path == "/tmp/prepared-workspace/myrepo"
+    assert result.commands == (("uv", "sync"), *DEFAULT_VERIFICATION_COMMANDS)
+    assert [call[0] for call in calls] == [list(command) for command in result.commands]
+    assert {call[1] for call in calls} == {"/tmp/prepared-workspace/myrepo"}
+    for _, _, env in calls:
+        assert "VIRTUAL_ENV" not in env
+        assert env["PATH"].startswith("/tmp/prepared-workspace/myrepo/.venv/bin:")
+        assert env["DEVBOT_VALIDATION_WORKSPACE"] == "/tmp/prepared-workspace/myrepo"
+
+
+def test_uv_sync_failure_is_classified_as_environment_failure() -> None:
+    repository = _repo(Path("/tmp/prepared-workspace/myrepo"))
+
+    with patch("devbot.validation.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="uv sync failed")
+        result = run_verification_commands(repository)
+
+    assert result.passed is False
+    assert result.failed_command == ("uv", "sync")
+    assert result.failure_category is ValidationFailureCategory.ENVIRONMENT_PREPARATION_FAILED
+    assert result.output == "uv sync failed"
+    assert mock_run.call_count == 1
 
 
 def test_commit_message_references_issue() -> None:
