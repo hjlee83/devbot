@@ -2061,6 +2061,91 @@ class PollingService:
             status=PollingStatus.DELIVERED, task=selected, message=delivery_result.message
         )
 
+    def _prepare_pr_workspace_for_agent(
+        self,
+        repository: RepositoryConfig,
+        selected: IssueTask,
+        issue: GitHubIssue,
+        linked_pull_request: PullRequest,
+        cycle_id: str,
+    ) -> tuple[RepositoryConfig, PollingResult | None]:
+        """Resolve the single repository Agent roles must use after prepare.
+
+        Task 027 invariant: once `WorktreeManager.prepare()` returns a
+        `PreparedWorkspace`, Agent roles operate only on
+        `PreparedWorkspace.repository`. REVIEW and REWORK share this helper so
+        they cannot independently fall back to the configured host checkout.
+        IMPLEMENT keeps its own wrapper for claim/restore and Task 026 dirty
+        resume handling.
+        """
+        if self.prepare_workspace is None:
+            return repository, None
+
+        try:
+            ensure_repository_present(repository)
+        except WorkspaceValidationError as exc:
+            self.logger.error(
+                "operator checkout 검증 실패 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            return (
+                repository,
+                PollingResult(
+                    status=PollingStatus.WORKSPACE_INVALID, task=selected, message=str(exc)
+                ),
+            )
+
+        prep_start = time.monotonic()
+        try:
+            prepared = self.prepare_workspace(repository, issue, linked_pull_request)
+        except WorkspacePreparationError as exc:
+            self.logger.error(
+                "워크스페이스 준비 실패 (%s #%d): [%s] %s",
+                selected.repository,
+                selected.number,
+                exc.category.value,
+                exc,
+            )
+            return (
+                repository,
+                PollingResult(
+                    status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
+                    task=selected,
+                    message=f"{exc.category.value}: {exc}",
+                ),
+            )
+        finally:
+            observability.log_stage(
+                self.logger,
+                cycle_id,
+                repository=selected.repository,
+                issue_number=selected.number,
+                stage="workspace_preparation",
+                start=prep_start,
+            )
+
+        if prepared.dirty:
+            message = (
+                "prepared worktree has uncommitted changes: "
+                f"{prepared.repository.local_path} ({repository.full_name})"
+            )
+            self.logger.error(
+                "준비된 worktree 검증 실패 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                message,
+            )
+            return (
+                prepared.repository,
+                PollingResult(
+                    status=PollingStatus.WORKSPACE_INVALID, task=selected, message=message
+                ),
+            )
+
+        return prepared.repository, None
+
     def _run_rework_job(
         self,
         repository: RepositoryConfig,
@@ -2074,9 +2159,7 @@ class PollingService:
 
         workspace_start = time.monotonic()
         try:
-            if self.prepare_workspace is not None:
-                ensure_repository_present(repository)
-            else:
+            if self.prepare_workspace is None:
                 self.ensure_workspace_ready(repository)
         except WorkspaceValidationError as exc:
             self.logger.error(
@@ -2102,41 +2185,11 @@ class PollingService:
         if error is not None:
             return error
 
-        # Task 023 CP-023-4/CP-023-7: a REWORK Job always has an existing
-        # linked branch/PR (Task 014 CP-014-3 already requires one) - reuse
-        # it in an isolated worktree instead of the operator checkout, the
-        # same as an IMPLEMENT Job. The Issue is still `devbot:rework`
-        # (not yet claimed - `ReworkService.process()` claims it only after
-        # confirming an unprocessed comment exists), so a preparation
-        # failure here needs no `_restore()`: nothing was claimed yet.
-        work_repository = repository
-        if self.prepare_workspace is not None:
-            prep_start = time.monotonic()
-            try:
-                prepared = self.prepare_workspace(repository, issue, linked_pull_request)
-            except WorkspacePreparationError as exc:
-                self.logger.error(
-                    "워크스페이스 준비 실패 (%s #%d): [%s] %s",
-                    selected.repository,
-                    selected.number,
-                    exc.category.value,
-                    exc,
-                )
-                return PollingResult(
-                    status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
-                    task=selected,
-                    message=f"{exc.category.value}: {exc}",
-                )
-            finally:
-                observability.log_stage(
-                    self.logger,
-                    cycle_id,
-                    repository=selected.repository,
-                    issue_number=selected.number,
-                    stage="workspace_preparation",
-                    start=prep_start,
-                )
-            work_repository = prepared.repository
+        work_repository, workspace_error = self._prepare_pr_workspace_for_agent(
+            repository, selected, issue, linked_pull_request, cycle_id
+        )
+        if workspace_error is not None:
+            return workspace_error
 
         rework_start = time.monotonic()
         try:
@@ -2207,7 +2260,8 @@ class PollingService:
 
         workspace_start = time.monotonic()
         try:
-            self.ensure_workspace_ready(repository)
+            if self.prepare_workspace is None:
+                self.ensure_workspace_ready(repository)
         except WorkspaceValidationError as exc:
             self.logger.error(
                 "워크스페이스 검증 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -2226,16 +2280,22 @@ class PollingService:
             )
 
         issue = issues_by_key[(selected.repository, selected.number)]
-        linked_pull_request, _pr_comments, error = self._fetch_linked_pull_request_and_comments(
+        linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
             repository, selected, issue, cycle_id
         )
         if error is not None:
             return error
 
+        work_repository, workspace_error = self._prepare_pr_workspace_for_agent(
+            repository, selected, issue, linked_pull_request, cycle_id
+        )
+        if workspace_error is not None:
+            return workspace_error
+
         review_start = time.monotonic()
         try:
             review_result = self.review_service.process(  # type: ignore[union-attr]
-                repository, issue, linked_pull_request
+                work_repository, issue, linked_pull_request, comments=pr_comments
             )
         except ClaimConflictError as exc:  # CP-014-8: another Job already owns this Issue
             self.logger.warning(

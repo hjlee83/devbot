@@ -164,3 +164,11 @@
       실행한다. Resume attempt는 Issue comment marker로 제한하며 cap 초과
       또는 unsafe metadata는 worktree를 삭제하지 않고 `manual-action`으로
       보낸다(`results/026-agent-resume-timeout-recovery.md`).
+- [x] Task 027: autonomous review loop. 성공한 IMPLEMENT/REWORK delivery가
+      사람 명령 없이 REVIEW 후보가 되고, `REQUEST CHANGES`는 REWORK로,
+      성공한 REWORK는 다시 REVIEW로 자동 순환한다. 반복 횟수는 기본 3회로
+      제한하고 초과 시 작업/PR/worktree를 보존한 채 `manual-action`으로
+      전환한다. 현재 head의 유효한 `MERGE READY`만 PR 라벨을
+      `devbot:ready-to-merge`로 독점 갱신하며, 미처리 피드백이나 안전하지 않은
+      metadata 상태는 ready 표시 대신 manual-action 진단을 남긴다
+      (`results/027-autonomous-review-loop.md`).

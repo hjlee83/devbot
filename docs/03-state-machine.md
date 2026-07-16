@@ -21,8 +21,16 @@ The DevBot owns one Issue.
 ## REVIEW
 No new Issue may start.
 
-- Wait for PR merge or a new `@devbot` modification request.
-- Modification request: move back to `working` and continue on the same branch/PR.
+- If the linked PR head has not been auto-reviewed yet, dispatch REVIEW
+  automatically.
+- `REQUEST CHANGES` with repository-change scope moves to `rework` and makes
+  REWORK runnable without a human command.
+- `MERGE READY` keeps the Issue in `review`; if the result belongs to the
+  current head and no safety gate fails, the linked PR receives the exclusive
+  `devbot:ready-to-merge` label.
+- Stale, contradictory, exhausted, metadata-only, external-verification, or
+  otherwise unsafe review-loop outcomes move to `manual-action` without
+  deleting the branch, PR, or worktree.
 - Merge: move to `done`.
 
 ## BLOCKED
@@ -32,6 +40,17 @@ No automated retry unless explicitly returned to `ready`.
 The Issue needs GitHub metadata work, external verification, or human
 approval. It is not selected for automatic repository rework and does not
 mean the Agent or delivery path failed.
+
+## Autonomous review loop (Task 027)
+The stable loop is:
+
+`review` → REVIEW → `rework` → REWORK → `review`.
+
+The loop is idempotent because REVIEW is keyed by the PR head marker
+`<!-- devbot:auto-review head=<sha> -->`, and REWORK is keyed by unprocessed
+`@devbot` PR comments without DevBot's processed reaction. The default review
+attempt limit is 3 posted auto-review results per PR conversation; exceeding
+that limit requires `manual-action` and preserves all work.
 
 ## Failure classification, retry, and recovery policy (Task 019)
 No new state or label is introduced by Task 019 - every `BLOCKED`

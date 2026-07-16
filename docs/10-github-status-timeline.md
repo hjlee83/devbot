@@ -1,6 +1,6 @@
 # GitHub Status Timeline Protocol
 
-Version: 1.1.0
+Version: 1.2.0
 Last Updated: 2026-07-16
 
 이 문서는 Task 017의 산출물이다. DevBot의 현재 상태를 사람과 모든 Agent(GPT/Claude/
@@ -9,7 +9,10 @@ GitHub 기반 상태 타임라인 규격을 정의한다.
 
 이 문서는 프로토콜/규격 문서다. Task 018이 수동 `devbot timeline start/end/status`
 CLI를, Task 024가 daemon lifecycle(IMPLEMENT/REVIEW/REWORK Job)의 자동 marker
-기록(`devbot.timeline.safe_ready`/`safe_start`/`safe_end`)을 각각 구현했다 -
+기록(`devbot.timeline.safe_ready`/`safe_start`/`safe_end`)을 각각 구현했다.
+Task 027은 이 marker를 자동 review → rework → re-review loop의 cycle evidence로
+사용하고, `MERGE READY`가 현재 head의 안전한 결과일 때만 PR에
+`devbot:ready-to-merge`를 적용한다 -
 자세한 내용은 `## 후속 구현 범위` 참고.
 
 ---
@@ -122,6 +125,12 @@ Timeline marker schema를 늘리지 않고 별도 Issue comment marker
 `<!-- devbot-resume:v1 ... -->`에 기록한다. 이 marker는 Status Card의
 기본 phase 계산을 대체하지 않는 보조 evidence이며, Timeline write와
 마찬가지로 best-effort라서 기록 실패가 Job의 실제 outcome을 덮지 않는다.
+
+Task 027 이후 자동 리뷰 루프는 기존 `review:start`/`review:end` marker를 그대로
+사용한다. `review:end result=request-changes` 다음의 rework는 다음 cycle의
+`dev:start`로 기록되고, 유효한 `MERGE READY`는 `review:end result=merge-ready`로
+닫힌다. 루프 제한 초과나 ready-to-merge gate 실패는 `manual-action` 결과로 닫아
+Status Card가 사람이 개입해야 하는 지점을 숨기지 않게 한다.
 
 ---
 

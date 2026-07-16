@@ -38,7 +38,11 @@ from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
 from devbot.reliability import session_limit_block_reason
-from devbot.rework import ReworkActionScope, classify_rework_action_scope
+from devbot.rework import (
+    ReworkActionScope,
+    classify_rework_action_scope,
+    find_unprocessed_devbot_comments,
+)
 from devbot.timeline import TimelineService, safe_end, safe_start
 
 _MENTION = "@devbot"
@@ -46,6 +50,15 @@ _MERGE_READY = "MERGE READY"
 _REQUEST_CHANGES = "REQUEST CHANGES"
 
 _MARKER_RE = re.compile(r"<!--\s*devbot:auto-review\s+head=(\S+?)\s*-->")
+_PR_STATE_LABELS = frozenset(
+    {
+        "devbot:implementing",
+        "devbot:review",
+        "devbot:rework",
+        "devbot:ready-to-merge",
+    }
+)
+DEFAULT_REVIEW_LOOP_LIMIT = 3
 
 
 def build_review_marker(head_sha: str) -> str:
@@ -61,6 +74,11 @@ def has_review_marker_for_head(comments: Sequence[PullRequestComment], head_sha:
         for comment in comments
         for match in _MARKER_RE.finditer(comment.body)
     )
+
+
+def review_marker_count(comments: Sequence[PullRequestComment]) -> int:
+    """Count posted DevBot auto-review results in PR comments."""
+    return sum(1 for comment in comments if _MARKER_RE.search(comment.body))
 
 
 def build_review_prompt(
@@ -133,6 +151,7 @@ class ReviewResult:
     status: str | None
     issue_state: TaskState
     message: str = ""
+    diagnostic: str = ""
 
 
 def _parse_review_status(review_text: str) -> str | None:
@@ -146,6 +165,16 @@ def _parse_review_status(review_text: str) -> str | None:
 
 
 BuildReviewPromptFn = Callable[[RepositoryConfig, GitHubIssue, PullRequest], str]
+CurrentHeadShaFn = Callable[[RepositoryConfig, PullRequest], str]
+
+
+def _snapshot_head_sha(_repository: RepositoryConfig, pull_request: PullRequest) -> str:
+    """Default current-head source for tests/backward-compatible callers.
+
+    Production polling wires a GitHub-backed verifier so ready-to-merge is
+    checked against the latest PR head immediately before labeling.
+    """
+    return pull_request.head_sha
 
 
 @dataclass
@@ -163,12 +192,15 @@ class ReviewService:
     timeline: TimelineService | None = None
     actor: str | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("devbot"))
+    review_loop_limit: int = DEFAULT_REVIEW_LOOP_LIMIT
+    current_head_sha: CurrentHeadShaFn = field(default=_snapshot_head_sha)
 
     def process(
         self,
         repository: RepositoryConfig,
         issue: GitHubIssue,
         pull_request: PullRequest,
+        comments: Sequence[PullRequestComment] = (),
     ) -> ReviewResult:
         if self.dry_run:
             return ReviewResult(
@@ -176,6 +208,28 @@ class ReviewService:
                 status=None,
                 issue_state=TaskState.REVIEW,
                 message="[dry-run] would run reviewer; no Agent execution, no GitHub write",
+            )
+
+        current_attempt = review_marker_count(comments) + 1
+        if self.review_loop_limit > 0 and current_attempt > self.review_loop_limit:
+            working_issue = self.state_writer.claim(repository, issue, job_type=JobType.REVIEW)
+            reason = (
+                f"review loop attempt limit exceeded "
+                f"({current_attempt - 1}/{self.review_loop_limit}). "
+                "작업/PR/worktree는 보존하고 manual-action으로 전환합니다."
+            )
+            self.state_writer.require_manual_action(
+                repository, working_issue, reason, job_type=JobType.REVIEW
+            )
+            return ReviewResult(
+                triggered=False,
+                status=None,
+                issue_state=TaskState.MANUAL_ACTION,
+                message="manual-action: review loop attempt limit exceeded",
+                diagnostic=(
+                    f"cycle={current_attempt} last_outcome=attempt-limit "
+                    "next_action=manual-action"
+                ),
             )
 
         working_issue = self.state_writer.claim(repository, issue, job_type=JobType.REVIEW)
@@ -215,6 +269,7 @@ class ReviewService:
                 status=None,
                 issue_state=TaskState.BLOCKED,
                 message="blocked: reviewer execution failed",
+                diagnostic=f"cycle={current_attempt} last_outcome=blocked next_action=operator",
             )
 
         if result.failed:
@@ -234,6 +289,7 @@ class ReviewService:
                 status=None,
                 issue_state=TaskState.BLOCKED,
                 message=message,
+                diagnostic=f"cycle={current_attempt} last_outcome=blocked next_action=operator",
             )
 
         review_text = result.message
@@ -250,6 +306,7 @@ class ReviewService:
                 status=None,
                 issue_state=TaskState.BLOCKED,
                 message="blocked: invalid review summary",
+                diagnostic=f"cycle={current_attempt} last_outcome=invalid next_action=operator",
             )
 
         comment_body = review_text.rstrip("\n")
@@ -275,6 +332,7 @@ class ReviewService:
                 status=status,
                 issue_state=TaskState.BLOCKED,
                 message="blocked: failed to post review comment",
+                diagnostic=f"cycle={current_attempt} last_outcome=post-failed next_action=operator",
             )
 
         # CP-014-2: REQUEST CHANGES separates into its own `devbot:rework`
@@ -306,14 +364,49 @@ class ReviewService:
                     issue_state = TaskState.MANUAL_ACTION
                     timeline_result = "manual-action"
             else:
-                self.state_writer.mark_for_review(
-                    repository,
-                    working_issue,
-                    job_type=JobType.REVIEW,
-                    reason="MERGE READY 게시 완료",
+                try:
+                    current_head_sha = self.current_head_sha(repository, pull_request)
+                except Exception as exc:  # noqa: BLE001 - gate failure, not a crash
+                    current_head_sha = ""
+                    self.logger.warning("현재 PR head 확인 실패: %s", exc)
+                stale_head = current_head_sha != pull_request.head_sha
+                unprocessed_feedback = find_unprocessed_devbot_comments(comments)
+                metadata_ok = (
+                    pull_request.number is not None
+                    and f"devbot:{TaskState.BLOCKED.value}" not in issue.labels
+                    and f"devbot:{TaskState.MANUAL_ACTION.value}" not in issue.labels
                 )
-                issue_state = TaskState.REVIEW
-                timeline_result = "merge-ready"
+                if stale_head or unprocessed_feedback or not metadata_ok:
+                    reason = (
+                        "MERGE READY 결과가 ready-to-merge 게이트를 통과하지 못했습니다: "
+                        f"stale_head={stale_head}, "
+                        f"unprocessed_feedback={len(unprocessed_feedback)}, "
+                        f"metadata_ok={metadata_ok}"
+                    )
+                    self.state_writer.require_manual_action(
+                        repository, working_issue, reason, job_type=JobType.REVIEW
+                    )
+                    issue_state = TaskState.MANUAL_ACTION
+                    timeline_result = "manual-action"
+                else:
+                    self.write_client.set_pull_request_labels(
+                        repository,
+                        pull_request.number,
+                        [
+                            label
+                            for label in pull_request_labels(pull_request)
+                            if label not in _PR_STATE_LABELS
+                        ]
+                        + ["devbot:ready-to-merge"],
+                    )
+                    self.state_writer.mark_for_review(
+                        repository,
+                        working_issue,
+                        job_type=JobType.REVIEW,
+                        reason="MERGE READY 게시 완료",
+                    )
+                    issue_state = TaskState.REVIEW
+                    timeline_result = "merge-ready"
         except Exception as exc:  # noqa: BLE001 - visible comment already posted; block the claim
             reason = f"리뷰 결과 게시 후 상태 전이 실패: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)
@@ -323,12 +416,30 @@ class ReviewService:
                 status=status,
                 issue_state=TaskState.BLOCKED,
                 message="blocked: review state transition failed",
+                diagnostic=(
+                    f"cycle={current_attempt} "
+                    "last_outcome=transition-failed next_action=operator"
+                ),
             )
 
         _end(timeline_result)
+        next_action = {
+            TaskState.REWORK: "rework",
+            TaskState.REVIEW: "ready-to-merge" if status == _MERGE_READY else "review",
+            TaskState.MANUAL_ACTION: "manual-action",
+        }.get(issue_state, "operator")
         return ReviewResult(
             triggered=True,
             status=status,
             issue_state=issue_state,
             message=f"reviewed: {status}",
+            diagnostic=(
+                f"cycle={current_attempt} last_outcome={timeline_result} "
+                f"retry_count={max(current_attempt - 1, 0)} next_action={next_action}"
+            ),
         )
+
+
+def pull_request_labels(pull_request: PullRequest) -> list[str]:
+    """Existing labels on the PR itself, not the linked execution Issue."""
+    return list(pull_request.labels)

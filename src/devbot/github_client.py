@@ -83,6 +83,7 @@ class PullRequest:
     head_sha: str
     body: str
     html_url: str
+    labels: tuple[str, ...] = ()
 
 
 def _error_message(response: requests.Response) -> str:
@@ -138,12 +139,16 @@ def _parse_comment(raw: dict[str, Any]) -> PullRequestComment:
 
 
 def _parse_pull_request(raw: dict[str, Any]) -> PullRequest:
+    labels = tuple(
+        label["name"] if isinstance(label, dict) else str(label) for label in raw.get("labels", [])
+    )
     return PullRequest(
         number=raw["number"],
         head_ref=raw["head"]["ref"],
         head_sha=raw["head"]["sha"],
         body=raw.get("body") or "",
         html_url=raw["html_url"],
+        labels=labels,
     )
 
 

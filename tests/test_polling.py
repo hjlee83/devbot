@@ -2574,6 +2574,251 @@ def test_unreviewed_pr_head_triggers_review_job() -> None:
     assert called_pr == linked_pr
 
 
+def test_review_uses_prepared_pr_worktree_for_workspace_validation(tmp_path: Path) -> None:
+    """Regression: REVIEW with host-managed worktrees must validate only the
+    operator checkout's presence, prepare the linked PR worktree, and pass
+    that prepared repository to ReviewService instead of validating or using
+    the host checkout on main."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    branch = "task/027-autonomous-review-loop"
+    review_issue = _issue(
+        repo.full_name,
+        53,
+        labels=["devbot:review"],
+        title="Task 027",
+        body=_planner_issue_body(branch=branch, pr_number=54),
+    )
+    linked_pr = _pull_request(54, issue_number=53, head_ref=branch, head_sha="sha-027")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    review_service.process.return_value = MagicMock(
+        status="MERGE READY", issue_state=TaskState.REVIEW, message="reviewed: MERGE READY"
+    )
+    worktree_path = tmp_path / ".devbot-worktrees" / "myrepo" / "issue-53"
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=53,
+        pull_request=linked_pr,
+        worktree_path=worktree_path,
+    )
+    legacy_validation = MagicMock(side_effect=WorkspaceValidationError("host main is dirty"))
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=legacy_validation,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REVIEWED
+    legacy_validation.assert_not_called()
+    review_service.process.assert_called_once()
+    called_repository, called_issue, called_pr = review_service.process.call_args.args
+    assert called_repository.local_path == worktree_path
+    assert called_issue == review_issue
+    assert called_pr is linked_pr
+
+
+def test_review_rejects_dirty_prepared_worktree_even_when_host_is_clean(tmp_path: Path) -> None:
+    """Regression: once prepare returns, REVIEW validates the prepared
+    worktree state. A clean host checkout must not mask a dirty prepared PR
+    worktree."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    branch = "task/027-autonomous-review-loop"
+    review_issue = _issue(
+        repo.full_name,
+        53,
+        labels=["devbot:review"],
+        title="Task 027",
+        body=_planner_issue_body(branch=branch, pr_number=54),
+    )
+    linked_pr = _pull_request(54, issue_number=53, head_ref=branch, head_sha="sha-027")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=53,
+        pull_request=linked_pr,
+        worktree_path=tmp_path / ".devbot-worktrees" / "myrepo" / "issue-53",
+        dirty=True,
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.WORKSPACE_INVALID
+    assert "prepared worktree has uncommitted changes" in result.message
+    review_service.process.assert_not_called()
+
+
+def test_autonomous_review_rework_rereview_loop_runs_without_manual_commands(
+    tmp_path: Path,
+) -> None:
+    """Task 027 regression: IMPLEMENT delivery, REVIEW REQUEST CHANGES,
+    REWORK, and re-REVIEW are selected by successive polling cycles from
+    DevBot's own state writes, with the same Issue/PR/branch/worktree."""
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    branch = "task/027-autonomous-review-loop"
+    issue_holder = {
+        "issue": _issue(
+            repo.full_name,
+            53,
+            labels=["devbot:ready"],
+            title="Task 027",
+            body=_planner_issue_body(branch=branch, pr_number=54),
+        )
+    }
+    pr_holder = {
+        "pr": _pull_request(54, issue_number=53, head_ref=branch, head_sha="sha-1")
+    }
+    pr_comments: list[PullRequestComment] = []
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue_holder["issue"]]},
+        comments_by_issue={(repo.full_name, 54): pr_comments},
+        pull_requests_by_repo={repo.full_name: [pr_holder["pr"]]},
+    )
+
+    def list_issues(repository: RepositoryConfig, *, state: str = "open", **kwargs: object):
+        return [issue_holder["issue"]]
+
+    def list_pull_requests(repository: RepositoryConfig, **kwargs: object):
+        return [pr_holder["pr"]]
+
+    github_client.list_issues = list_issues  # type: ignore[method-assign]
+    github_client.list_pull_requests = list_pull_requests  # type: ignore[method-assign]
+
+    write_client = MagicMock(spec=GitHubWriteClient)
+
+    def set_labels(repository: RepositoryConfig, issue_number: int, labels: list[str]) -> None:
+        issue_holder["issue"] = replace(issue_holder["issue"], labels=tuple(labels))
+
+    write_client.set_labels.side_effect = set_labels
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepared_paths: list[Path] = []
+
+    def prepare(repository: RepositoryConfig, issue: GitHubIssue, linked: PullRequest | None):
+        assert linked is pr_holder["pr"]
+        prepared = _prepared_workspace(
+            repo,
+            branch=branch,
+            issue_number=53,
+            pull_request=linked,
+            worktree_path=tmp_path / ".devbot-worktrees" / "myrepo" / "issue-53",
+        )
+        prepared_paths.append(prepared.worktree_path)
+        return prepared
+
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, message="implemented"
+    )
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=54, html_url=pr_holder["pr"].html_url),
+        dry_run=False,
+        message="delivered",
+    )
+    review_service = MagicMock()
+
+    def review_process(
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        pull_request: PullRequest,
+        *,
+        comments: list[PullRequestComment],
+    ):
+        assert repository.local_path == prepared_paths[-1]
+        if pull_request.head_sha == "sha-1":
+            pr_comments.append(
+                _comment(
+                    comment_id=99,
+                    body=f"@devbot rework\n\n{build_review_marker('sha-1')}",
+                )
+            )
+            set_labels(repo, issue.number, ["devbot:rework"])
+            return MagicMock(
+                status="REQUEST CHANGES",
+                issue_state=TaskState.REWORK,
+                message="reviewed: REQUEST CHANGES",
+            )
+        set_labels(repo, issue.number, ["devbot:review"])
+        return MagicMock(
+            status="MERGE READY",
+            issue_state=TaskState.REVIEW,
+            message="reviewed: MERGE READY",
+        )
+
+    review_service.process.side_effect = review_process
+    rework_service = MagicMock(spec=ReworkService)
+
+    def rework_process(
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        branch_arg: str,
+        comments: list[PullRequestComment],
+    ):
+        assert repository.local_path == prepared_paths[-1]
+        assert branch_arg == branch
+        assert comments == pr_comments
+        pr_holder["pr"] = _pull_request(54, issue_number=53, head_ref=branch, head_sha="sha-2")
+        set_labels(repo, issue.number, ["devbot:review"])
+        return MagicMock(triggered=True, issue_state=TaskState.REVIEW, message="reworked")
+
+    rework_service.process.side_effect = rework_process
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=implementer_runner,
+        ensure_workspace_ready=MagicMock(side_effect=WorkspaceValidationError("host main dirty")),
+        prepare_workspace=prepare,
+        state_writer=state_writer,
+        delivery=delivery,
+        review_service=review_service,
+        rework_service=rework_service,
+    )
+
+    implemented = service.run_once()
+    reviewed = service.run_once()
+    reworked = service.run_once()
+    rereviewed = service.run_once()
+
+    assert implemented.status is PollingStatus.DELIVERED
+    assert reviewed.status is PollingStatus.REVIEWED
+    assert reworked.status is PollingStatus.REWORKED
+    assert rereviewed.status is PollingStatus.REVIEWED
+    assert review_service.process.call_count == 2
+    rework_service.process.assert_called_once()
+    assert delivery.deliver.call_args.args[0].local_path == prepared_paths[0]
+    assert all(path == prepared_paths[0] for path in prepared_paths)
+    assert issue_holder["issue"].labels == ("devbot:review",)
+
+
 def test_new_pr_head_triggers_review_again() -> None:
     """CP-012-4: a PR head with a marker for its *previous* head SHA still
     gets reviewed once the head moves to a new, unmarked SHA."""

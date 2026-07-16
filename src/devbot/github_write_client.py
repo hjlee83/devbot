@@ -107,6 +107,18 @@ class GitHubWriteClient:
             json={"labels": list(labels)},
         )
 
+    def set_pull_request_labels(
+        self, repository: RepositoryConfig, pull_request_number: int, labels: Sequence[str]
+    ) -> None:
+        """Replace the full label set on a Pull Request.
+
+        GitHub exposes PR labels through the Issues API because every PR
+        is also an issue conversation. Keeping this as a named method lets
+        callers make PR-state writes without pretending they are changing
+        the execution Issue.
+        """
+        self.set_labels(repository, pull_request_number, labels)
+
     def create_comment(self, repository: RepositoryConfig, issue_number: int, body: str) -> None:
         """Post a new comment on an Issue."""
         self._post(
