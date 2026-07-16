@@ -8,7 +8,8 @@ Last Updated: 2026-07-16
 > 충돌이 있으면 `CONSTITUTION.md`를 따르고, 구현 상세는 이 문서와 관련 `docs/`를 따른다.
 
 이 규칙은 특정 제품이나 모델에 종속되지 않는다. Planner, Implementer,
-Reviewer는 역할이며, 실제 Agent는 설정으로 교체할 수 있다.
+Reviewer, Operator는 역할이며, 실제 Agent는 설정으로 교체할 수 있다.
+Planner 역할의 세부 워크플로와 기계 검증 규칙은 `docs/12-planner-workflow.md`를 따른다.
 
 ---
 
@@ -252,6 +253,10 @@ Reviewer는 다음 순서로 검토한다.
 - 문서
 
 Reviewer는 코드를 수정하거나 Merge하지 않는다.
+Task 계약, Result, PR Evidence, CI, 운영 정책 중 하나라도 만족하지 않으면
+코드와 테스트가 통과했더라도 `REQUEST CHANGES`로 판단한다.
+이 기준은 모든 리뷰어에게 예외 없이 적용되며, 구현 관여 여부나 Agent 종류에
+따라 기준을 완화하거나 강화하지 않는다.
 
 ---
 

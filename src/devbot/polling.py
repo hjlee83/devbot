@@ -355,7 +355,7 @@ def find_linked_pull_request(
 ) -> PullRequest | None:
     """Return the open PR linked to `issue`.
 
-    Planner execution Issues declare authoritative metadata in their body
+    Planner Task Issues declare authoritative metadata in their body
     (`Pull Request: #N`). That explicit PR wins even if the PR body does
     not yet contain a closing keyword. Legacy Issues without Planner PR
     metadata keep the existing closing-keyword behavior."""

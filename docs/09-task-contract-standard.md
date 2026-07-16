@@ -6,7 +6,7 @@ Last Updated: 2026-07-15
 이 문서는 DevBot에서 Task 계약서를 작성하고 발행할 때 적용하는 운영 표준이다.
 모든 Task Publisher와 구현 AI는 Task 계약서를 만들거나 수정하기 전에 이 문서를 따른다.
 
-Planner/Implementer/Reviewer/Operator 역할 경계, 명명 및 번호 규칙, 실행용
+Planner/Implementer/Reviewer/Operator 역할 경계, 명명 및 번호 규칙, Task
 Issue/PR 템플릿, 최소 리뷰 진입 계약(`Review PR #<number>.`), Planner
 작업공간 검증 헬퍼(`devbot.planner`)는 `docs/12-planner-workflow.md`
 (Task 022)에 정의되어 있다. 이 문서는 계약서 발행 순서와 완성도 검증을
@@ -17,9 +17,9 @@ Issue/PR 템플릿, 최소 리뷰 진입 계약(`Review PR #<number>.`), Planner
 
 - Task는 실행 가능한 완성형 계약서여야 한다.
 - 빈 파일, 뼈대, 자리표시자, 미완성 초안은 Commit하지 않는다.
-- 계약서가 완성되기 전에는 Pull Request와 `devbot:ready` 실행용 Issue를 생성하지 않는다.
-- 계약서 내용과 실행용 Issue는 동일한 작업 범위를 가리켜야 한다.
-- Task 계약서 PR이 생성된 뒤에만 실행용 Issue를 생성한다.
+- 계약서가 완성되기 전에는 Task Issue와 Pull Request에 `devbot:ready`를 부착하지 않는다.
+- 계약서 내용과 Task Issue는 동일한 작업 범위를 가리켜야 한다.
+- 승인된 설계에서 Task Issue, Branch, Contract, Pull Request를 하나씩만 생성한다.
 
 ## 필수 항목
 
@@ -56,14 +56,14 @@ Task 발행은 반드시 다음 순서로 수행한다.
 8. 계약서 완성도 검증
 9. Commit
 10. Pull Request 생성
-11. 실행용 Issue 생성
-12. `devbot:ready` 라벨 부착
+11. Task Issue와 Pull Request 상호 링크 확인
+12. Task Issue에 `devbot:ready` 라벨 부착
 
 순서를 바꾸지 않는다.
 
 ## 계약서 완성도 검증
 
-PR과 실행용 Issue를 생성하기 전에 다음을 확인한다.
+Task Issue와 PR을 실행 가능 상태로 전환하기 전에 다음을 확인한다.
 
 - 필수 항목이 모두 존재한다.
 - 각 품질 게이트에 하나 이상의 고정된 테스트 이름이 있다.
@@ -77,19 +77,19 @@ PR과 실행용 Issue를 생성하기 전에 다음을 확인한다.
 
 하나라도 만족하지 않으면 발행을 중단하고 계약서를 먼저 수정한다.
 
-## 실행용 Issue 규칙
+## Task Issue 규칙
 
 - Issue 본문에는 Task 계약서 경로와 Task 목적을 포함한다.
-- `devbot:ready`는 계약서 PR 생성 후에만 부착한다.
-- 계약서 PR이 닫히거나 폐기되면 실행용 Issue도 `not_planned`로 닫는다.
-- 동일 Task에 중복 실행용 Issue를 만들지 않는다.
+- `devbot:ready`는 계약서, Branch, PR이 준비된 뒤에만 부착한다.
+- 계약서 PR이 닫히거나 폐기되면 Task Issue도 `not_planned`로 닫는다.
+- 동일 Task에 중복 Issue를 만들지 않는다.
 
 ## 단일 Task 추적 정책
 
 - 하나의 Task는 하나의 작업 Branch와 하나의 Pull Request로 추적한다.
 - 같은 Task의 수정, 리뷰 반영, 재검증은 기존 Branch와 Pull Request를 업데이트한다.
 - 별도 `-impl` Branch, 임시 자동 Branch, 중복 Pull Request를 만들지 않는다.
-- 실행용 Issue에는 Task 계약서 경로, 작업 Branch, Pull Request 번호, Result 문서 경로를 명시한다.
+- Task Issue에는 Task 계약서 경로, 작업 Branch, Pull Request 번호, Result 문서 경로를 명시한다.
 - GitHub Issue 번호와 Pull Request 번호는 Task 번호와 독립적인 식별자다.
   세 식별자를 일치시키려 하지 말고, 대신 서로를 명시적으로 cross-link한다
   (`docs/12-planner-workflow.md` 4절).
@@ -98,7 +98,7 @@ PR과 실행용 Issue를 생성하기 전에 다음을 확인한다.
 
 Pull Request 본문 또는 최신 댓글에는 최소 다음 Evidence가 있어야 한다.
 
-- 연결된 실행용 Issue와 Task 계약서 경로
+- 연결된 Task Issue와 Task 계약서 경로
 - 작업 Branch와 Pull Request 번호
 - Result 문서 경로
 - Checkpoint별 대응 테스트
@@ -135,7 +135,7 @@ Review Gate 절, 연결된 Task 계약서, Result, PR Evidence, CI를 스스로 
 작업 중 계약 범위가 바뀌면 다음을 함께 갱신한다.
 
 - Task 계약서
-- 실행용 Issue 설명
+- Task Issue 설명
 - Result 문서
 - 필요한 경우 Roadmap 또는 설계 문서
 

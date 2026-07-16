@@ -13,7 +13,7 @@ Task 021 Agent Outcome Classification)이 반복적으로 증명한 다음 순�
 저장소 정책으로 고정한다.
 
 1. Planner가 범위, Checkpoint, Validation Gate를 정의한다.
-2. Planner가 Branch, 계약서 파일, Pull Request, 실행용 Issue를 생성한다.
+2. Planner가 Task Issue, Branch, 계약서 파일, Pull Request를 생성한다.
 3. Implementer는 기존 Branch와 Pull Request 위에서 계속 구현한다.
 4. Reviewer는 저장소 정책과 Task 계약서를 기준으로 구현을 평가한다.
 5. Operator가 최종 Merge를 수행한다.
@@ -33,11 +33,11 @@ Planner는 다음을 소유한다 (`devbot.planner.PLANNER_RESPONSIBILITIES`).
 - Branch 생성
 - 계약서 파일 생성
 - Pull Request 생성
-- 실행용 Issue 생성
+- Task Issue 생성
 - Branch, PR, Issue, 계약서 간의 명시적 상호 링크(cross-link)
 
 Planner는 계약서가 `docs/09-task-contract-standard.md`의 "계약서 완성도
-검증" 항목을 모두 만족한 뒤에만 PR과 실행용 Issue를 생성한다.
+검증" 항목을 모두 만족한 뒤에만 Task Issue와 PR을 생성한다.
 
 ### 1.2 Implementer
 
@@ -109,13 +109,15 @@ Reviewer는 이 6개 항목 중 하나라도 실제 변경 사항과 불일치�
 
 ## 3. 단일 Task 작업공간 정책 (Single Task Workspace Policy)
 
-하나의 Task는 하나의 Branch, 하나의 Pull Request, 하나의 실행용 Issue로
-추적한다 - **1 Task = 1 Branch = 1 Pull Request**.
+하나의 Task는 하나의 Task Issue, 하나의 Branch, 하나의 계약서, 하나의
+Pull Request로 추적한다 - **1 Task = 1 Issue = 1 Branch = 1 Contract = 1 Pull Request**.
 
 - 계약서 작성, 구현, 테스트, Result 작성, 리뷰 반영(rework)은 모두 같은
   Branch와 PR 위에서 계속된다.
 - Implementer는 Planner가 이미 만든 작업공간이 있는 Task에 대해 두 번째
   구현 Branch나 두 번째 PR을 만들지 않는다.
+- 별도 Execution Issue는 만들지 않는다. Task Issue가 계획 승인, 실행,
+  Timeline, 상태 라벨을 모두 추적한다.
 - `devbot.planner.validate_planner_workspace()`가 이미 알려진
   작업공간(`KnownWorkspace`) 목록과 새 작업공간을 비교해 같은 Task
   번호에 서로 다른 Branch나 PR 번호가 등록되면 오류를 반환한다
@@ -133,15 +135,15 @@ Task 번호는 3자리 0-padding으로 표기한다 (`022`).
 | 계약서 | `tasks/<task-number>-<slug>.md` | `tasks/022-planner-workflow-standard.md` |
 | Result | `results/<task-number>-<slug>.md` | `results/022-planner-workflow-standard.md` |
 | PR 제목 | `Task <task-number>: <title>` | `Task 022: Planner Workflow Standard` |
-| 실행용 Issue 제목 | `Execute Task <task-number>: <title>` | `Execute Task 022: Planner Workflow Standard` |
+| Task Issue 제목 | `Task <task-number>: <title>` | `Task 022: Planner Workflow Standard` |
 
 **GitHub Issue 번호와 PR 번호는 Task 번호와 독립적인 식별자다.** 예를
-들어 Task 022의 실행용 Issue는 `#43`, PR은 `#42`로 Task 번호 `022`와
+들어 Task 022의 Task Issue는 `#43`, PR은 `#42`로 Task 번호 `022`와
 다르다 - 이것은 정상이다. 세 식별자를 일치시키려 하지 말고, 대신 서로를
 명시적으로 cross-link한다:
 
-- 계약서와 PR 본문에 실행용 Issue 번호를 명시한다.
-- 실행용 Issue 본문에 계약서 경로, Branch 이름, PR 번호를 명시한다.
+- 계약서와 PR 본문에 Task Issue 번호를 명시한다.
+- Task Issue 본문에 계약서 경로, Branch 이름, PR 번호를 명시한다.
 - Result 문서에 Task 번호, Branch, PR 번호, Issue 번호를 모두 명시한다.
 
 `devbot.planner.canonical_branch_name()` /
@@ -152,10 +154,10 @@ Task 번호는 3자리 0-padding으로 표기한다 (`022`).
 
 ---
 
-## 5. 실행용 Issue 계약 (Execution Issue Contract)
+## 5. Task Issue 계약 (Task Issue Contract)
 
-실행용 Issue 본문은 최소 다음을 포함해야 한다
-(`devbot.planner.render_execution_issue_body()`가 이 형식을 생성한다).
+Task Issue 본문은 최소 다음을 포함해야 한다
+(`devbot.planner.render_task_issue_body()`가 이 형식을 생성한다).
 
 - 계약서 경로
 - Branch 이름
@@ -173,7 +175,7 @@ Planner가 생성하는 PR Evidence는 최소 다음을 포함해야 한다
 - 계약서 경로
 - Branch/PR 정책("이 Branch와 PR 위에서 계속 진행") 문구
 - 범위(Scope) 요약
-- 실행용 Issue 링크(`Closes #<issue-number>` 포함)
+- Task Issue 링크(`Closes #<issue-number>` 포함)
 
 ---
 

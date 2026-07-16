@@ -92,7 +92,7 @@ def build_review_prompt(
 
     `issue.body` is included verbatim rather than DevBot resolving a Task
     contract/Result document path itself - by convention (see
-    `docs/09-task-contract-standard.md`) every execution Issue's body
+    `docs/09-task-contract-standard.md`) every Task Issue's body
     already names its own contract and Result document paths, and DevBot
     has no other generic Issue-number-to-Task-number mapping to resolve
     them from.
@@ -441,5 +441,5 @@ class ReviewService:
 
 
 def pull_request_labels(pull_request: PullRequest) -> list[str]:
-    """Existing labels on the PR itself, not the linked execution Issue."""
+    """Existing labels on the PR itself, not the linked Task Issue."""
     return list(pull_request.labels)

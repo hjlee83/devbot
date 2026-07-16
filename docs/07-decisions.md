@@ -139,8 +139,8 @@ alone:
 
 - **Keyed by GitHub Issue number, not Task number.** A Job always has an
   Issue number; the Task number is only recoverable by best-effort
-  regex-parsing the execution Issue body Planner rendered
-  (`devbot.planner.render_execution_issue_body`'s `` - Contract: `...` ``
+  regex-parsing the Task Issue body Planner rendered
+  (`devbot.planner.render_task_issue_body`'s `` - Contract: `...` ``
   line), which is not guaranteed for a manually authored Issue. Using the
   Issue number as the worktree directory name (`issue-<N>`) avoids that
   dependency entirely.
