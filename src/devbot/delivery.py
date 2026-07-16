@@ -17,11 +17,16 @@ from dataclasses import dataclass, field
 from devbot.github_client import GitHubIssue, PullRequest
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
 from devbot.models import RepositoryConfig
-
-DEFAULT_VERIFICATION_COMMANDS: tuple[tuple[str, ...], ...] = (
-    ("uv", "run", "ruff", "check", "."),
-    ("uv", "run", "pytest"),
+from devbot.validation import (
+    DEFAULT_VALIDATION_COMMANDS,
+    ValidationFailureCategory,
+    classify_validation_failure,
+    run_validation_command,
+    validation_commands_with_environment,
+    workspace_validation_env,
 )
+
+DEFAULT_VERIFICATION_COMMANDS = DEFAULT_VALIDATION_COMMANDS
 
 
 class DeliveryError(RuntimeError):
@@ -35,6 +40,9 @@ class VerificationResult:
     passed: bool
     failed_command: tuple[str, ...] | None = None
     output: str = ""
+    workspace_path: str = ""
+    commands: tuple[tuple[str, ...], ...] = ()
+    failure_category: ValidationFailureCategory | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,23 +70,36 @@ def run_verification_commands(
     repository: RepositoryConfig,
     commands: Sequence[Sequence[str]] = DEFAULT_VERIFICATION_COMMANDS,
 ) -> VerificationResult:
-    """Run each command in `repository.local_path`, stopping at the first
-    non-zero exit."""
-    for command in commands:
-        completed = subprocess.run(
-            list(command),
-            cwd=str(repository.local_path),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
+    """Run validation from `repository.local_path` using its own `.venv`.
+
+    `uv sync` is always run first so a prepared worktree has a usable local
+    environment. Parent `VIRTUAL_ENV` is stripped and PATH is biased toward the
+    workspace `.venv/bin` to prevent fallback to the operator checkout's
+    environment.
+    """
+    env = workspace_validation_env(repository)
+    executed_commands = validation_commands_with_environment(commands)
+    for index, command in enumerate(executed_commands):
+        execution = run_validation_command(repository, command, env=env)
+        if execution.returncode != 0:
             return VerificationResult(
                 passed=False,
                 failed_command=tuple(command),
-                output=(completed.stdout or "") + (completed.stderr or ""),
+                output=execution.output,
+                workspace_path=str(repository.local_path),
+                commands=executed_commands,
+                failure_category=classify_validation_failure(
+                    command=command,
+                    returncode=execution.returncode,
+                    output=execution.output,
+                    host_checkout_path=str(repository.local_path.parent.parent),
+                ),
             )
-    return VerificationResult(passed=True)
+    return VerificationResult(
+        passed=True,
+        workspace_path=str(repository.local_path),
+        commands=executed_commands,
+    )
 
 
 def build_commit_message(issue: GitHubIssue) -> str:

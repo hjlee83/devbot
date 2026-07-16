@@ -176,3 +176,9 @@
       metadata의 단일 버전 소스에서 값을 읽고, `.env`/repository config,
       daemon lock, GitHub client, polling service, Agent runner 초기화 없이
       즉시 출력 후 종료한다(`results/028-cli-version-command.md`).
+- [x] Task 029: prepared workspace validation environment. validation helper가
+      PreparedWorkspace cwd에서 literal Validation Gate 명령을 실행하고,
+      workspace `.venv/bin`을 우선하며 host checkout `VIRTUAL_ENV` fallback을
+      제거한다. command/workspace/exit code evidence와 환경 준비, dependency
+      network, command, forbidden fallback failure category를 기록한다
+      (`results/029-prepared-workspace-validation.md`).
