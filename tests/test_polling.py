@@ -22,6 +22,7 @@ from devbot.polling import (
 from devbot.review import build_review_marker
 from devbot.rework import ReworkService
 from devbot.timeline import TimelineService, parse_events
+from devbot.validation import ValidationFailureCategory
 from devbot.workspace import WorkspaceValidationError
 from devbot.worktree import (
     PreparedWorkspace,
@@ -179,7 +180,7 @@ def _prepared_workspace(
         f"/tmp/workspace/.devbot-worktrees/{repo.repo}/issue-{issue_number}"
     )
     return PreparedWorkspace(
-        repository=replace(repo, local_path=path),
+        repository=replace(repo, local_path=path, host_checkout_path=repo.local_path),
         branch=branch,
         base_branch=repo.default_branch,
         issue_number=issue_number,
@@ -2178,6 +2179,86 @@ def test_implement_delivery_branch_invalid_does_not_mark_review() -> None:
 
     assert result.status is PollingStatus.BLOCKED
     assert write_client.set_labels.call_args_list[-1].args == (repo, 8, ["devbot:blocked"])
+
+
+def test_validation_command_failure_routes_implement_to_rework() -> None:
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 59, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(
+            passed=False,
+            failed_command=("uv", "run", "pytest"),
+            output="1 failed",
+            failure_category=ValidationFailureCategory.VALIDATION_COMMAND_FAILED,
+        ),
+        committed=False,
+        pushed=False,
+        pull_request=None,
+        dry_run=False,
+        message="Verification failed: uv run pytest",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 59, ["devbot:rework"])
+
+
+def test_external_validation_failure_routes_implement_to_manual_action() -> None:
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 60, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(
+            passed=False,
+            failed_command=("uv", "sync"),
+            output="network unavailable",
+            failure_category=ValidationFailureCategory.DEPENDENCY_NETWORK_UNAVAILABLE,
+        ),
+        committed=False,
+        pushed=False,
+        pull_request=None,
+        dry_run=False,
+        message="Verification failed: uv sync",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    assert write_client.set_labels.call_args_list[-1].args == (
+        repo,
+        60,
+        ["devbot:manual-action"],
+    )
 
 
 def test_implement_no_repository_changes_without_pr_does_not_mark_review() -> None:

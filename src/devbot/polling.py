@@ -84,6 +84,7 @@ from devbot.review import ReviewService, has_review_marker_for_head
 from devbot.rework import ReworkService, find_unprocessed_devbot_comments
 from devbot.scheduler import select_jobs_with_exclusions
 from devbot.timeline import TimelineService, safe_end, safe_ready, safe_start
+from devbot.validation import ValidationFailureCategory
 from devbot.workspace import (
     WorkspaceValidationError,
     build_agent_prompt,
@@ -117,6 +118,14 @@ _MANUAL_ACTION_OUTCOMES = frozenset(
         AgentOutcome.NETWORK_BLOCKED,
         AgentOutcome.REPOSITORY_LOCKED,
         AgentOutcome.IMPLEMENTATION_SKIPPED,
+    }
+)
+
+_VALIDATION_MANUAL_ACTION_CATEGORIES = frozenset(
+    {
+        ValidationFailureCategory.ENVIRONMENT_PREPARATION_FAILED,
+        ValidationFailureCategory.DEPENDENCY_NETWORK_UNAVAILABLE,
+        ValidationFailureCategory.FORBIDDEN_HOST_FALLBACK,
     }
 )
 
@@ -1854,31 +1863,63 @@ class PollingService:
             )
 
         if not delivery_result.verification.passed:
-            self.logger.error(
-                "검증 실패로 blocked 처리 (%s #%d): %s",
-                selected.repository,
-                selected.number,
-                delivery_result.message,
+            failure_category = delivery_result.verification.failure_category
+            reason = (
+                f"검증 실패: {delivery_result.message}\n"
+                f"failure_category={failure_category.value if failure_category else 'unknown'}"
             )
-            block_failure = self._block(
-                repository,
-                issue,
-                f"검증 실패: {delivery_result.message}",
-                selected,
-                job_type=JobType.IMPLEMENT,
-            )
+            if failure_category is ValidationFailureCategory.VALIDATION_COMMAND_FAILED:
+                self.logger.error(
+                    "검증 실패로 rework 전환 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    delivery_result.message,
+                )
+                self.state_writer.send_to_rework(  # type: ignore[union-attr]
+                    repository,
+                    issue,
+                    job_type=JobType.IMPLEMENT,
+                    reason=reason,
+                )
+                timeline_result = "request-changes"
+            elif failure_category in _VALIDATION_MANUAL_ACTION_CATEGORIES:
+                self.logger.error(
+                    "검증 실패로 manual-action 전환 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    delivery_result.message,
+                )
+                self.state_writer.require_manual_action(  # type: ignore[union-attr]
+                    repository,
+                    issue,
+                    reason,
+                    job_type=JobType.IMPLEMENT,
+                )
+                timeline_result = "manual-action"
+            else:
+                self.logger.error(
+                    "검증 실패로 blocked 처리 (%s #%d): %s",
+                    selected.repository,
+                    selected.number,
+                    delivery_result.message,
+                )
+                self.state_writer.block(  # type: ignore[union-attr]
+                    repository,
+                    issue,
+                    reason,
+                    job_type=JobType.IMPLEMENT,
+                )
+                timeline_result = "blocked"
             safe_end(
                 self.timeline,
                 repository,
                 issue.number,
                 phase="dev",
                 actor=self.config.implementer_agent,
-                result="blocked",
+                result=timeline_result,
                 pr=linked_pull_request.number if linked_pull_request is not None else None,
                 logger=self.logger,
             )
-            if block_failure is not None:
-                return block_failure
             return PollingResult(
                 status=PollingStatus.BLOCKED, task=selected, message=delivery_result.message
             )

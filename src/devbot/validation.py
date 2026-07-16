@@ -90,8 +90,6 @@ def classify_validation_failure(
         if any(token in lowered_output for token in ("network", "download", "resolve", "dns")):
             return ValidationFailureCategory.DEPENDENCY_NETWORK_UNAVAILABLE
         return ValidationFailureCategory.ENVIRONMENT_PREPARATION_FAILED
-    if returncode != 0:
-        return ValidationFailureCategory.VALIDATION_COMMAND_FAILED
     return ValidationFailureCategory.VALIDATION_COMMAND_FAILED
 
 

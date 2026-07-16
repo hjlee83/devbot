@@ -18,10 +18,16 @@
 - failure category를 `environment_preparation_failed`,
   `dependency_network_unavailable`, `validation_command_failed`,
   `forbidden_host_fallback`으로 구분했다.
+- `PreparedWorkspace`가 원본 host checkout path를 `RepositoryConfig.host_checkout_path`로
+  보존하고 delivery validation의 forbidden-host-fallback 탐지에 전달하도록 했다.
+- validation failure category를 polling/rework state routing에 연결했다.
+  repository-fixable command failure는 `devbot:rework`, dependency/network,
+  environment preparation, forbidden host fallback은 `devbot:manual-action`으로 보낸다.
 - PR #60 본문 Evidence를 canonical Issue/branch/contract/Result, CP-029 checkpoint,
   validation 결과 기준으로 갱신했다.
 - 중복 PR #61은 fallback branch creation으로 생긴 accidental duplicate임을 댓글로
-  설명하고 닫았다.
+  설명하고 닫았다. 원격 duplicate branch
+  `devbot/devbot-59-task-029-prepared-workspace-validation-e`도 삭제했다.
 
 ## 주요 설계 결정
 
@@ -37,7 +43,13 @@
 
 - `src/devbot/validation.py`
 - `src/devbot/delivery.py`
+- `src/devbot/models.py`
+- `src/devbot/worktree.py`
+- `src/devbot/polling.py`
+- `src/devbot/rework.py`
 - `tests/test_delivery.py`
+- `tests/test_polling.py`
+- `tests/test_worktree.py`
 - `docs/00-roadmap.md`
 - `results/029-prepared-workspace-validation.md`
 
@@ -47,12 +59,12 @@
 | --- | --- |
 | CP-029-1 Authoritative validation workspace | `test_validation_uses_prepared_workspace_repository` |
 | CP-029-2 Workspace-scoped environment preparation | `test_prepared_workspace_has_usable_validation_environment` |
-| CP-029-3 Host environment fallback prevention | `test_validation_rejects_host_checkout_environment_fallback` |
+| CP-029-3 Host environment fallback prevention | `test_prepared_workspace_preserves_host_checkout_path`, `test_validation_rejects_host_checkout_environment_fallback` |
 | CP-029-4 Literal Validation Gate execution | `test_validation_executes_contract_commands_literally` |
 | CP-029-5 Shared cache safety | `test_shared_uv_cache_does_not_break_workspace_isolation` |
 | CP-029-6 Structured validation evidence | `test_validation_evidence_records_workspace_and_commands` |
 | CP-029-7 Failure classification | `test_validation_environment_failure_classification` |
-| CP-029-8 Safe state routing | `test_validation_failure_routes_to_rework_or_manual_action` |
+| CP-029-8 Safe state routing | `test_validation_command_failure_routes_implement_to_rework`, `test_external_validation_failure_routes_implement_to_manual_action` |
 | CP-029-9 Resume compatibility | `test_resumed_task_reuses_validation_environment` |
 | CP-029-10 Autonomous loop compatibility | `test_autonomous_loop_validates_only_in_prepared_workspace` |
 | CP-029-11 Existing workflow regression safety | `test_existing_workflows_remain_compatible_with_workspace_validation_environment` + full test suite |
@@ -65,29 +77,34 @@ Workspace:
 
 | Command | Result |
 | --- | --- |
-| `python3 -m uv sync` | PASS |
-| `python3 -m uv run ruff check .` | PASS |
-| `python3 -m uv run pytest` | PASS, 436 passed |
-| `python3 -m uv run devbot doctor` | PASS |
-| `python3 -m uv run devbot --once --dry-run` | PASS, `REVIEW` dry-run |
+| `uv sync` | PASS |
+| `uv run ruff check .` | PASS |
+| `uv run pytest` | PASS, 439 passed |
+| `uv run devbot doctor` | PASS |
+| `uv run devbot --once --dry-run` | PASS, `NO_RUNNABLE_TASK` |
 
 추가 demonstration:
 
 - Dirty/unusable host checkout influence: PASS. 모든 validation command를 canonical
   PreparedWorkspace cwd에서 실행했고 host checkout cwd를 사용하지 않았다.
-- Host `.venv` fallback prevention: PASS. tests verify parent `VIRTUAL_ENV` removal and
-  PreparedWorkspace `.venv/bin` PATH priority.
+- Host `.venv` fallback prevention: PASS. tests verify parent `VIRTUAL_ENV` removal,
+  PreparedWorkspace `.venv/bin` PATH priority, preserved host checkout path propagation, and
+  production `run_verification_commands()` fallback detection.
 - Dependency/network failure classification: PASS. tests verify dependency/network output
   maps to `dependency_network_unavailable` without silent fallback.
+- Safe state routing: PASS. polling tests verify validation command failures route to
+  `devbot:rework` and external dependency/network failures route to `devbot:manual-action`.
 - Result/PR Evidence workspace and literal commands: PASS. this Result and PR #60 Evidence
   identify the actual PreparedWorkspace and commands.
 
 ## 수동 검증 결과
 
 - PR #60 head가 recovered implementation commit을 포함함을 확인했다.
-- `devbot --once --dry-run`은 Issue #59 / PR #60을 review candidate로 선택하고,
-  dry-run reviewer 경로를 GitHub write 없이 정상 종료했다.
-- PR #61은 accidental duplicate로 닫았다.
+- `devbot --once --dry-run`은 당시 Issue #59가 `devbot:manual-action` 상태임을
+  관측하고 실행 가능한 작업 없음(`NO_RUNNABLE_TASK`)으로 정상 종료했다.
+- PR #61은 accidental duplicate로 닫았고, duplicate 원격 branch도 삭제했다.
+- `git ls-remote --heads origin '*029*' '*devbot-59*'` 결과 Task 029 원격 branch는
+  `task/029-prepared-workspace-validation` 하나만 남았다.
 - canonical Task contract는 PR #60의 full contract 그대로 유지했다.
 
 ## 남은 TODO와 제한

@@ -52,6 +52,7 @@ from devbot.issue_state import IssueStateWriter
 from devbot.models import JobType, RepositoryConfig, TaskState
 from devbot.reliability import session_limit_block_reason
 from devbot.timeline import TimelineService, safe_end, safe_start
+from devbot.validation import ValidationFailureCategory
 
 _MENTION = "@devbot"
 _PROCESSED_REACTION = "eyes"
@@ -101,6 +102,14 @@ _REPOSITORY_CHANGE_PATTERNS = (
     "테스트",
     "문서",
     "파일",
+)
+
+_VALIDATION_MANUAL_ACTION_CATEGORIES = frozenset(
+    {
+        ValidationFailureCategory.ENVIRONMENT_PREPARATION_FAILED,
+        ValidationFailureCategory.DEPENDENCY_NETWORK_UNAVAILABLE,
+        ValidationFailureCategory.FORBIDDEN_HOST_FALLBACK,
+    }
 )
 
 
@@ -325,23 +334,56 @@ class ReworkService:
             )
 
         if not verification.passed:
-            self.state_writer.block(
-                repository,
-                working_issue,
-                "PR 피드백 반영 후 검증 실패: "
-                f"{' '.join(verification.failed_command or ())}\n\n{verification.output}",
-                job_type=JobType.REWORK,
+            category = (
+                verification.failure_category.value
+                if verification.failure_category
+                else "unknown"
             )
-            _end("blocked")
+            reason = (
+                "PR 피드백 반영 후 검증 실패: "
+                f"{' '.join(verification.failed_command or ())}\n"
+                f"failure_category={category}"
+                f"\n\n{verification.output}"
+            )
+            if verification.failure_category is ValidationFailureCategory.VALIDATION_COMMAND_FAILED:
+                self.state_writer.send_to_rework(
+                    repository,
+                    working_issue,
+                    job_type=JobType.REWORK,
+                    reason=reason,
+                )
+                issue_state = TaskState.REWORK
+                message = "rework"
+                _end("request-changes")
+            elif verification.failure_category in _VALIDATION_MANUAL_ACTION_CATEGORIES:
+                self.state_writer.require_manual_action(
+                    repository,
+                    working_issue,
+                    reason,
+                    job_type=JobType.REWORK,
+                )
+                issue_state = TaskState.MANUAL_ACTION
+                message = "manual-action"
+                _end("manual-action")
+            else:
+                self.state_writer.block(
+                    repository,
+                    working_issue,
+                    reason,
+                    job_type=JobType.REWORK,
+                )
+                issue_state = TaskState.BLOCKED
+                message = "blocked"
+                _end("blocked")
             return ReworkResult(
                 triggered=True,
                 comment=comment,
                 verification=verification,
-                issue_state=TaskState.BLOCKED,
+                issue_state=issue_state,
                 action_scope=action_scope,
                 code_changed=True,
                 pr_reused=True,
-                message="blocked",
+                message=message,
             )
 
         if self.dry_run:

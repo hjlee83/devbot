@@ -429,7 +429,11 @@ class WorktreeManager:
         )
 
         return PreparedWorkspace(
-            repository=replace(repository, local_path=target),
+            repository=replace(
+                repository,
+                local_path=target,
+                host_checkout_path=repository.host_checkout_path or repository.local_path,
+            ),
             branch=branch,
             base_branch=base_branch,
             issue_number=issue.number,

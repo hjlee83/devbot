@@ -79,7 +79,8 @@ def run_verification_commands(
     """
     env = workspace_validation_env(repository)
     executed_commands = validation_commands_with_environment(commands)
-    for index, command in enumerate(executed_commands):
+    host_checkout_path = repository.host_checkout_path or repository.local_path
+    for command in executed_commands:
         execution = run_validation_command(repository, command, env=env)
         if execution.returncode != 0:
             return VerificationResult(
@@ -92,7 +93,7 @@ def run_verification_commands(
                     command=command,
                     returncode=execution.returncode,
                     output=execution.output,
-                    host_checkout_path=str(repository.local_path.parent.parent),
+                    host_checkout_path=str(host_checkout_path),
                 ),
             )
     return VerificationResult(

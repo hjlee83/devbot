@@ -167,14 +167,24 @@ def test_prepared_workspace_has_usable_validation_environment() -> None:
 
 
 def test_validation_rejects_host_checkout_environment_fallback() -> None:
-    category = classify_validation_failure(
-        command=("uv", "sync"),
-        returncode=1,
-        output="attempted to use /Users/luna/workspace/devbot/.venv/bin/python",
-        host_checkout_path="/Users/luna/workspace/devbot",
+    repository = RepositoryConfig(
+        owner="someone",
+        repo="myrepo",
+        enabled=True,
+        local_path=Path("/tmp/workspace/.devbot-worktrees/myrepo/issue-59"),
+        host_checkout_path=Path("/tmp/workspace/myrepo"),
     )
 
-    assert category is ValidationFailureCategory.FORBIDDEN_HOST_FALLBACK
+    with patch("devbot.validation.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="attempted to use /tmp/workspace/myrepo/.venv/bin/python",
+        )
+        result = run_verification_commands(repository)
+
+    assert result.failure_category is ValidationFailureCategory.FORBIDDEN_HOST_FALLBACK
+    assert result.failed_command == ("uv", "sync")
 
 
 def test_validation_executes_contract_commands_literally() -> None:
@@ -251,22 +261,19 @@ def test_validation_environment_failure_classification() -> None:
 
 
 def test_validation_failure_routes_to_rework_or_manual_action() -> None:
-    repository_fixable = VerificationResult(
-        passed=False,
-        failed_command=("uv", "run", "pytest"),
-        failure_category=ValidationFailureCategory.VALIDATION_COMMAND_FAILED,
+    repository_fixable = classify_validation_failure(
+        command=("uv", "run", "pytest"),
+        returncode=1,
+        output="1 failed",
     )
-    external = VerificationResult(
-        passed=False,
-        failed_command=("uv", "sync"),
-        failure_category=ValidationFailureCategory.DEPENDENCY_NETWORK_UNAVAILABLE,
+    external = classify_validation_failure(
+        command=("uv", "sync"),
+        returncode=1,
+        output="failed to download dependency: network unavailable",
     )
 
-    assert (
-        repository_fixable.failure_category
-        is ValidationFailureCategory.VALIDATION_COMMAND_FAILED
-    )
-    assert external.failure_category is ValidationFailureCategory.DEPENDENCY_NETWORK_UNAVAILABLE
+    assert repository_fixable is ValidationFailureCategory.VALIDATION_COMMAND_FAILED
+    assert external is ValidationFailureCategory.DEPENDENCY_NETWORK_UNAVAILABLE
 
 
 def test_resumed_task_reuses_validation_environment() -> None:
