@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      increment:
+        description: "Controlled release increment"
+        type: choice
+        required: true
+        options: [patch, minor, major]
+      commit_sha:
+        description: "Validated main commit SHA to release"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  validate-main:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+
+      - name: Reject manual non-main commit
+        if: github.event_name == 'workflow_dispatch'
+        run: test "$(git branch -r --contains "${{ inputs.commit_sha }}" | grep -c 'origin/main')" -gt 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+
+      - name: uv sync
+        run: uv sync
+
+      - name: uv run ruff check .
+        run: uv run ruff check .
+
+      - name: uv run pytest
+        run: uv run pytest
+
+      - name: uv run devbot doctor
+        run: uv run devbot doctor
+        env:
+          WORKSPACE_ROOT: ${{ runner.temp }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: uv run devbot --once --dry-run
+        run: |
+          cat > "$RUNNER_TEMP/repositories.yaml" <<'EOF'
+          repositories:
+            - owner: hjlee83
+              repo: devbot
+              enabled: false
+              default_branch: main
+          EOF
+          uv run devbot --once --dry-run
+        env:
+          WORKSPACE_ROOT: ${{ runner.temp }}
+          DEVBOT_REPOSITORIES_PATH: ${{ runner.temp }}/repositories.yaml
+          GITHUB_TOKEN: ${{ github.token }}
+
+  plan-release:
+    needs: validate-main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      increment: ${{ steps.plan.outputs.increment }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+      - name: Plan release
+        id: plan
+        run: |
+          version="$(uv run python scripts/release_pipeline.py version --project-root .)"
+          increment="${{ github.event_name == 'workflow_dispatch' && inputs.increment || 'patch' }}"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "increment=$increment" >> "$GITHUB_OUTPUT"
+
+  build-artifacts:
+    needs: plan-release
+    if: needs.plan-release.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os_name: macos
+            architecture: arm64
+          - os_name: macos
+            architecture: x86_64
+          - os_name: linux
+            architecture: x86_64
+          - os_name: linux
+            architecture: arm64
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+      - name: Build deterministic artifact
+        run: |
+          uv run python scripts/release_pipeline.py build-artifact \
+            --version "${{ needs.plan-release.outputs.version }}" \
+            --os-name "${{ matrix.os_name }}" \
+            --architecture "${{ matrix.architecture }}" \
+            --output-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os_name }}-${{ matrix.architecture }}
+          path: dist/*.tar.gz
+
+  publish-release:
+    needs: [validate-main, plan-release, build-artifacts]
+    if: needs.plan-release.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify artifacts and checksums
+        run: |
+          uv run python scripts/release_pipeline.py checksum-manifest \
+            --version "${{ needs.plan-release.outputs.version }}" \
+            --artifact-dir dist \
+            --output dist/SHA256SUMS
+      - name: Create immutable tag
+        run: |
+          git tag --annotate "${{ needs.plan-release.outputs.tag }}" \
+            --message "Release ${{ needs.plan-release.outputs.tag }}" \
+            "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
+          git push origin "${{ needs.plan-release.outputs.tag }}"
+      - name: Create draft release
+        run: |
+          gh release create "${{ needs.plan-release.outputs.tag }}" dist/* \
+            --draft \
+            --verify-tag \
+            --title "${{ needs.plan-release.outputs.tag }}" \
+            --notes "Automated ${{ needs.plan-release.outputs.increment }} release."
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Publish stable release
+        run: gh release edit "${{ needs.plan-release.outputs.tag }}" --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Write release summary
+        run: |
+          {
+            echo "source_commit=${{ github.sha }}"
+            echo "previous_version=see prior stable tag"
+            echo "selected_increment=${{ needs.plan-release.outputs.increment }}"
+            echo "new_version=${{ needs.plan-release.outputs.version }}"
+            echo "tag=${{ needs.plan-release.outputs.tag }}"
+            echo "artifact_names=$(ls dist/*.tar.gz | xargs -n1 basename | paste -sd ',')"
+            echo "checksums=$(cat dist/SHA256SUMS | paste -sd ';')"
+            echo "release_url=${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.plan-release.outputs.tag }}"
+          } >> "$GITHUB_STEP_SUMMARY"

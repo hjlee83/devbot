@@ -20,7 +20,6 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
-from importlib.metadata import version as package_version
 from pathlib import Path
 
 from devbot.agent_execution import AgentExecutionContext
@@ -41,6 +40,7 @@ from devbot.observability import (
     log_startup_validation,
 )
 from devbot.polling import PollingService, PollingStatus, run_forever
+from devbot.release import authoritative_version
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
 from devbot.startup import (
@@ -384,7 +384,7 @@ def main(
 ) -> int:
     args = _parse_args(argv)
     if args.version:
-        print(f"devbot {package_version('devbot')}")
+        print(f"devbot {authoritative_version()}")
         return 0
 
     logger = _configure_logging()

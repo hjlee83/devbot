@@ -26,7 +26,7 @@ def _config(tmp_path: Path) -> DevBotConfig:
 
 
 def test_cli_version_prints_package_version(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch("devbot.main.package_version", return_value="9.8.7"):
+    with patch("devbot.main.authoritative_version", return_value="9.8.7"):
         exit_code = main(["--version"])
 
     assert exit_code == 0
@@ -34,11 +34,11 @@ def test_cli_version_prints_package_version(capsys: pytest.CaptureFixture[str]) 
 
 
 def test_cli_version_uses_authoritative_version_source() -> None:
-    with patch("devbot.main.package_version", return_value="1.2.3") as mock_version:
+    with patch("devbot.main.authoritative_version", return_value="1.2.3") as mock_version:
         exit_code = main(["--version"])
 
     assert exit_code == 0
-    mock_version.assert_called_once_with("devbot")
+    mock_version.assert_called_once_with()
 
 
 def test_cli_version_does_not_load_runtime_config(tmp_path: Path) -> None:
@@ -46,7 +46,7 @@ def test_cli_version_does_not_load_runtime_config(tmp_path: Path) -> None:
     invalid_repositories = tmp_path / "repositories.yaml"
     invalid_repositories.write_text("repositories: [", encoding="utf-8")
 
-    with patch("devbot.main.package_version", return_value="1.2.3"):
+    with patch("devbot.main.authoritative_version", return_value="1.2.3"):
         exit_code = main(
             ["--version"], env_path=missing_env, repositories_path=invalid_repositories
         )
@@ -56,7 +56,7 @@ def test_cli_version_does_not_load_runtime_config(tmp_path: Path) -> None:
 
 def test_cli_version_does_not_acquire_daemon_lock() -> None:
     with (
-        patch("devbot.main.package_version", return_value="1.2.3"),
+        patch("devbot.main.authoritative_version", return_value="1.2.3"),
         patch("devbot.main.ProcessLock") as mock_lock,
     ):
         exit_code = main(["--version"])
@@ -67,7 +67,7 @@ def test_cli_version_does_not_acquire_daemon_lock() -> None:
 
 def test_cli_version_does_not_contact_github() -> None:
     with (
-        patch("devbot.main.package_version", return_value="1.2.3"),
+        patch("devbot.main.authoritative_version", return_value="1.2.3"),
         patch("devbot.main.GitHubClient") as mock_read_client,
         patch("devbot.main.GitHubWriteClient") as mock_write_client,
     ):
@@ -80,7 +80,7 @@ def test_cli_version_does_not_contact_github() -> None:
 
 def test_cli_version_does_not_start_polling_or_agents() -> None:
     with (
-        patch("devbot.main.package_version", return_value="1.2.3"),
+        patch("devbot.main.authoritative_version", return_value="1.2.3"),
         patch("devbot.main.PollingService") as mock_polling,
         patch("devbot.main.run_forever") as mock_run_forever,
         patch("devbot.main.build_agent_runner") as mock_build_agent_runner,
