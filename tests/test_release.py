@@ -551,6 +551,46 @@ def test_initial_release_notes_use_standard_future_sections() -> None:
     assert "Runtime automatic update discovery" in notes
 
 
+def test_history_marks_initial_release_pending_and_preserves_required_milestones() -> None:
+    history = Path("docs/history.md").read_text(encoding="utf-8")
+
+    expected_sections = [
+        "## Release Notes Format",
+        "## Stable Releases",
+        "## Development Milestones Through Task 032",
+        "## Initial Release Notes",
+    ]
+    for section in expected_sections:
+        assert section in history
+
+    release_note_sections = [
+        f"{index}. {section}" for index, section in enumerate(RELEASE_NOTE_SECTIONS, 1)
+    ]
+    assert "\n".join(release_note_sections) in history
+
+    assert "pending operator-controlled publication" in history
+    assert "No official stable GitHub Release has been published yet." in history
+    assert "this document does not claim that" in history
+    assert "- Intended Release URL:" in history
+    assert "- Release URL:" not in history
+    assert "retrospective stable\nRelease tags" in history
+
+    for milestone in (
+        "Task 000",
+        "Tasks 001-005",
+        "Tasks 006-009",
+        "Tasks 010-012",
+        "Tasks 013-020",
+        "Tasks 021-027",
+        "Task 028",
+        "Task 029",
+        "Task 030",
+        "Task 031",
+        "Task 032",
+    ):
+        assert milestone in history
+
+
 def test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract(
     tmp_path: Path,
 ) -> None:

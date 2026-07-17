@@ -17,14 +17,20 @@ Future generated Release Notes use these sections in order:
 
 ## Stable Releases
 
-### v0.1.0 - Initial Stable Release
+No official stable GitHub Release has been published yet. The first stable Release is
+pending operator-controlled publication after this Task branch is reviewed, merged, and
+the validated release pipeline is run from `main`.
+
+### v0.1.0 - Initial Stable Release (pending operator-controlled publication)
 
 - Source commit: `6526cfea27e4a5fd0003df6eb698cd202dedcf57`
 - Package version: `0.1.0`
-- Tag: `v0.1.0`
-- Artifact: `devbot-0.1.0-portable-python.tar.gz`
+- Planned tag: `v0.1.0`
+- Planned artifact: `devbot-0.1.0-portable-python.tar.gz`
 - SHA-256: `8a2a30bb78f1f06da0b80519efc13aa7003a055d93a4896aa2aa38deb6d7401a`
-- Release URL: `https://github.com/hjlee83/devbot/releases/tag/v0.1.0`
+- Intended Release URL: `https://github.com/hjlee83/devbot/releases/tag/v0.1.0`
+- Status: pending operator-controlled publication; this document does not claim that
+  `v0.1.0` already exists as a stable GitHub Release.
 
 Task 033 bootstraps the first stable Release from the validated Task 032 `main` commit.
 Earlier development is preserved below as project history, not as retrospective stable
@@ -104,8 +110,9 @@ Source commit: `6526cfea27e4a5fd0003df6eb698cd202dedcf57`
 
 ### Upgrade Notes
 
-- This is the first stable DevBot Release. Install or update from the published portable
-  Python artifact and verify it against `SHA256SUMS`.
+- This is the first stable DevBot Release once the operator-controlled publication step
+  is completed. Install or update from the published portable Python artifact and verify
+  it against `SHA256SUMS`.
 
 ### Known Limitations
 
