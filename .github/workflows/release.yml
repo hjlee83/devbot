@@ -82,24 +82,49 @@ jobs:
       pull-requests: read
     outputs:
       publish: ${{ steps.plan.outputs.publish }}
+      previous_version: ${{ steps.plan.outputs.previous_version }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
       increment: ${{ steps.plan.outputs.increment }}
+      notes: ${{ steps.plan.outputs.notes }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
       - name: Install uv
         uses: astral-sh/setup-uv@v8.3.2
         with:
           python-version: "3.13"
+      - name: Collect release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+        run: |
+          git rev-list origin/main > main-commits.txt
+          jq -R -s -c 'split("\n") | map(select(length > 0))' main-commits.txt > main-commits.json
+          gh api "repos/${{ github.repository }}/releases" --paginate \
+            --jq '.[] | {tag_name, target_commitish, draft, prerelease}' \
+            | jq -s . > releases.json
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            printf '{}\n' > release-event.json
+          else
+            gh api "repos/${{ github.repository }}/commits/$TARGET_SHA/pulls" \
+              -H "Accept: application/vnd.github+json" \
+              --jq '.[0]' > pull-request.json
+            jq -c -n --slurpfile pr pull-request.json '{pull_request: $pr[0]}' > release-event.json
+          fi
       - name: Plan release
         id: plan
         run: |
-          version="$(uv run python scripts/release_pipeline.py version --project-root .)"
-          increment="${{ github.event_name == 'workflow_dispatch' && inputs.increment || 'patch' }}"
-          echo "publish=true" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "increment=$increment" >> "$GITHUB_OUTPUT"
+          uv run python scripts/release_pipeline.py plan \
+            --event-name "${{ github.event_name }}" \
+            --event-json release-event.json \
+            --releases-json releases.json \
+            --main-commits-json main-commits.json \
+            --initial-version "$(uv run python scripts/release_pipeline.py version --project-root .)" \
+            --output release-plan.json \
+            --github-output "$GITHUB_OUTPUT" \
+            ${{ github.event_name == 'workflow_dispatch' && format('--increment {0}', inputs.increment) || '' }}
 
   build-artifacts:
     needs: plan-release
@@ -162,19 +187,31 @@ jobs:
             --output dist/SHA256SUMS
       - name: Create immutable tag
         run: |
+          if git ls-remote --exit-code --tags origin "${{ needs.plan-release.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag already exists; refusing to overwrite ${{ needs.plan-release.outputs.tag }}" >&2
+            exit 1
+          fi
+          if gh release view "${{ needs.plan-release.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release already exists; refusing duplicate publication ${{ needs.plan-release.outputs.tag }}" >&2
+            exit 1
+          fi
           git tag --annotate "${{ needs.plan-release.outputs.tag }}" \
             --message "Release ${{ needs.plan-release.outputs.tag }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
           git push origin "${{ needs.plan-release.outputs.tag }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Create draft release
         run: |
+          printf '%s\n' "$RELEASE_NOTES" > release-notes.md
           gh release create "${{ needs.plan-release.outputs.tag }}" dist/* \
             --draft \
             --verify-tag \
             --title "${{ needs.plan-release.outputs.tag }}" \
-            --notes "Automated ${{ needs.plan-release.outputs.increment }} release."
+            --notes-file release-notes.md
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ needs.plan-release.outputs.notes }}
       - name: Publish stable release
         run: gh release edit "${{ needs.plan-release.outputs.tag }}" --draft=false
         env:
@@ -182,8 +219,8 @@ jobs:
       - name: Write release summary
         run: |
           {
-            echo "source_commit=${{ github.sha }}"
-            echo "previous_version=see prior stable tag"
+            echo "source_commit=${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
+            echo "previous_version=${{ needs.plan-release.outputs.previous_version }}"
             echo "selected_increment=${{ needs.plan-release.outputs.increment }}"
             echo "new_version=${{ needs.plan-release.outputs.version }}"
             echo "tag=${{ needs.plan-release.outputs.tag }}"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from devbot.release import (
     release_artifact_name,
     release_increment_for_pr,
     release_notes,
+    release_plan_for_pr,
     release_rerun_result,
     validate_release_summary,
 )
@@ -79,6 +82,14 @@ def test_missing_or_conflicting_release_labels_fail_closed() -> None:
 
 def test_release_none_skips_publication() -> None:
     assert release_increment_for_pr(_pr(labels=("release:none",))) is None
+    plan = release_plan_for_pr(
+        _pr(labels=("release:none",)),
+        releases=(ReleaseRecord("v0.2.0", "sha"),),
+        main_commits={"sha"},
+        initial_version="0.1.0",
+    )
+    assert plan.publish is False
+    assert plan.new_version == "0.2.0"
 
 
 def test_next_semantic_version_is_calculated_from_latest_stable_tag() -> None:
@@ -163,6 +174,23 @@ def test_packaged_cli_reports_release_version(tmp_path: Path) -> None:
     assert completed.stdout == "devbot 0.2.0\n"
 
 
+def test_release_artifact_generation_is_reproducible(tmp_path: Path) -> None:
+    first = build_artifact(
+        tmp_path / "first",
+        version="0.2.0",
+        os_name="linux",
+        architecture="x86_64",
+    )
+    second = build_artifact(
+        tmp_path / "second",
+        version="0.2.0",
+        os_name="linux",
+        architecture="x86_64",
+    )
+
+    assert first.path.read_bytes() == second.path.read_bytes()
+
+
 def test_checksum_manifest_covers_every_release_artifact(tmp_path: Path) -> None:
     artifacts = [
         build_artifact(tmp_path, version="0.2.0", os_name=os_name, architecture=arch)
@@ -200,6 +228,24 @@ def test_release_note_generation_is_deterministic() -> None:
         "## devbot 0.2.0\n\n"
         "- minor: #67 Task 032: Automated Release Pipeline\n"
     )
+
+
+def test_release_plan_uses_pr_label_and_latest_stable_release() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:minor",)),
+        releases=(
+            ReleaseRecord("v0.2.0", "old"),
+            ReleaseRecord("v0.3.0", "draft", draft=True),
+        ),
+        main_commits={"old", "new"},
+        initial_version="0.1.0",
+    )
+
+    assert plan.publish is True
+    assert plan.previous_version == "0.2.0"
+    assert plan.increment == "minor"
+    assert plan.new_version == "0.3.0"
+    assert plan.tag == "v0.3.0"
 
 
 def test_release_rerun_is_idempotent_for_same_commit() -> None:
@@ -244,6 +290,12 @@ def test_release_workflow_structure_enforces_validation_before_publication() -> 
         "build-artifacts",
     ]
     assert workflow["jobs"]["publish-release"]["permissions"] == {"contents": "write"}
+    assert "gh api" in "\n".join(
+        step.get("run", "") for step in workflow["jobs"]["plan-release"]["steps"]
+    )
+    assert "scripts/release_pipeline.py plan" in "\n".join(
+        step.get("run", "") for step in workflow["jobs"]["plan-release"]["steps"]
+    )
 
 
 def test_release_workflow_matrix_and_manual_dispatch_are_declared() -> None:
@@ -261,3 +313,65 @@ def test_release_workflow_matrix_and_manual_dispatch_are_declared() -> None:
         "minor",
         "major",
     ]
+
+
+def test_release_pipeline_plan_command_writes_github_outputs(tmp_path: Path) -> None:
+    event = tmp_path / "event.json"
+    releases = tmp_path / "releases.json"
+    main_commits = tmp_path / "main-commits.json"
+    output = tmp_path / "plan.json"
+    github_output = tmp_path / "github-output.txt"
+    event.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "number": 67,
+                    "title": "Task 032: Automated Release Pipeline",
+                    "labels": [{"name": "release:patch"}],
+                    "merged": True,
+                    "base": {"ref": "main"},
+                    "merge_commit_sha": "new",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    releases.write_text(
+        json.dumps([{"tag_name": "v0.2.0", "target_commitish": "old"}]),
+        encoding="utf-8",
+    )
+    main_commits.write_text(json.dumps(["old", "new"]), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/release_pipeline.py",
+            "plan",
+            "--event-name",
+            "push",
+            "--event-json",
+            str(event),
+            "--releases-json",
+            str(releases),
+            "--main-commits-json",
+            str(main_commits),
+            "--initial-version",
+            "0.1.0",
+            "--output",
+            str(output),
+            "--github-output",
+            str(github_output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    plan = json.loads(output.read_text(encoding="utf-8"))
+    assert plan["publish"] is True
+    assert plan["previous_version"] == "0.2.0"
+    assert plan["increment"] == "patch"
+    assert plan["version"] == "0.2.1"
+    assert plan["tag"] == "v0.2.1"
+    assert "publish=true" in github_output.read_text(encoding="utf-8")

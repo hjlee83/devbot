@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -117,6 +118,17 @@ class ReleaseSummary:
     release_url: str
 
 
+@dataclass(frozen=True)
+class ReleasePlan:
+    publish: bool
+    previous_version: str
+    increment: ReleaseIncrement | None
+    new_version: str
+    tag: str
+    notes: str
+    reason: str
+
+
 def authoritative_version(project_root: Path | str | None = None) -> str:
     if project_root is None:
         return metadata.version(PRODUCT_NAME)
@@ -197,7 +209,17 @@ def build_artifact(
     ).encode()
     version_script = f"#!/usr/bin/env sh\nprintf 'devbot {version}\\n'\n".encode()
 
-    with tarfile.open(path, "w:gz", format=tarfile.PAX_FORMAT, compresslevel=9) as archive:
+    with (
+        path.open("wb") as raw,
+        gzip.GzipFile(
+            filename="",
+            mode="wb",
+            fileobj=raw,
+            compresslevel=9,
+            mtime=0,
+        ) as compressed,
+        tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive,
+    ):
         _add_bytes(archive, "devbot-release/metadata.json", metadata_bytes)
         _add_bytes(archive, "devbot-release/bin/devbot", version_script, mode=0o755)
     return Artifact(name=name, path=path, os_name=os_name, architecture=architecture)
@@ -232,6 +254,68 @@ def release_notes(pr: PullRequestMetadata, increment: ReleaseIncrement, version:
             f"- {increment}: #{pr.number} {safe_title}",
             "",
         ]
+    )
+
+
+def release_plan_for_pr(
+    pr: PullRequestMetadata,
+    *,
+    releases: Iterable[ReleaseRecord],
+    main_commits: set[str],
+    initial_version: str,
+) -> ReleasePlan:
+    increment = release_increment_for_pr(pr)
+    base = latest_stable_version(
+        releases,
+        main_commits=main_commits,
+        initial_version=initial_version,
+    )
+    if increment is None:
+        return ReleasePlan(
+            publish=False,
+            previous_version=str(base),
+            increment=None,
+            new_version=str(base),
+            tag=base.tag,
+            notes="",
+            reason="release:none or ineligible PR",
+        )
+    version = next_version(base, increment)
+    return ReleasePlan(
+        publish=True,
+        previous_version=str(base),
+        increment=increment,
+        new_version=str(version),
+        tag=version.tag,
+        notes=release_notes(pr, increment, str(version)),
+        reason="eligible merged main PR",
+    )
+
+
+def manual_release_plan(
+    *,
+    increment: ReleaseIncrement,
+    releases: Iterable[ReleaseRecord],
+    main_commits: set[str],
+    initial_version: str,
+) -> ReleasePlan:
+    if increment == "none":
+        raise ReleasePolicyError("manual release increment cannot be none")
+    base = latest_stable_version(
+        releases,
+        main_commits=main_commits,
+        initial_version=initial_version,
+    )
+    version = next_version(base, increment)
+    notes = "\n".join([f"## {PRODUCT_NAME} {version}", "", f"- {increment}: manual release", ""])
+    return ReleasePlan(
+        publish=True,
+        previous_version=str(base),
+        increment=increment,
+        new_version=str(version),
+        tag=version.tag,
+        notes=notes,
+        reason="manual workflow dispatch",
     )
 
 
