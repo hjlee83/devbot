@@ -96,6 +96,7 @@ from devbot.workspace import (
 )
 from devbot.worktree import (
     PreparedWorkspace,
+    ReviewIntegrationValidation,
     WorkspacePreparationError,
     WorkspacePreparationFailure,
     parse_branch_from_issue_body,
@@ -412,6 +413,9 @@ class PrepareWorkspaceFn(Protocol):
         synchronize_with_main: bool = True,
     ) -> PreparedWorkspace: ...
 
+
+ReviewIntegrationValidationFn = Callable[[PreparedWorkspace], ReviewIntegrationValidation]
+
 IssuesByKey = dict[tuple[str, int], GitHubIssue]
 
 
@@ -442,6 +446,7 @@ class PollingService:
     # this) preserves the exact pre-Task-023 behavior - the Agent and
     # delivery run directly against the operator checkout, as always.
     prepare_workspace: PrepareWorkspaceFn | None = None
+    validate_review_integration: ReviewIntegrationValidationFn | None = None
     state_writer: IssueStateWriter | None = None
     delivery: DeliveryService | None = None
     rework_service: ReworkService | None = None
@@ -2169,7 +2174,7 @@ class PollingService:
         cycle_id: str,
         *,
         synchronize_with_main: bool = True,
-    ) -> tuple[RepositoryConfig, PollingResult | None]:
+    ) -> tuple[RepositoryConfig, PollingResult | None, PreparedWorkspace | None]:
         """Resolve the single repository Agent roles must use after prepare.
 
         Task 027 invariant: once `WorktreeManager.prepare()` returns a
@@ -2180,7 +2185,7 @@ class PollingService:
         resume handling.
         """
         if self.prepare_workspace is None:
-            return repository, None
+            return repository, None, None
 
         try:
             ensure_repository_present(repository)
@@ -2196,6 +2201,7 @@ class PollingService:
                 PollingResult(
                     status=PollingStatus.WORKSPACE_INVALID, task=selected, message=str(exc)
                 ),
+                None,
             )
 
         prep_start = time.monotonic()
@@ -2226,6 +2232,7 @@ class PollingService:
                     task=selected,
                     message=f"{exc.category.value}: {exc}",
                 ),
+                None,
             )
         finally:
             observability.log_stage(
@@ -2253,9 +2260,10 @@ class PollingService:
                 PollingResult(
                     status=PollingStatus.WORKSPACE_INVALID, task=selected, message=message
                 ),
+                prepared,
             )
 
-        return prepared.repository, None
+        return prepared.repository, None, prepared
 
     def _run_rework_job(
         self,
@@ -2296,7 +2304,7 @@ class PollingService:
         if error is not None:
             return error
 
-        work_repository, workspace_error = self._prepare_pr_workspace_for_agent(
+        work_repository, workspace_error, _prepared = self._prepare_pr_workspace_for_agent(
             repository, selected, issue, linked_pull_request, cycle_id
         )
         if workspace_error is not None:
@@ -2397,7 +2405,7 @@ class PollingService:
         if error is not None:
             return error
 
-        work_repository, workspace_error = self._prepare_pr_workspace_for_agent(
+        work_repository, workspace_error, prepared = self._prepare_pr_workspace_for_agent(
             repository,
             selected,
             issue,
@@ -2407,6 +2415,22 @@ class PollingService:
         )
         if workspace_error is not None:
             return workspace_error
+
+        if prepared is not None and self.validate_review_integration is not None:
+            integration = self.validate_review_integration(prepared)
+            self.logger.info(
+                "Review integration validation: pr_head=%s mergeability=%s method=%s result=%s",
+                linked_pull_request.head_sha,
+                integration.mergeable,
+                integration.method,
+                integration.message,
+            )
+            if not integration.mergeable:
+                return PollingResult(
+                    status=PollingStatus.BLOCKED,
+                    task=selected,
+                    message=f"latest-main integration validation failed: {integration.message}",
+                )
 
         review_start = time.monotonic()
         try:

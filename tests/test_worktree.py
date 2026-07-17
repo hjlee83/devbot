@@ -172,6 +172,13 @@ def test_host_prepares_remote_branch_before_agent(tmp_path: Path) -> None:
     assert (prepared.worktree_path / "from-origin.txt").exists()
 
 
+def test_worktree_default_root_is_repository_local_dot_worktrees(tmp_path: Path) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "external-workspace")
+
+    assert manager.worktree_root(repository) == (repository.local_path / ".worktrees").resolve()
+
+
 # ---- CP-023-3: isolated Job worktree ----
 
 
@@ -229,6 +236,35 @@ def test_existing_task_branch_is_reused(tmp_path: Path) -> None:
     # No `devbot/...` fallback branch was ever generated for this Task.
     branches = _git_output("branch", "--list", cwd=repository.local_path)
     assert "devbot/" not in branches
+
+
+def test_existing_canonical_branch_worktree_is_reused(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=36)
+    _push_branch(origin, tmp_path, "task/030-canonical")
+    _run_git(
+        "fetch",
+        "origin",
+        "task/030-canonical:task/030-canonical",
+        cwd=repository.local_path,
+    )
+    canonical = tmp_path / "canonical-worktree"
+    _run_git(
+        "worktree",
+        "add",
+        str(canonical),
+        "task/030-canonical",
+        cwd=repository.local_path,
+    )
+    pull_request = _pull_request(head_ref="task/030-canonical", issue_number=36)
+
+    prepared = manager.prepare(
+        repository, issue, pull_request, synchronize_with_main=False
+    )
+
+    assert prepared.reused is True
+    assert prepared.worktree_path == canonical.resolve()
 
 
 def test_prepared_workspace_resolves_git_metadata_paths(tmp_path: Path) -> None:
@@ -291,6 +327,27 @@ def test_review_prepare_does_not_change_pr_head(tmp_path: Path) -> None:
     after = _remote_head(origin, "refs/heads/task/030-review")
     assert after == before
     assert not (prepared.worktree_path / "main-after-review.txt").exists()
+
+
+def test_review_integration_validation_uses_non_mutating_merge_tree(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=37)
+    _push_branch(origin, tmp_path, "task/030-merge-tree", filename="task.txt")
+    _push_to_main(origin, tmp_path, "main-only.txt")
+    pull_request = _pull_request(head_ref="task/030-merge-tree", issue_number=37)
+    prepared = manager.prepare(
+        repository, issue, pull_request, synchronize_with_main=False
+    )
+    before = _git_output("rev-parse", "HEAD", cwd=prepared.worktree_path).strip()
+
+    validation = manager.validate_review_integration(prepared)
+
+    after = _git_output("rev-parse", "HEAD", cwd=prepared.worktree_path).strip()
+    assert validation.mergeable is True
+    assert validation.method == "git merge-tree --write-tree origin/main HEAD"
+    assert after == before
+    assert _git_output("status", "--porcelain", cwd=prepared.worktree_path).strip() == ""
 
 
 def test_dirty_worktree_is_not_rebased_or_overwritten(tmp_path: Path) -> None:

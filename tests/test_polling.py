@@ -27,6 +27,7 @@ from devbot.validation import ValidationFailureCategory
 from devbot.workspace import WorkspaceValidationError
 from devbot.worktree import (
     PreparedWorkspace,
+    ReviewIntegrationValidation,
     WorkspacePreparationError,
     WorkspacePreparationFailure,
 )
@@ -190,9 +191,7 @@ def _prepared_workspace(
 ) -> PreparedWorkspace:
     """A canned `WorktreeManager.prepare()` outcome (Task 023) for tests
     that inject a fake `prepare_workspace` instead of running real Git."""
-    path = worktree_path or Path(
-        f"/tmp/workspace/.devbot-worktrees/{repo.repo}/issue-{issue_number}"
-    )
+    path = worktree_path or Path(f"/tmp/workspace/{repo.repo}/.worktrees/issue-{issue_number}")
     return PreparedWorkspace(
         repository=replace(repo, local_path=path, host_checkout_path=repo.local_path),
         branch=branch,
@@ -2814,6 +2813,102 @@ def test_review_uses_prepared_pr_worktree_for_workspace_validation(tmp_path: Pat
     assert called_repository.local_path == worktree_path
     assert called_issue == review_issue
     assert called_pr is linked_pr
+
+
+def test_review_validates_latest_main_integration_before_agent(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    branch = "task/030-review-integration"
+    review_issue = _issue(
+        repo.full_name,
+        63,
+        labels=["devbot:review"],
+        title="Task 030",
+        body=_planner_issue_body(branch=branch, pr_number=64),
+    )
+    linked_pr = _pull_request(64, issue_number=63, head_ref=branch, head_sha="sha-030")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=63,
+        pull_request=linked_pr,
+        worktree_path=tmp_path / "myrepo" / ".worktrees" / "issue-63",
+    )
+    validate_review_integration = MagicMock(
+        return_value=ReviewIntegrationValidation(
+            mergeable=True,
+            method="git merge-tree --write-tree origin/main HEAD",
+            message="mergeable tree=abc123",
+        )
+    )
+    review_service.process.return_value = MagicMock(
+        status="MERGE READY", issue_state=TaskState.REVIEW, message="reviewed: MERGE READY"
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        validate_review_integration=validate_review_integration,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.REVIEWED
+    validate_review_integration.assert_called_once_with(prepared)
+    review_service.process.assert_called_once()
+
+
+def test_review_stops_when_latest_main_integration_conflicts(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    config = _config([repo])
+    branch = "task/030-review-conflict"
+    review_issue = _issue(
+        repo.full_name,
+        64,
+        labels=["devbot:review"],
+        title="Task 030",
+        body=_planner_issue_body(branch=branch, pr_number=65),
+    )
+    linked_pr = _pull_request(65, issue_number=64, head_ref=branch, head_sha="sha-031")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        pull_requests_by_repo={repo.full_name: [linked_pr]},
+    )
+    review_service = MagicMock()
+    prepared = _prepared_workspace(
+        repo,
+        branch=branch,
+        issue_number=64,
+        pull_request=linked_pr,
+        worktree_path=tmp_path / "myrepo" / ".worktrees" / "issue-64",
+    )
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        prepare_workspace=lambda repository, issue_arg, linked: prepared,
+        validate_review_integration=lambda _prepared: ReviewIntegrationValidation(
+            mergeable=False,
+            method="git merge-tree --write-tree origin/main HEAD",
+            message="CONFLICT README.md",
+        ),
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    assert "latest-main integration validation failed" in result.message
+    review_service.process.assert_not_called()
 
 
 def test_review_rejects_dirty_prepared_worktree_even_when_host_is_clean(tmp_path: Path) -> None:

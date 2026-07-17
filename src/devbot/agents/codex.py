@@ -81,7 +81,14 @@ class CodexRunner(AgentRunner):
         if caps["cd"]:
             command.extend(["-C", str(repository.local_path)])
         if caps["config"]:
-            command.extend(["-c", "shell_environment_policy.inherit=\"all\""])
+            command.extend(
+                [
+                    "-c",
+                    "shell_environment_policy.inherit=\"all\"",
+                    "-c",
+                    "sandbox_workspace_write.network_access=true",
+                ]
+            )
         for root in self._writable_roots(repository)[1:]:
             if caps["add_dir"]:
                 command.extend(["--add-dir", str(root)])

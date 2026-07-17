@@ -398,6 +398,7 @@ def main(
                 implementer_runner=implementer_runner,
                 reviewer_runner=reviewer_runner,
                 prepare_workspace=worktree_manager.prepare,
+                validate_review_integration=worktree_manager.validate_review_integration,
                 state_writer=state_writer,
                 delivery=DeliveryService(client=write_client, dry_run=config.dry_run),
                 rework_service=ReworkService(

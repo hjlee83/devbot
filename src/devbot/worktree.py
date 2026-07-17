@@ -10,9 +10,9 @@ operator's own checkout, so a Job never needs its own `git fetch`, `gh`, or
 `curl`, and never depends on the operator checkout's current branch or
 uncommitted files.
 
-Layout: `<workspace_root>/.devbot-worktrees/<repo>/issue-<issue_number>`
-(Scope §3's recommended layout, keyed by the GitHub Issue number - the one
-identifier every Job always has, unlike the Task number).
+Layout: `<repository>/.worktrees/issue-<issue_number>`, keyed by the
+GitHub Issue number - the one identifier every Job always has, unlike the
+Task number.
 
 Lifecycle (Scope §8): a worktree is created before Agent execution, reused
 only when repository/Issue/branch all match, preserved on Job failure for
@@ -35,6 +35,7 @@ from devbot.models import RepositoryConfig
 from devbot.workspace import generate_branch_name
 
 _WORKTREE_DIRNAME = ".devbot-worktrees"
+_REPOSITORY_WORKTREES_DIRNAME = ".worktrees"
 
 
 class WorkspacePreparationFailure(StrEnum):
@@ -113,6 +114,15 @@ class WorktreeHealthReport:
         registered Git worktree - a future `prepare()` for that path would
         fail (Scope §9's `worktree_conflict`)."""
         return not self.conflicting
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewIntegrationValidation:
+    """Non-mutating latest-main compatibility result for a REVIEW job."""
+
+    mergeable: bool
+    method: str
+    message: str
 
 
 _CONTRACT_PATH_RE = re.compile(r"Contract:\s*`([^`]+)`")
@@ -245,6 +255,19 @@ def _resolve_git_path(path: Path, arg: str) -> Path:
     return resolved.resolve()
 
 
+def _ensure_repo_local_worktrees_excluded(repository: RepositoryConfig) -> None:
+    if not (repository.local_path / ".git").exists():
+        return
+    git_dir = _resolve_git_path(repository.local_path, "--git-dir")
+    info_dir = git_dir / "info"
+    exclude_path = info_dir / "exclude"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    if ".worktrees/" not in existing.splitlines():
+        suffix = "" if existing.endswith("\n") or not existing else "\n"
+        exclude_path.write_text(f"{existing}{suffix}.worktrees/\n", encoding="utf-8")
+
+
 _PORCELAIN_ENTRY_RE = re.compile(r"^worktree (?P<path>.+)$", re.MULTILINE)
 
 
@@ -299,10 +322,11 @@ class WorktreeManager:
         # `.resolve()` (not just `/`-joining): `git worktree list --porcelain`
         # always reports the real, symlink-resolved path (e.g. macOS's
         # `/var` -> `/private/var`), so every path this class computes must
-        # be resolved the same way - otherwise a `workspace_root` that
-        # happens to sit behind a symlink makes every registered worktree
+        # be resolved the same way - otherwise a path that happens to sit
+        # behind a symlink makes every registered worktree
         # look unregistered (spurious `WORKTREE_CONFLICT`).
-        return (self.workspace_root / _WORKTREE_DIRNAME / repository.repo).resolve()
+        _ensure_repo_local_worktrees_excluded(repository)
+        return (repository.local_path / _REPOSITORY_WORKTREES_DIRNAME).resolve()
 
     def _list_worktrees(self, repository: RepositoryConfig) -> list[_WorktreeEntry]:
         completed = _run_git(repository.local_path, "worktree", "list", "--porcelain")
@@ -345,7 +369,7 @@ class WorktreeManager:
         base_branch: str,
         *,
         create_branch: bool,
-    ) -> bool:
+    ) -> tuple[bool, Path]:
         entries = self._list_worktrees(repository)
         matching = next((entry for entry in entries if entry.path == target), None)
 
@@ -357,7 +381,7 @@ class WorktreeManager:
 
         if matching is not None:
             if matching.branch == branch:
-                return True  # Scope §8: reuse - same repository/Issue/branch.
+                return True, target  # Scope §8: reuse - same repository/Issue/branch.
             if self.is_dirty(target):
                 raise WorkspacePreparationError(
                     WorkspacePreparationFailure.WORKTREE_CONFLICT,
@@ -382,6 +406,19 @@ class WorktreeManager:
                 WorkspacePreparationFailure.WORKTREE_CONFLICT,
                 f"path exists but is not a registered Git worktree: {target}",
             )
+
+        branch_checkout = next(
+            (entry for entry in entries if entry.branch == branch and entry.path.is_dir()),
+            None,
+        )
+        if branch_checkout is not None:
+            if self.is_dirty(branch_checkout.path):
+                raise WorkspacePreparationError(
+                    WorkspacePreparationFailure.WORKSPACE_DIRTY,
+                    f"branch {branch!r} is already checked out at {branch_checkout.path} "
+                    "with uncommitted changes - refusing unsafe reuse",
+                )
+            return True, branch_checkout.path
 
         target.parent.mkdir(parents=True, exist_ok=True)
         if create_branch:
@@ -412,7 +449,7 @@ class WorktreeManager:
                 f"newly created worktree at {target} is unexpectedly dirty "
                 "immediately after checkout",
             )
-        return False
+        return False, target
 
     def _verify_pr_head(self, target: Path, branch: str, pull_request: PullRequest | None) -> None:
         if pull_request is None or len(pull_request.head_sha) < 40:
@@ -463,6 +500,35 @@ class WorktreeManager:
                     f"git push --force-with-lease failed: {push.stderr or push.stdout}",
                 )
 
+    def validate_review_integration(
+        self, prepared: PreparedWorkspace
+    ) -> ReviewIntegrationValidation:
+        """Validate latest-main mergeability without changing the PR branch.
+
+        `git merge-tree --write-tree` computes the merge result in Git's
+        object database and exits nonzero on conflicts; it does not update
+        HEAD, the index, the worktree, or the PR branch ref.
+        """
+        completed = _run_git(
+            prepared.worktree_path,
+            "merge-tree",
+            "--write-tree",
+            f"origin/{prepared.base_branch}",
+            "HEAD",
+        )
+        if completed.returncode == 0:
+            tree = completed.stdout.strip()
+            return ReviewIntegrationValidation(
+                mergeable=True,
+                method=f"git merge-tree --write-tree origin/{prepared.base_branch} HEAD",
+                message=f"mergeable tree={tree}",
+            )
+        return ReviewIntegrationValidation(
+            mergeable=False,
+            method=f"git merge-tree --write-tree origin/{prepared.base_branch} HEAD",
+            message=(completed.stderr or completed.stdout).strip(),
+        )
+
     def prepare(
         self,
         repository: RepositoryConfig,
@@ -498,9 +564,10 @@ class WorktreeManager:
         )
 
         target = self.worktree_path(repository, issue.number)
-        reused = self._create_or_reuse(
+        reused, actual_worktree = self._create_or_reuse(
             repository, target, branch, base_branch, create_branch=create_branch
         )
+        target = actual_worktree
         self._verify_pr_head(target, branch, linked_pull_request)
         if synchronize_with_main:
             self._sync_task_branch_with_main(target, branch, base_branch, linked_pull_request)

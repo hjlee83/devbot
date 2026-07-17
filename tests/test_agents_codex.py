@@ -86,6 +86,7 @@ def test_codex_runner_builds_unattended_workspace_scoped_command() -> None:
     ]
     assert "--add-dir" in command
     assert str(Path("/tmp/workspace/.git").resolve()) in command
+    assert "sandbox_workspace_write.network_access=true" in command
     assert "disk-full-read-access" not in command
     assert "danger-full-access" not in command
     assert command[-2:] == ["exec", "do the thing"]

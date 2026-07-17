@@ -12,6 +12,9 @@
 - PreparedWorkspace에서 `git rev-parse --git-dir`, `--git-common-dir`, `--show-toplevel`을 해석해 worktree Git metadata 접근을 안전하게 허용한다.
 - IMPLEMENT/REWORK 준비 단계에서 canonical Task branch와 `origin/main`을 fetch하고, clean worktree와 PR head를 확인한 뒤 rebase + `--force-with-lease`만 사용해 main에 동기화한다.
 - REVIEW 준비 단계는 PR head를 변경하지 않는 `synchronize_with_main=False` 경로를 사용하고, interactive approval 출력은 review summary 파싱 전에 `agent_configuration_invalid`로 manual-action 처리한다.
+- 리뷰 지적을 반영해 future worktree의 기본 root를 repository-local `.worktrees/issue-<number>`로 변경하고 `.git/info/exclude`에 `.worktrees/`를 등록해 operator checkout을 dirty로 만들지 않게 했다.
+- REVIEW 전에 `git merge-tree --write-tree origin/<main> HEAD`로 latest-main mergeability를 계산해 PR branch를 변경하지 않는 integration validation을 수행한다.
+- Codex production command에 `sandbox_workspace_write.network_access=true` config override를 추가해 network policy가 단순 진단이 아니라 실행 명령에 반영되게 했다.
 
 ## 주요 설계 결정
 
@@ -20,6 +23,7 @@
 - transient exhaustion은 `GitHubTransientError`로 표면화해 polling/reliability가 GitHub API 계열 실패로 다루되 상태 mutation은 만들지 않게 했다.
 - Codex CLI 옵션은 설치 버전별 차이가 있어 `codex --help`와 `codex exec --help` capability를 확인한 뒤 지원되는 root 옵션을 exec 앞에 배치한다. 현재 확인 버전은 `codex-cli 0.144.1`이다.
 - main 동기화 충돌은 `git rebase --abort` 후 `task_branch_conflict`로 분류해 원래 branch/worktree를 보존한다.
+- REVIEW integration validation은 merge commit이나 rebase를 만들지 않고 Git object 계산만 수행하는 `merge-tree --write-tree`를 사용한다.
 
 ## 수정 파일
 
@@ -28,6 +32,7 @@
 - `src/devbot/github_write_client.py`
 - `src/devbot/polling.py`
 - `src/devbot/worktree.py`
+- `src/devbot/main.py`
 - `src/devbot/agents/base.py`
 - `src/devbot/agents/codex.py`
 - `src/devbot/review.py`
@@ -37,6 +42,7 @@
 - `tests/test_agents_codex.py`
 - `tests/test_worktree.py`
 - `tests/test_review.py`
+- `tests/test_doctor.py`
 - `tasks/030-github-api-transient-retry.md`
 
 ## Checkpoint Evidence
@@ -58,15 +64,19 @@
 | CP-030-13 PreparedWorkspace Git metadata access | `test_prepared_workspace_resolves_git_metadata_paths`, `test_codex_runner_builds_unattended_workspace_scoped_command` |
 | CP-030-14 IMPLEMENT/REWORK main synchronization | `test_implement_prepare_rebases_latest_main_and_force_pushes_with_lease`, `test_dirty_worktree_is_not_rebased_or_overwritten`, `test_stale_pr_head_metadata_stops_execution` |
 | CP-030-15 conflict-safe recovery | `test_rebase_conflict_preserves_original_branch` |
-| CP-030-16 non-mutating latest-main review validation | `test_review_prepare_does_not_change_pr_head` |
+| CP-030-16 non-mutating latest-main review validation | `test_review_prepare_does_not_change_pr_head`, `test_review_integration_validation_uses_non_mutating_merge_tree`, `test_review_validates_latest_main_integration_before_agent`, `test_review_stops_when_latest_main_integration_conflicts` |
+| Review comment 1 repository-local future worktrees | `test_worktree_default_root_is_repository_local_dot_worktrees`, `test_job_uses_isolated_worktree`, `test_doctor_reports_worktree_health` |
+| Review comment 2 isolated latest-main validation | `test_review_integration_validation_uses_non_mutating_merge_tree`, `test_review_validates_latest_main_integration_before_agent`, `test_review_stops_when_latest_main_integration_conflicts` |
+| Review comment 3 enforced Codex network policy | `test_codex_runner_builds_unattended_workspace_scoped_command` |
 
 ## Validation 결과
 
 - `uv sync` PASS
 - `uv run ruff check .` PASS
-- `uv run pytest` PASS: 456 passed
+- `uv run pytest` PASS: 461 passed
 - `uv run devbot doctor` PASS
 - `uv run devbot --once --dry-run` PASS: `NO_RUNNABLE_TASK` / `skipped_active_task` (Issue #62는 `devbot:rework` 상태였지만 처리 가능한 unprocessed rework 후보가 없어 dry-run으로 안전 종료)
+- Post-label `uv run devbot --once --dry-run` LIMITATION: Issue #62를 `devbot:review`로 전환한 뒤 현재 Codex 세션의 filesystem sandbox가 로컬 Git metadata 쓰기를 막아 로컬 HEAD를 원격 최종 commit으로 이동하지 못했고, 그 때문에 canonical worktree가 local dirty로 감지되어 review workspace preparation이 `workspace_dirty`로 중단되었다. 원격 PR #63 head는 최종 commit으로 갱신되었고 Issue label은 `devbot:review`다.
 
 ## 수동 검증 결과
 
@@ -75,14 +85,14 @@
 - 401/403/404는 retry 대상이 아니며 각각 인증/권한, not found로 구분된다.
 - 실제 sleep이나 외부 네트워크에 의존하지 않도록 retry sleep/random은 테스트에서 주입했다.
 - Codex production command before: `codex exec <prompt>`.
-- Codex production command after: `codex -a never -s workspace-write -C <PreparedWorkspace> --add-dir <worktree-git-dir> --add-dir <git-common-dir> exec <prompt>` (설치 CLI capability에 따라 지원되는 옵션만 사용).
+- Codex production command after: `codex -a never -s workspace-write -C <PreparedWorkspace> -c sandbox_workspace_write.network_access=true --add-dir <worktree-git-dir> --add-dir <git-common-dir> exec <prompt>` (설치 CLI capability에 따라 지원되는 옵션만 사용).
 - 현재 canonical workspace Git metadata: `git_dir=/Users/luna/workspace/devbot/.git/worktrees/issue-62`, `git_common_dir=/Users/luna/workspace/devbot/.git`, `top_level=/Users/luna/workspace/devbot/.worktrees/issue-62`.
 - main synchronization policy: canonical Task branch와 `origin/main` fetch, clean worktree/PR head 확인, DevBot 단독 소유 branch는 rebase 우선, rewrite push는 `--force-with-lease`만 허용.
-- review integration-validation method: REVIEW 준비는 `synchronize_with_main=False`로 PR head를 변경하지 않으며, latest-main 호환성은 isolated/non-mutating path에서 검증하도록 분리했다.
+- review integration-validation method: REVIEW 준비는 `synchronize_with_main=False`로 PR head를 변경하지 않으며, `git merge-tree --write-tree origin/<main> HEAD`로 latest-main mergeability를 비변경 방식으로 검증한다.
 
 ## 남은 TODO와 제한
 
-- PR #63 Evidence는 최종 commit/push 후 GitHub PR 본문 또는 댓글에 동일 내용을 반영해야 한다.
+- PR #63 Evidence는 GitHub PR 본문에 반영했다.
 
 ## 위험 요소
 
