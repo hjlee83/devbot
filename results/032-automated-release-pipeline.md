@@ -35,7 +35,7 @@
 | CP-032-3 next version | `test_next_semantic_version_is_calculated_from_latest_stable_tag`, `test_prerelease_draft_and_malformed_tags_are_ignored`, `test_release_plan_uses_pr_label_and_latest_stable_release` |
 | CP-032-4 validation gate | `test_release_workflow_structure_enforces_validation_before_publication`; workflow `publish-release` needs `validate-main` |
 | CP-032-5 safe tag/release | `test_release_tag_targets_validated_main_commit`, `test_duplicate_tag_or_release_is_rejected_without_mutation` |
-| CP-032-6 artifacts | `test_release_artifact_names_are_deterministic`, `test_release_artifact_generation_is_reproducible`; workflow matrix covers macOS/Linux arm64/x86_64 |
+| CP-032-6 artifacts | `test_release_artifact_names_are_deterministic`, `test_release_artifact_generation_is_reproducible`; workflow builds portable/python artifact without an OS/architecture matrix |
 | CP-032-7 embedded metadata | `test_packaged_cli_reports_release_version` |
 | CP-032-8 checksum manifest | `test_checksum_manifest_covers_every_release_artifact`, `test_checksum_manifest_is_deterministic` |
 | CP-032-9 atomic publication | workflow verifies artifacts/checksums before `gh release create --draft`, then publishes with `gh release edit --draft=false` |
@@ -69,7 +69,7 @@
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv run ruff check .`: PASS
 - `uv run pytest`: PASS, 513 passed
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache WORKSPACE_ROOT=/tmp/devbot-task032-workspace DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task032-workspace/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task032-workspace/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
-- `uv run devbot doctor`: NOT RUN. 이번 Task prompt가 `git fetch`, `gh`, `curl` 등 원격 discovery/network 명령 실행을 금지했고, 현재 `doctor`는 startup self-update 경로에서 원격 확인을 수행할 수 있어 로컬 실행하지 않았다.
+- `uv run devbot doctor --ci`: PASS. Agent executable/auth checks are skipped in CI profile while the report remains concise and secret-safe.
 
 ## 수동 검증 결과
 
@@ -79,7 +79,7 @@
 - 대표 artifact 생성: PASS
   - `devbot-0.2.0-portable-python.tar.gz`
 - checksum manifest 생성: PASS
-  - 모든 4개 artifact의 SHA-256 항목 생성 확인
+  - portable Python artifact의 SHA-256 항목 생성 확인
 - release-note generation: PASS
   - `## devbot 0.2.0`
   - `- minor: #67 Task 032: Automated Release Pipeline`
@@ -93,12 +93,11 @@
 ## 남은 TODO와 제한
 
 - 실제 GitHub Release 생성은 PR merge 후 `main`에서만 검증 가능하다.
-- `devbot doctor`가 startup self-update를 항상 실행하는 현재 동작은 로컬/offline 검증에 취약하다. release workflow에서는 GitHub Actions token과 checkout context에서 실행된다.
 
 ## 위험 요소
 
 - workflow의 tag/release 생성 단계는 GitHub 원격 상태에 의존하므로 post-merge 첫 실행에서 permissions와 branch containment를 반드시 확인해야 한다.
-- artifact는 Task 033 소비 계약을 위한 deterministic package fixture이며, 아직 user-machine installer나 updater는 포함하지 않는다.
+- artifact는 Task 033 소비 계약을 위한 deterministic portable Python package이며, user-machine installer/updater itself는 Task 033 범위다.
 
 ## Improvement Suggestions
 
