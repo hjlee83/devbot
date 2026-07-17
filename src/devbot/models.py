@@ -141,6 +141,11 @@ class DevBotConfig:
     github_token: str
     repositories: tuple[RepositoryConfig, ...]
     log_level: str = "INFO"
+    # Mirrors `devbot.review.DEFAULT_REVIEW_LOOP_LIMIT` - duplicated as a
+    # literal (not imported) to avoid a circular import: `devbot.review`
+    # transitively imports back to `devbot.models` via
+    # `devbot.issue_state`/`devbot.observability`/`devbot.reliability`.
+    review_loop_limit: int = 3
 
     @property
     def enabled_repositories(self) -> tuple[RepositoryConfig, ...]:

@@ -15,8 +15,16 @@ The DevBot owns one Issue.
 - Run verification.
 - Repeat repair until success or a defined stop condition.
 - On success, create PR and move Issue to `review`.
-- On metadata-only or external-verification work that cannot be solved by a repository commit, move Issue to `manual-action`.
+- On metadata-only work (PR title/body/labels - not a repository commit), or an explicit request for human approval/authority ("사람"/"승인" wording), move Issue to `manual-action` without attempting.
 - On unrecoverable failure, move Issue to `blocked`.
+
+CP-B0 (2026-07-18): "CI"/network/dry-run-shaped wording is no longer
+pre-classified from comment text - it's a technical claim the Agent can
+attempt, so the Agent runs first and a genuine block is caught afterward via
+`classify_agent_outcome()` (Task 021, extended to the rework path). Only
+"사람"/"승인" wording pre-empts the attempt, since no post-attempt signal can
+substitute for an explicit request for human authority. See
+`docs/07-decisions.md`.
 
 ## REVIEW
 No new Issue may start.
@@ -49,8 +57,10 @@ The stable loop is:
 The loop is idempotent because REVIEW is keyed by the PR head marker
 `<!-- devbot:auto-review head=<sha> -->`, and REWORK is keyed by unprocessed
 `@devbot` PR comments without DevBot's processed reaction. The default review
-attempt limit is 3 posted auto-review results per PR conversation; exceeding
-that limit requires `manual-action` and preserves all work.
+attempt limit is 3 posted auto-review results per PR conversation, configurable
+via the `REVIEW_LOOP_LIMIT` environment variable (`devbot.config`; source of
+truth is `devbot.review.DEFAULT_REVIEW_LOOP_LIMIT`; `<= 0` means unlimited);
+exceeding that limit requires `manual-action` and preserves all work.
 
 ## Failure classification, retry, and recovery policy (Task 019)
 No new state or label is introduced by Task 019 - every `BLOCKED`

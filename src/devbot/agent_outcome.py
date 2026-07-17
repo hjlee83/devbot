@@ -58,6 +58,26 @@ class AgentOutcomeClassification:
     matched_reason: str
 
 
+class AgentOutcomeError(RuntimeError):
+    """Raised by a caller (not `AgentRunner` itself) once
+    `classify_agent_outcome()` has determined a non-`IMPLEMENTATION_COMPLETED`,
+    non-`SESSION_LIMIT` outcome, outside `devbot.polling`'s own inline
+    classification call site - e.g. `devbot.main._apply_rework_changes`.
+
+    Carries the full `AgentOutcomeClassification` so a catching site can look
+    up `transition_for(classification.outcome)` for a precise target state
+    and recovery hint, instead of a single generic failure message. The raw
+    Agent message is preserved as `str(exc)` (not `matched_reason`) so
+    existing message-substring assertions keep working unchanged.
+    """
+
+    def __init__(
+        self, classification: AgentOutcomeClassification, message: str | None = None
+    ) -> None:
+        self.classification = classification
+        super().__init__(message or classification.matched_reason)
+
+
 def classify_agent_outcome(result: AgentRunResult) -> AgentOutcomeClassification:
     """Classify one Agent invocation's result into an explicit
     `AgentOutcome` (CP-021-1).

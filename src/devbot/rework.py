@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from devbot.agent_execution import AgentExecutionContext
+from devbot.agent_outcome import AgentOutcomeError, transition_for
 from devbot.agents.base import AgentSessionLimitError
 from devbot.delivery import (
     CommitFn,
@@ -80,13 +81,13 @@ _METADATA_PATTERNS = (
 )
 
 _EXTERNAL_VERIFICATION_PATTERNS = (
-    "ci",
-    "github actions",
-    "check run",
-    "network",
-    "dry-run",
-    "dry run",
-    "external verification",
+    # CP-B0: "ci", "network", "dry-run" 등 기술적 주장은 여기서 사전 판단하지
+    # 않는다 - AGENTS.md 12번 섹션이 모든 리뷰에 "CI" 항목을 의무 포함시키므로
+    # 정상적인 리뷰조차 구조적으로 오검출됐다 (devbot/devbot#69,#70). 이런
+    # 기술적 주장은 실제로 구현 AI가 시도한 뒤 그 실행 결과로 판단하는 편이
+    # 텍스트 사전 판단보다 정확하다 (devbot.agent_outcome.classify_agent_outcome
+    # 참고). 여기 남긴 두 패턴은 "사람의 권한/승인"이라는, 시도해봐도 대체할
+    # 실행결과 신호가 없는 조직적 요구만이다.
     "사람",
     "승인",
 )
@@ -113,7 +114,6 @@ _VALIDATION_MANUAL_ACTION_CATEGORIES = frozenset(
     }
 )
 
-
 def classify_rework_action_scope(comment_body: str) -> ReworkActionScope:
     """Classify an unprocessed rework request by the action DevBot can take.
 
@@ -121,6 +121,20 @@ def classify_rework_action_scope(comment_body: str) -> ReworkActionScope:
     external-verification wording wins, otherwise an ambiguous `@devbot`
     request remains a repository-change so existing rework behavior is
     preserved.
+
+    Matching is plain casefolded substring containment, not word-boundary
+    regex: this codebase's review/rework text freely mixes Korean and
+    English (e.g. "PR body를", "label을"), and Korean case/topic particles
+    (이/가/을/를/은/는/와/과/도/의 ...) fuse directly onto the *preceding*
+    token with no whitespace - including an English one. A `\\b...\\b`
+    boundary check fails at that fusion point regardless of which script
+    the pattern itself is in (confirmed empirically: `\\bpr evidence\\b`
+    does not match "pr evidence와", `\\blabel\\b` does not match "label을"),
+    so word-boundary matching is actively unsafe here, not protective. The
+    one real structural collision this classifier had (the bare `"ci"`
+    token matching inside ordinary words and the `AGENTS.md`-mandated "CI"
+    review item, CP-B0) is fixed by removing that token from
+    `_EXTERNAL_VERIFICATION_PATTERNS` entirely, not by adding boundaries.
     """
     body = comment_body.casefold()
     if any(pattern in body for pattern in _EXTERNAL_VERIFICATION_PATTERNS):
@@ -306,6 +320,42 @@ class ReworkService:
                 action_scope=action_scope,
                 pr_reused=True,
                 message="blocked: agent session limit",
+            )
+        except AgentOutcomeError as exc:
+            # CP-B0: `_apply_rework_changes` (`devbot.main`) now classifies
+            # the Agent result via `classify_agent_outcome()` before
+            # raising, so a genuine block (approval-required,
+            # network-blocked, repository-locked, implementation-skipped,
+            # config-invalid, ...) - even one that exited 0 - gets a precise
+            # target state and recovery hint here, instead of collapsing
+            # into the generic "blocked: agent execution failed" below.
+            classification = exc.classification
+            transition = transition_for(classification.outcome)
+            # ReworkService has no bounded-resume machinery (unlike
+            # PollingService's RESUME_ATTEMPT_LIMIT path for the initial
+            # IMPLEMENT job) - a RESUMABLE_INTERRUPTION (target_state=None)
+            # falls back to blocked here, not an automatic retry.
+            target_state = transition.target_state or TaskState.BLOCKED
+            reason = (
+                f"Agent 실행 결과가 {classification.outcome.value}로 분류되어 "
+                f"rework 중단: {exc}\n{transition.recovery_hint}"
+            )
+            if target_state is TaskState.MANUAL_ACTION:
+                self.state_writer.require_manual_action(
+                    repository, working_issue, reason, job_type=JobType.REWORK
+                )
+                _end("manual-action")
+            else:
+                self.state_writer.block(repository, working_issue, reason, job_type=JobType.REWORK)
+                _end("blocked")
+            return ReworkResult(
+                triggered=True,
+                comment=comment,
+                verification=None,
+                issue_state=target_state,
+                action_scope=action_scope,
+                pr_reused=True,
+                message=f"{target_state.value}: {classification.outcome.value}",
             )
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - record, then block
             reason = f"Agent 실행 중 오류로 rework 중단: {exc!r}"

@@ -196,3 +196,59 @@ changed intended behavior, not just added a missing check:
   `devbot worktree cleanup` before retrying - consistent with CP-023-8's
   broader "cleanup is always explicit" rule (this file's entry above), not
   an exception to it.
+
+## 2026-07-18 — Rework action-scope classification: attempt first, don't pre-judge technical claims (CP-B0)
+
+`devbot.rework.classify_rework_action_scope()` decides, from a reviewer's
+comment text alone, whether an unprocessed `@devbot` rework request can be
+handled by a repository commit or needs to skip straight to
+`devbot:manual-action` without the implementer ever running. Its
+`_EXTERNAL_VERIFICATION_PATTERNS` included a bare `"ci"` substring - but
+`AGENTS.md`'s section 12 (리뷰 결과) mandates every Review Summary include a
+"CI" content item, with no fixed markdown-header structure guaranteed (it
+could render as a header, a bullet, or an inline sentence - there is no safe
+delimiter to strip it out). The result: a properly-formatted, compliant
+`REQUEST CHANGES` review was structurally almost guaranteed to
+misclassify as `external-verification` and route to `devbot:manual-action`
+before the implementer was ever invoked - reproduced live on
+devbot/devbot#69 and #70, and observed repeatedly as "the Agent said it
+can't do this" when the comment was in fact an ordinary, solvable code fix.
+
+The fix is not a better keyword list - it's removing the pre-judgment for
+claims that are actually verifiable by attempting them. `"ci"`,
+`"github actions"`, `"check run"`, `"network"`, `"dry-run"`, `"dry run"`,
+and `"external verification"` are dropped from
+`_EXTERNAL_VERIFICATION_PATTERNS` entirely: these are all technical claims
+("CI failed", "needs network access") that the implementer Agent can
+attempt, so it now runs first, and `devbot.main._apply_rework_changes` uses
+`devbot.agent_outcome.classify_agent_outcome()` (Task 021's real-execution
+classifier, previously wired only into the initial IMPLEMENT job) to catch
+a genuine block afterward - raising the new `AgentOutcomeError`, caught by
+`ReworkService.process()` and routed to `manual-action`/`blocked` with the
+transition table's precise recovery hint. Only `"사람"`/`"승인"` remain in
+`_EXTERNAL_VERIFICATION_PATTERNS`: an explicit claim that human authority is
+required is not something a real attempt can discover or disprove, so
+pre-classification is the correct (and only available) mechanism there.
+
+This also closes an independent Issue #41-class false-success gap on the
+rework path specifically: `_apply_rework_changes` previously only checked
+`result.failed`, so an Agent that exited 0 but whose own output said it
+needed approval (or was network-blocked, etc.) was silently treated as a
+successful rework with nothing having actually changed.
+
+One implementation note worth recording: a word-boundary regex
+(`\bci\b`) was tried as defense-in-depth for the remaining patterns and
+reverted - this codebase's review/rework text freely mixes Korean and
+English (e.g. "PR body를", "label을", "사람이"), and Korean case/topic
+particles fuse directly onto the *preceding* token with no whitespace,
+including an English one. `\b` never matches at that fusion point
+regardless of which script the pattern is in (confirmed empirically:
+neither `\bpr evidence\b` nor `\blabel\b` nor `\b사람\b` matches text with
+an attached Korean particle), so word-boundary matching is actively unsafe
+here. Plain casefolded substring containment - the original mechanism,
+just with the one structurally-guaranteed-to-collide token removed - is the
+correct fix.
+
+`review.py`'s `DEFAULT_REVIEW_LOOP_LIMIT = 3` was also, separately, wired
+into `devbot.config`/`devbot.models` as the `REVIEW_LOOP_LIMIT` environment
+variable (previously hardcoded, not configurable without a code change).

@@ -93,9 +93,13 @@ working -> blocked               # execution, verification, delivery, or unexpec
 
 Task 016 adds rework action scope handling. Automatic review comments only
 create an `@devbot` rework trigger for repository file changes. Metadata-only
-requests (PR body/evidence, labels, comments, reactions) and external
-verification requests move to `devbot:manual-action` with a comment instead
-of entering the commit/push path. If a repository-change rework verifies
+requests (PR body/evidence, labels, comments, reactions) and explicit human
+approval/authority requests ("사람"/"승인" wording) move to
+`devbot:manual-action` with a comment instead of entering the commit/push
+path. CI/network/dry-run-shaped wording no longer pre-empts this - the Agent
+attempts it, and a genuine block is caught afterward (see "Agent outcome
+classification" below and `docs/07-decisions.md`, CP-B0). If a
+repository-change rework verifies
 successfully but leaves the Git workspace clean, DevBot records
 `no_repository_changes`, skips commit/push, marks the feedback comment
 processed, and returns the Issue to `devbot:review`.
@@ -108,7 +112,10 @@ rejected before any Agent is run.
 ## Agent outcome classification (Task 021)
 
 `devbot.agent_outcome.classify_agent_outcome()` turns one implementer
-`AgentRunResult` into an explicit `devbot.models.AgentOutcome` -
+`AgentRunResult` into an explicit `devbot.models.AgentOutcome` - used by both
+`PollingService`'s initial IMPLEMENT job and, since CP-B0, `devbot.main._apply_rework_changes`
+for the Task 010 rework path (raising `AgentOutcomeError`, caught by
+`ReworkService.process()`) -
 `implementation_completed`, `implementation_skipped`,
 `no_repository_changes`, `approval_required`, `network_blocked`,
 `session_limit`, `repository_locked`, `agent_failed`, or `unknown` -

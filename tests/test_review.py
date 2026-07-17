@@ -176,6 +176,41 @@ def test_review_prompt_does_not_trigger_rework_for_metadata_only_actions() -> No
     assert "metadata-only" in posted_body
 
 
+def test_review_request_changes_with_compliant_ci_mention_still_dispatches_rework() -> None:
+    """CP-B0 regression: AGENTS.md 12번 섹션이 모든 리뷰에 의무 포함시키는 "CI"
+    항목만으로 devbot:manual-action으로 잘못 분류되어 구현 AI가 호출되지 않는
+    회귀를 방지한다 (devbot/devbot#69, #70 재발 사례와 동일 메커니즘)."""
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True,
+        dry_run=False,
+        message=(
+            "# Review Summary\n\n"
+            "## 상태\n\n"
+            "- REQUEST CHANGES\n\n"
+            "## 계약 검토\n- 통과\n\n"
+            "## 품질 게이트\n- 통과\n\n"
+            "## 테스트\n- 통과\n\n"
+            "## CI\n- 통과\n\n"
+            "## 보안\n- 통과\n\n"
+            "## 문서\n- 통과\n\n"
+            "## Blocker\n- 코드에서 엣지 케이스 처리가 누락되었습니다.\n\n"
+            "## Warning\n- 없음\n\n"
+            "## 비고\n- 없음"
+        ),
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+
+    result = _process(service)
+
+    assert result.status == "REQUEST CHANGES"
+    assert result.issue_state is TaskState.REWORK
+    state_writer.send_to_rework.assert_called_once()
+    state_writer.require_manual_action.assert_not_called()
+    _, _, posted_body = write_client.create_comment.call_args.args
+    assert "@devbot" in posted_body
+
+
 def test_review_status_parsing_still_requires_exactly_one_status() -> None:
     reviewer_runner = MagicMock()
     reviewer_runner.run.return_value = AgentRunResult(

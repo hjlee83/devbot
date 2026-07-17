@@ -131,9 +131,29 @@ def test_rework_classifies_metadata_only_comment() -> None:
     )
 
 
-def test_rework_classifies_external_verification_comment() -> None:
+def test_rework_classifies_technical_verification_wording_as_repository_change() -> None:
+    """CP-B0: "CI"/"network"/"dry-run" wording alone no longer pre-empts the
+    implementer - these are technical claims the Agent can attempt, with a
+    genuine block caught afterward via `classify_agent_outcome()` instead of
+    guessed from text beforehand."""
     assert (
         classify_rework_action_scope("@devbot verify CI and rerun dry-run with network access")
+        is ReworkActionScope.REPOSITORY_CHANGE
+    )
+
+
+def test_rework_classifies_bare_ci_mention_as_repository_change() -> None:
+    """CP-B0 regression: AGENTS.md 12번 섹션이 모든 리뷰에 의무 포함시키는 "CI"
+    언급만으로 devbot:manual-action으로 오분류되어 구현 AI가 호출되지 않는
+    회귀를 방지한다 (devbot/devbot#69, #70)."""
+    assert classify_rework_action_scope("CI가 통과했습니다") is ReworkActionScope.REPOSITORY_CHANGE
+
+
+def test_rework_classifies_human_approval_wording_as_external_verification() -> None:
+    """`"사람"`/`"승인"`은 대체할 실행결과 신호가 없는 조직적 요구라 사전 분류를
+    유지한다 - 조사 결합("승인이")에도 substring 매칭이 정상 동작하는지 확인."""
+    assert (
+        classify_rework_action_scope("@devbot GitHub Actions 승인이 필요합니다")
         is ReworkActionScope.EXTERNAL_VERIFICATION
     )
 

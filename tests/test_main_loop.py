@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from devbot.agent_outcome import AgentOutcomeError
 from devbot.agents.base import AgentRunResult
 from devbot.github_client import GitHubIssue, PullRequestComment
 from devbot.lock import ProcessLock
@@ -501,4 +502,47 @@ def test_apply_rework_changes_raises_when_agent_result_is_unexecuted_and_not_dry
     )
 
     with pytest.raises(RuntimeError, match="Claude CLI"):
+        _apply_rework_changes(implementer_runner, repo, issue, comment)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "이 작업을 진행하려면 승인이 필요합니다 (needs your approval to run this command)",
+        "Network is unreachable",
+        "fatal: Unable to create '.../index.lock': File exists",
+        "No changes needed - already implemented, skipping",
+    ],
+)
+def test_apply_rework_changes_raises_agent_outcome_error_for_blocking_patterns_even_on_exit_zero(
+    message: str,
+) -> None:
+    """CP-B0 regression (Issue #41-class false-success gap, rework path):
+    an Agent that exits 0 (`executed=True, returncode=0`) but whose own
+    output matches a blocking pattern (approval-required, network-blocked,
+    repository-locked, implementation-skipped) must still raise - not be
+    silently treated as a successful rework with nothing having changed."""
+    repo = _repo("myrepo")
+    issue = GitHubIssue(
+        repository=repo.full_name,
+        number=7,
+        title="Fix bug",
+        body="",
+        state="open",
+        labels=("devbot:review",),
+        created_at=datetime(2026, 1, 1),
+    )
+    comment = PullRequestComment(
+        id=1,
+        author="reviewer",
+        body="@devbot please fix",
+        created_at=datetime(2026, 1, 2),
+        reactions={},
+    )
+    implementer_runner = MagicMock()
+    implementer_runner.run.return_value = AgentRunResult(
+        executed=True, dry_run=False, returncode=0, message=message
+    )
+
+    with pytest.raises(AgentOutcomeError):
         _apply_rework_changes(implementer_runner, repo, issue, comment)

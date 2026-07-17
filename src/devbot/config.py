@@ -18,6 +18,11 @@ from devbot.models import DevBotConfig, RepositoryConfig
 
 DEFAULT_REPOSITORIES_PATH = Path("config/repositories.yaml")
 
+# "3" mirrors `devbot.review.DEFAULT_REVIEW_LOOP_LIMIT` - duplicated as a
+# literal (not imported) to avoid a circular import: `devbot.review` ->
+# `devbot.issue_state` -> `devbot.observability` -> `devbot.reliability` ->
+# `devbot.config` (confirmed empirically, not just by direct-import
+# inspection - the cycle is transitive, three modules deep).
 _DEFAULTS: dict[str, str] = {
     "POLL_INTERVAL_SECONDS": "60",
     "DEVBOT_LOCK_FILE": "/tmp/devbot.lock",
@@ -25,6 +30,7 @@ _DEFAULTS: dict[str, str] = {
     "MAX_CONCURRENT_JOBS": "1",
     "DRY_RUN": "true",
     "LOG_LEVEL": "INFO",
+    "REVIEW_LOOP_LIMIT": "3",
 }
 
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
@@ -176,6 +182,10 @@ def load_config(
     max_concurrent_jobs = _require_positive_int(
         "MAX_CONCURRENT_JOBS", _parse_int("MAX_CONCURRENT_JOBS", _get_env("MAX_CONCURRENT_JOBS"))
     )
+    # No positivity floor: `ReviewService.process()` (`devbot.review`)
+    # already treats `review_loop_limit <= 0` as "unlimited", so 0/negative
+    # are meaningful values here, not configuration errors.
+    review_loop_limit = _parse_int("REVIEW_LOOP_LIMIT", _get_env("REVIEW_LOOP_LIMIT"))
     lock_file_raw = _require_nonempty("DEVBOT_LOCK_FILE", _get_env("DEVBOT_LOCK_FILE"))
     lock_file = Path(lock_file_raw).expanduser()
     default_agent = _require_nonempty("DEFAULT_AGENT", _get_env("DEFAULT_AGENT"))
@@ -218,4 +228,5 @@ def load_config(
         github_token=github_token,
         repositories=repositories,
         log_level=log_level,
+        review_loop_limit=review_loop_limit,
     )

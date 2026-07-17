@@ -23,8 +23,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from devbot.agent_execution import AgentExecutionContext
+from devbot.agent_outcome import AgentOutcomeError, classify_agent_outcome
 from devbot.agents import build_agent_runner
-from devbot.agents.base import AgentRunner, AgentSessionLimitError, is_session_limit_output
+from devbot.agents.base import AgentRunner, AgentSessionLimitError
 from devbot.config import ConfigError, load_config
 from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
@@ -32,7 +33,7 @@ from devbot.github_client import GitHubClient, GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
-from devbot.models import DevBotConfig, IssueComment, RepositoryConfig
+from devbot.models import AgentOutcome, DevBotConfig, IssueComment, RepositoryConfig
 from devbot.observability import (
     LOG_LEVELS,
     install_secret_filter,
@@ -80,15 +81,24 @@ def _apply_rework_changes(
         result = implementer_runner.run_context(execution_context, prompt)
     else:
         result = implementer_runner.run(repository, prompt)
-    if result.failed:
-        message = result.message or f"AgentRunner exited with code {result.returncode}"
-        if is_session_limit_output(message):
-            # Task 019 CP-019-9: a dedicated exception type lets
-            # `ReworkService.process()` (`devbot.rework`) classify this
-            # distinctly (a clear recovery hint) while still being caught by
-            # its existing generic `except (Exception, KeyboardInterrupt)`.
-            raise AgentSessionLimitError(message)
-        raise RuntimeError(message)
+
+    # CP-B0: classify via the same `classify_agent_outcome()` the initial
+    # IMPLEMENT job uses (`devbot.polling`), instead of only checking
+    # `result.failed`. This closes an Issue #41-class false-success gap on
+    # the rework path specifically: an Agent that exits 0 but whose own
+    # output says it needs approval (or is network-blocked, etc.) was
+    # previously treated as a successful rework with nothing having changed.
+    classification = classify_agent_outcome(result)
+    if classification.outcome is AgentOutcome.IMPLEMENTATION_COMPLETED:
+        return
+    message = result.message or f"AgentRunner exited with code {result.returncode}"
+    if classification.outcome is AgentOutcome.SESSION_LIMIT:
+        # Task 019 CP-019-9: a dedicated exception type lets
+        # `ReworkService.process()` (`devbot.rework`) classify this
+        # distinctly (a clear recovery hint) while still being caught by
+        # its existing generic `except (Exception, KeyboardInterrupt)`.
+        raise AgentSessionLimitError(message)
+    raise AgentOutcomeError(classification, message)
 
 
 def _add_timeline_common_args(sub_parser: argparse.ArgumentParser) -> None:
@@ -480,6 +490,7 @@ def main(
                     timeline=timeline_service,
                     actor=config.reviewer_agent,
                     logger=logger,
+                    review_loop_limit=config.review_loop_limit,
                     current_head_sha=lambda repository, pull_request: next(
                         candidate.head_sha
                         for candidate in github_client.list_pull_requests(repository)
