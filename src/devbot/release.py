@@ -170,6 +170,18 @@ def latest_stable_version(
     return max(candidates) if candidates else SemanticVersion.parse(initial_version)
 
 
+def has_stable_release(releases: Iterable[ReleaseRecord], *, main_commits: set[str]) -> bool:
+    for release in releases:
+        if release.draft or release.prerelease or release.target_commitish not in main_commits:
+            continue
+        try:
+            SemanticVersion.parse_tag(release.tag_name)
+        except ReleasePolicyError:
+            continue
+        return True
+    return False
+
+
 def next_version(base: str | SemanticVersion, increment: ReleaseIncrement) -> SemanticVersion:
     parsed = SemanticVersion.parse(base) if isinstance(base, str) else base
     return parsed.bump(increment)
@@ -407,7 +419,11 @@ def release_plan_for_pr(
             notes="",
             reason="release:none or ineligible PR",
         )
-    version = next_version(base, increment)
+    version = (
+        base
+        if not has_stable_release(releases_tuple, main_commits=main_commits)
+        else next_version(base, increment)
+    )
     return ReleasePlan(
         publish=True,
         previous_version=str(base),
@@ -451,7 +467,11 @@ def manual_release_plan(
         main_commits=main_commits,
         initial_version=initial_version,
     )
-    version = next_version(base, increment)
+    version = (
+        base
+        if not has_stable_release(releases_tuple, main_commits=main_commits)
+        else next_version(base, increment)
+    )
     notes = "\n".join([f"## {PRODUCT_NAME} {version}", "", f"- {increment}: manual release", ""])
     return ReleasePlan(
         publish=True,

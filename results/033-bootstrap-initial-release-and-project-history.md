@@ -11,6 +11,9 @@
   추가했다.
 - Task 033 검증 테스트와 history wording regression test를
   `tests/test_release.py`에 추가했다.
+- Rework 요청에 따라 prior stable Release가 없을 때 자동 PR planning,
+  manual dispatch planning, release pipeline CLI planning이 모두 첫 stable
+  version을 `0.1.0`/`v0.1.0`으로 고정하도록 수정하고 회귀 테스트를 추가했다.
 - 로컬에서 Task 032 portable Python artifact와 `SHA256SUMS`를 생성하고,
   패키지된 `devbot --version` smoke를 수행했다.
 
@@ -21,6 +24,9 @@
 - 권위 버전은 `pyproject.toml`의 `0.1.0`을 사용했다.
 - 과거 prerelease 태그 `v0.1.0-alpha.1`은 stable Release 기준으로 사용하지
   않는다.
+- prior stable Release가 없으면 release increment label은 publish eligibility만
+  결정하고 첫 stable version은 authoritative initial version 그대로 사용한다.
+  prior stable Release가 있는 이후에는 기존 semantic bump 정책을 유지한다.
 - future Release Notes section order는 코드 상수와 문서 양쪽에 고정했다.
 - 현재 실행 환경 지시가 원격 discovery와 GitHub publication을 금지하므로, 실제
   GitHub Release publish는 수행하지 않고 operator-controlled remaining step으로
@@ -41,7 +47,7 @@
 - Tag: `v0.1.0`
 - Artifact: `devbot-0.1.0-portable-python.tar.gz`
 - SHA-256:
-  `8a2a30bb78f1f06da0b80519efc13aa7003a055d93a4896aa2aa38deb6d7401a`
+  `fc5a265939b8ceb933977980f14386af0fd48905fd02646d1f209ac2f9c76487`
 - Intended Release URL: `https://github.com/hjlee83/devbot/releases/tag/v0.1.0`
 - Publication status: pending operator-controlled publication after merge and validated
   release pipeline execution from `main`.
@@ -52,7 +58,7 @@
 
 | Checkpoint | Evidence |
 | --- | --- |
-| CP-033-1 initial stable version | `test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract` |
+| CP-033-1 initial stable version | `test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract`, `test_release_plan_bootstraps_first_stable_release_from_authoritative_initial_version`, `test_manual_release_plan_bootstraps_first_stable_from_initial_version`, `test_release_pipeline_plan_command_bootstraps_first_stable_release` |
 | CP-033-2 stable Release safety | `test_initial_release_rejects_prior_stable_release_or_moved_tag` |
 | CP-033-3 artifact/checksum evidence | `test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract`, existing artifact/checksum/package CLI tests |
 | CP-033-4 Release Notes standard | `test_initial_release_notes_use_standard_future_sections` |
@@ -72,18 +78,24 @@
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run ruff check tests/test_release.py`: PASS
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run pytest tests/test_release.py -q`: PASS,
   33 passed
+- `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run ruff check src/devbot/release.py tests/test_release.py tests/test_planner.py`: PASS
+- `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run pytest tests/test_release.py tests/test_planner.py -q`: PASS,
+  46 passed
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run pytest tests/test_release.py tests/test_task_contract_docs.py -q`: PASS, 39 passed
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run pytest -q`: PASS, 524 passed
+- `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv sync`: PASS
+- `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run ruff check .`: PASS
+- `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run pytest -q`: PASS, 527 passed
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache WORKSPACE_ROOT=/tmp/devbot-task033-doctor-runtime DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task033-doctor-runtime/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task033-doctor-runtime/devbot.lock GITHUB_TOKEN=dummy uv run devbot doctor --ci`: PASS exit 0, `safe_to_start: yes`; dummy token caused expected `github_connectivity` bad-credentials diagnostic.
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache WORKSPACE_ROOT=/tmp/devbot-task033-runtime DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task033-runtime/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task033-runtime/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
 
 ## 수동 검증 결과
 
-- Artifact file size: `114935` bytes
+- Artifact file size: `114999` bytes
 - `SHA256SUMS` content:
 
 ```text
-8a2a30bb78f1f06da0b80519efc13aa7003a055d93a4896aa2aa38deb6d7401a  devbot-0.1.0-portable-python.tar.gz
+fc5a265939b8ceb933977980f14386af0fd48905fd02646d1f209ac2f9c76487  devbot-0.1.0-portable-python.tar.gz
 ```
 
 - Initial Release Notes are recorded in `docs/history.md`.

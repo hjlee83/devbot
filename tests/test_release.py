@@ -24,6 +24,7 @@ from devbot.release import (
     expected_artifact_names,
     initial_release_notes,
     latest_stable_version,
+    manual_release_plan,
     next_version,
     release_artifact_name,
     release_increment_for_pr,
@@ -292,6 +293,41 @@ def test_release_plan_uses_pr_label_and_latest_stable_release() -> None:
     assert plan.tag == "v0.3.0"
 
 
+def test_release_plan_bootstraps_first_stable_release_from_authoritative_initial_version() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:minor",), merge_commit_sha="commit-a"),
+        releases=(
+            ReleaseRecord("v0.1.0-alpha.1", "commit-zero", prerelease=True),
+            ReleaseRecord("v0.0.9", "feature-commit"),
+        ),
+        main_commits={"commit-zero", "commit-a"},
+        initial_version="0.1.0",
+        target_commit="commit-a",
+    )
+
+    assert plan.publish is True
+    assert plan.previous_version == "0.1.0"
+    assert plan.increment == "minor"
+    assert plan.new_version == "0.1.0"
+    assert plan.tag == "v0.1.0"
+
+
+def test_manual_release_plan_bootstraps_first_stable_from_initial_version() -> None:
+    plan = manual_release_plan(
+        increment="patch",
+        releases=(ReleaseRecord("v0.1.0-alpha.1", "commit-zero", prerelease=True),),
+        main_commits={"commit-zero", "commit-a"},
+        initial_version="0.1.0",
+        target_commit="commit-a",
+    )
+
+    assert plan.publish is True
+    assert plan.previous_version == "0.1.0"
+    assert plan.increment == "patch"
+    assert plan.new_version == "0.1.0"
+    assert plan.tag == "v0.1.0"
+
+
 
 def test_release_plan_reuses_existing_stable_release_for_target_commit() -> None:
     plan = release_plan_for_pr(
@@ -537,6 +573,68 @@ def test_release_pipeline_plan_command_writes_github_outputs(tmp_path: Path) -> 
     assert plan["version"] == "0.2.1"
     assert plan["tag"] == "v0.2.1"
     assert "publish=true" in github_output.read_text(encoding="utf-8")
+
+
+def test_release_pipeline_plan_command_bootstraps_first_stable_release(tmp_path: Path) -> None:
+    event = tmp_path / "event.json"
+    releases = tmp_path / "releases.json"
+    main_commits = tmp_path / "main-commits.json"
+    output = tmp_path / "plan.json"
+    event.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "number": 69,
+                    "title": "Task 033: Bootstrap Initial Release",
+                    "labels": [{"name": "release:minor"}],
+                    "merged": True,
+                    "base": {"ref": "main"},
+                    "merge_commit_sha": "initial-main",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    releases.write_text(
+        json.dumps(
+            [{"tag_name": "v0.1.0-alpha.1", "target_commitish": "old", "prerelease": True}]
+        ),
+        encoding="utf-8",
+    )
+    main_commits.write_text(json.dumps(["old", "initial-main"]), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/release_pipeline.py",
+            "plan",
+            "--event-name",
+            "push",
+            "--event-json",
+            str(event),
+            "--releases-json",
+            str(releases),
+            "--main-commits-json",
+            str(main_commits),
+            "--initial-version",
+            "0.1.0",
+            "--target-commit",
+            "initial-main",
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    plan = json.loads(output.read_text(encoding="utf-8"))
+    assert plan["publish"] is True
+    assert plan["previous_version"] == "0.1.0"
+    assert plan["increment"] == "minor"
+    assert plan["version"] == "0.1.0"
+    assert plan["tag"] == "v0.1.0"
 
 
 def test_initial_release_notes_use_standard_future_sections() -> None:

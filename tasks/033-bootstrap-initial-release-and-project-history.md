@@ -75,6 +75,9 @@ and prerelease history does not become a prior stable Release.
 
 Required test:
 - `test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract`
+- `test_release_plan_bootstraps_first_stable_release_from_authoritative_initial_version`
+- `test_manual_release_plan_bootstraps_first_stable_from_initial_version`
+- `test_release_pipeline_plan_command_bootstraps_first_stable_release`
 
 ### CP-033-2 — Stable Release safety
 
