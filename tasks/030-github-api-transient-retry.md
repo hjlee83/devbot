@@ -1,8 +1,8 @@
-# Task 030: GitHub API Transient Retry
+# Task 030: External Dependency Reliability
 
 ## Goal
 
-Make DevBot resilient to temporary GitHub API failures so transient outages do not incorrectly block Tasks, mutate workflow state, or require operator intervention.
+Make DevBot resilient to temporary GitHub API failures and interactive Agent execution so external dependencies do not incorrectly block Tasks, mutate workflow state, or require avoidable operator intervention.
 
 ## Scope
 
@@ -15,12 +15,18 @@ Make DevBot resilient to temporary GitHub API failures so transient outages do n
 7. Resume safely on a later retry or poll cycle without duplicate comments, labels, branches, PRs, or delivery.
 8. Emit structured retry diagnostics without exposing credentials or Authorization headers.
 9. Apply the same policy to GitHub read and write clients.
+10. Run Codex implementer/reviewer processes non-interactively with approval disabled and workspace-scoped write access.
+11. Ensure Codex network access is enabled for GitHub reads required by autonomous implementation and review.
+12. Detect interactive approval prompts such as `needs your approval`, `Should I proceed`, or equivalent confirmation requests.
+13. Classify interactive Agent output as `agent_configuration_invalid` rather than `review_failed` or an invalid review summary.
+14. Preserve Task state and provide an actionable recovery message when Agent configuration is interactive.
+15. Log the effective Agent execution policy without exposing secrets.
 
 ## Out of Scope
 
 - GitHub App migration
 - PAT creation or rotation
-- AI Agent retry policy
+- General AI Agent retry/failover policy
 - package registry retry policy
 - Admin UI
 - automatic merge
@@ -30,7 +36,7 @@ Make DevBot resilient to temporary GitHub API failures so transient outages do n
 - Task Issue: #62
 - Branch: `task/030-github-api-transient-retry`
 - Contract: `tasks/030-github-api-transient-retry.md`
-- Pull Request: this Task's single Planner PR
+- Pull Request: #63
 - Result: `results/030-github-api-transient-retry.md`
 
 ## Checkpoints
@@ -83,6 +89,30 @@ Existing polling, delivery, review, rework, timeline, doctor, and reliability be
 
 Required test: `test_existing_workflows_remain_compatible_with_github_retry`
 
+### CP-030-9 — Non-interactive Codex execution
+
+DevBot invokes Codex with approval disabled, workspace-scoped write access, network access enabled, and the PreparedWorkspace as cwd for both implementer and reviewer roles.
+
+Required test: `test_codex_runner_uses_non_interactive_workspace_policy`
+
+### CP-030-10 — Interactive prompt detection
+
+Codex output requesting approval or confirmation is detected before review-summary parsing and classified as `agent_configuration_invalid`.
+
+Required test: `test_interactive_codex_output_is_classified_before_review_summary_parsing`
+
+### CP-030-11 — Interactive failure recovery
+
+Interactive Agent configuration does not produce a generic `review_failed` transition; the current Task state is preserved or restored and diagnostics identify the required non-interactive policy.
+
+Required test: `test_interactive_agent_configuration_preserves_task_state_and_reports_recovery`
+
+### CP-030-12 — Effective policy diagnostics
+
+Startup or Agent-run diagnostics expose the effective Agent name, role, approval policy, sandbox mode, network policy, and workspace path without exposing credentials.
+
+Required test: `test_agent_execution_policy_diagnostics_are_safe_and_complete`
+
 ## Validation Gate
 
 Run from the Task PreparedWorkspace:
@@ -97,16 +127,20 @@ uv run devbot --once --dry-run
 
 Also demonstrate deterministic tests for 429, 500, 502, 503, 504, timeout, connection failure, 401, 403, and 404 without real sleeping or external network dependency.
 
+Demonstrate that a reviewer requiring `gh pr view` runs without an approval prompt and returns exactly one valid terminal review decision: `MERGE READY` or `REQUEST CHANGES`.
+
 ## Definition of Done
 
 - All checkpoints and required tests pass.
 - Transient GitHub failures are retried safely and boundedly.
 - Permanent authentication, permission, and resource failures remain actionable.
 - Transient failures do not mutate Task state or create duplicate side effects.
+- Codex implementer and reviewer execution is non-interactive in Local and VPS-style environments.
+- Interactive approval output is classified explicitly and never misreported as an invalid review summary.
 - Result and PR Evidence record the actual implementation and validation outcomes.
-- DevBot reaches `devbot:ready-to-merge` on Issue #62 and the canonical PR.
+- DevBot reaches `devbot:ready-to-merge` on Issue #62 and PR #63.
 - Final merge remains manual.
 
 ## Branch and PR Policy
 
-This Task uses exactly one Issue, one Branch, one Contract, and one Pull Request. Continue all implementation, review, and rework on `task/030-github-api-transient-retry` and its linked Planner PR. Do not create a separate Execution Issue, branch, contract, or PR.
+This Task uses exactly one Issue, one Branch, one Contract, and one Pull Request. Continue all implementation, review, and rework on `task/030-github-api-transient-retry` and PR #63. Do not create a separate Execution Issue, branch, contract, or PR.
