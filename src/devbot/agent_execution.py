@@ -13,6 +13,23 @@ from devbot.github_client import GitHubIssue, PullRequest
 from devbot.models import RepositoryConfig
 from devbot.worktree import PreparedWorkspace
 
+_SAFE_INHERITED_ENV_KEYS = frozenset(
+    {
+        "HOME",
+        "PATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "USER",
+        "LOGNAME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_HOME",
+        "CODEX_HOME",
+    }
+)
+
 
 class AgentRole(StrEnum):
     IMPLEMENT = "implement"
@@ -36,16 +53,21 @@ class AgentExecutionContext:
 
     def safe_environment(self) -> dict[str, str]:
         env = {
-            "DEVBOT_REPOSITORY": self.repository.full_name,
-            "DEVBOT_BRANCH": self.canonical_branch,
-            "DEVBOT_ISSUE": str(self.issue.number),
-            "DEVBOT_PR": str(self.pull_request.number if self.pull_request else ""),
-            "DEVBOT_WORKSPACE": str(self.workspace),
-            "DEVBOT_ROLE": self.role.value,
-            "DEVBOT_EXECUTION_ID": self.execution_id,
+            key: value
+            for key, value in os.environ.items()
+            if key in _SAFE_INHERITED_ENV_KEYS and value
         }
-        if "PATH" in os.environ:
-            env["PATH"] = os.environ["PATH"]
+        env.update(
+            {
+                "DEVBOT_REPOSITORY": self.repository.full_name,
+                "DEVBOT_BRANCH": self.canonical_branch,
+                "DEVBOT_ISSUE": str(self.issue.number),
+                "DEVBOT_PR": str(self.pull_request.number if self.pull_request else ""),
+                "DEVBOT_WORKSPACE": str(self.workspace),
+                "DEVBOT_ROLE": self.role.value,
+                "DEVBOT_EXECUTION_ID": self.execution_id,
+            }
+        )
         return env
 
 
@@ -82,6 +104,9 @@ class AgentLauncher:
     command_builder: CommandBuilder
     policy: AgentExecutionPolicy
 
+    def environment(self, context: AgentExecutionContext) -> dict[str, str]:
+        return context.safe_environment()
+
     def diagnostics(self, context: AgentExecutionContext) -> AgentExecutionDiagnostics:
         return AgentExecutionDiagnostics(
             agent=self.policy.agent,
@@ -103,7 +128,7 @@ class AgentLauncher:
         return subprocess.run(
             list(self.command_builder(context, prompt)),
             cwd=str(context.workspace),
-            env=context.safe_environment(),
+            env=self.environment(context),
             capture_output=True,
             text=True,
             check=False,

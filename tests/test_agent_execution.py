@@ -97,6 +97,39 @@ def test_agent_environment_is_normalized_and_contains_no_secrets() -> None:
     assert not any("TOKEN" in key or "SECRET" in key or "AUTHORIZATION" in key for key in env)
 
 
+def test_agent_environment_preserves_user_auth_context(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HOME", "/Users/tester")
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+    monkeypatch.setenv("TMPDIR", "/tmp/tester")
+    monkeypatch.setenv("USER", "tester")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/Users/tester/.config")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/Users/tester/.claude")
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
+
+    context = AgentExecutionContext(
+        repository=_repo(),
+        prepared_workspace=_prepared(),
+        canonical_branch="task/031-agent-execution-environment",
+        issue=_issue(),
+        pull_request=_pr(),
+        execution_id="exec-auth",
+        role=AgentRole.REVIEW,
+    )
+
+    env = context.safe_environment()
+
+    assert env["HOME"] == "/Users/tester"
+    assert env["PATH"] == "/usr/local/bin:/usr/bin"
+    assert env["TMPDIR"] == "/tmp/tester"
+    assert env["USER"] == "tester"
+    assert env["XDG_CONFIG_HOME"] == "/Users/tester/.config"
+    assert env["CLAUDE_CONFIG_DIR"] == "/Users/tester/.claude"
+    assert env["DEVBOT_ROLE"] == "review"
+    assert "GITHUB_TOKEN" not in env
+
+
 def test_agent_launcher_applies_shared_context_to_provider_command() -> None:
     context = AgentExecutionContext(
         repository=_repo(),
@@ -127,6 +160,39 @@ def test_agent_launcher_applies_shared_context_to_provider_command() -> None:
     assert kwargs["cwd"] == str(context.workspace)
     assert kwargs["env"]["DEVBOT_WORKSPACE"] == str(context.workspace)
     assert kwargs["env"]["DEVBOT_ROLE"] == "review"
+
+
+def test_claude_execution_inherits_home_and_prepared_workspace(monkeypatch) -> None:
+    monkeypatch.setenv("HOME", "/Users/tester")
+    context = AgentExecutionContext(
+        repository=_repo(),
+        prepared_workspace=_prepared(),
+        canonical_branch="task/031-agent-execution-environment",
+        issue=_issue(),
+        pull_request=_pr(),
+        execution_id="exec-claude",
+        role=AgentRole.REVIEW,
+    )
+    launcher = AgentLauncher(
+        command_builder=lambda _context, prompt: ["claude", "-p", prompt],
+        policy=AgentExecutionPolicy(
+            agent="claude",
+            version="1",
+            sandbox="provider-default",
+            approval="acceptEdits",
+            network="provider-default",
+            capability_summary={"non_interactive": True},
+        ),
+    )
+
+    with patch("devbot.agent_execution.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        launcher.run(context, "prompt")
+
+    _, kwargs = mock_run.call_args
+    assert kwargs["cwd"] == str(context.workspace)
+    assert kwargs["env"]["HOME"] == "/Users/tester"
+    assert kwargs["env"]["DEVBOT_EXECUTION_ID"] == "exec-claude"
 
 
 def test_agent_execution_diagnostics_are_complete_and_redacted() -> None:

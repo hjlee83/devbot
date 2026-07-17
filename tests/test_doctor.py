@@ -2,6 +2,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from devbot.doctor import (
     build_doctor_report,
     check_agent_execution_readiness,
@@ -174,6 +176,37 @@ def test_doctor_reports_agent_execution_readiness() -> None:
     assert check.name == "agent_execution_readiness[reviewer:codex]"
     assert "version=codex 1.0" in check.detail
     assert "unattended_ready=True" in check.detail
+
+
+def test_doctor_checks_claude_auth_with_launcher_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path = tmp_path / "myrepo"
+    _init_git_repo(repo_path)
+    config = _config([_repo(repo_path)], reviewer_agent="claude")
+    monkeypatch.setenv("HOME", "/Users/tester")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> MagicMock:
+        calls.append((args, kwargs))
+        return MagicMock(returncode=0, stdout="claude 1.0\n", stderr="")
+
+    with (
+        patch("devbot.doctor.shutil.which", return_value="/usr/local/bin/claude"),
+        patch("devbot.doctor.subprocess.run", side_effect=_run),
+    ):
+        check = check_agent_execution_readiness("claude", "reviewer", config)
+
+    assert check.ok is True
+    assert calls[0][0] == ["claude", "--version"]
+    assert calls[1][0] == ["claude", "auth", "status"]
+    for _args, kwargs in calls:
+        assert kwargs["cwd"] == str(repo_path)
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert env["HOME"] == "/Users/tester"
+        assert env["DEVBOT_ROLE"] == "review"
+        assert "GITHUB_TOKEN" not in env
 
 
 # ---- CP-023-10: doctor reports Job worktree health ----

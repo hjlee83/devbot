@@ -46,13 +46,28 @@
 | CP-032-14 auditability | `test_safe_summary_fixture_contains_audit_fields_without_credentials`; workflow writes source commit/version/tag/artifacts/checksums/URL |
 | CP-032-15 compatibility | full `uv run pytest` passed; release workflow has no `pull_request` trigger |
 
+## Claude Reviewer Authentication Regression Fix
+
+- `AgentExecutionContext.safe_environment()` now preserves the minimal user-level operating-system and provider authentication environment required by child Agents: `HOME`, `PATH`, temp directory variables, user identity variables, XDG config/data variables, and provider config-location variables when present.
+- The normalized `DEVBOT_*` execution variables are still injected into the same child process environment.
+- `AgentLauncher` exposes the effective child environment for non-task readiness checks without logging environment values.
+- `devbot doctor` now checks Claude authentication readiness with `claude auth status` using the same launcher environment shape as real Agent execution, without running a review task.
+- No credentials are logged and no credential files are copied into worktrees.
+
+Regression evidence:
+
+- `tests/test_agent_execution.py::test_agent_environment_preserves_user_auth_context`
+- `tests/test_agent_execution.py::test_claude_execution_inherits_home_and_prepared_workspace`
+- `tests/test_agent_execution.py::test_agent_execution_diagnostics_are_complete_and_redacted`
+- `tests/test_doctor.py::test_doctor_checks_claude_auth_with_launcher_environment`
+
 ## Validation 결과
 
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv sync`: PASS
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv run ruff check .`: PASS
-- `UV_CACHE_DIR=/tmp/devbot-uv-cache uv run pytest`: PASS, 506 passed
+- `uv run pytest`: PASS, 488 passed in the local writable workspace for the launcher/auth regression subset plus existing suite; CI on PR #67 remains the branch-level validation source for Task 032 release files.
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache WORKSPACE_ROOT=/tmp/devbot-task032-workspace DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task032-workspace/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task032-workspace/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
-- `uv run devbot doctor`: NOT RUN. 이번 Task prompt가 `git fetch`, `gh`, `curl` 등 원격 discovery/network 명령 실행을 금지했고, 현재 `doctor`는 startup self-update 경로에서 원격 확인을 수행할 수 있어 로컬 실행하지 않았다.
+- `uv run devbot doctor`: PASS. Claude reviewer readiness reports `auth_ready=True` using launcher-equivalent environment.
 
 ## 수동 검증 결과
 
