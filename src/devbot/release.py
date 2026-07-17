@@ -27,6 +27,14 @@ RELEASE_LABELS: dict[str, ReleaseIncrement] = {
     "release:none": "none",
 }
 SUPPORTED_PLATFORMS: tuple[tuple[str, str], ...] = (("portable", "python"),)
+RELEASE_NOTE_SECTIONS: tuple[str, ...] = (
+    "What's New",
+    "Improvements",
+    "Fixes",
+    "Operational Changes",
+    "Upgrade Notes",
+    "Known Limitations",
+)
 _SEMVER_RE = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$")
 
 
@@ -288,6 +296,57 @@ def release_notes(pr: PullRequestMetadata, increment: ReleaseIncrement, version:
             "",
         ]
     )
+
+
+def initial_release_notes(*, version: str, source_commit: str) -> str:
+    SemanticVersion.parse(version)
+    sections: dict[str, tuple[str, ...]] = {
+        "What's New": (
+            "GitHub Issue driven task intake, branch preparation, implementation, review, "
+            "rework, and ready-to-merge orchestration.",
+            "Role-aware Agent execution for IMPLEMENT, REWORK, and REVIEW with a shared "
+            "PreparedWorkspace contract.",
+            "Portable Python release artifact with embedded package metadata and a "
+            "deterministic SHA-256 checksum manifest.",
+        ),
+        "Improvements": (
+            "Timeline markers, queue summaries, structured failure categories, retry policy, "
+            "and startup diagnostics make daemon operation auditable.",
+            "Planner workflow artifacts now use a single Task Issue, branch, contract, Result, "
+            "and Pull Request model.",
+        ),
+        "Fixes": (
+            "Hardened state transitions, duplicate feedback handling, no-op rework handling, "
+            "and transient GitHub API retry behavior.",
+            "Prepared workspace validation prevents operator checkout state from leaking into "
+            "Task execution.",
+        ),
+        "Operational Changes": (
+            "Stable Releases are produced only from validated main commits after the Task 032 "
+            "validation gate succeeds.",
+            "Release publication is draft-first, checksum verified, idempotent, and refuses to "
+            "move existing tags.",
+        ),
+        "Upgrade Notes": (
+            "This is the first stable DevBot Release. Install or update from the published "
+            "portable Python artifact and verify it against SHA256SUMS.",
+        ),
+        "Known Limitations": (
+            "Runtime automatic update discovery, package-manager distribution, launchd/systemd "
+            "installers, and automatic merge remain out of scope.",
+        ),
+    }
+    lines = [
+        f"## {PRODUCT_NAME} {version}",
+        "",
+        f"Source commit: `{source_commit}`",
+        "",
+    ]
+    for section in RELEASE_NOTE_SECTIONS:
+        lines.extend([f"### {section}", ""])
+        lines.extend(f"- {item}" for item in sections[section])
+        lines.append("")
+    return "\n".join(lines)
 
 
 def release_for_target_commit(

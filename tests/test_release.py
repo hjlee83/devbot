@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from devbot.release import (
+    RELEASE_NOTE_SECTIONS,
     PullRequestMetadata,
     ReleasePolicyError,
     ReleaseRecord,
@@ -21,6 +22,7 @@ from devbot.release import (
     build_artifact,
     checksum_manifest,
     expected_artifact_names,
+    initial_release_notes,
     latest_stable_version,
     next_version,
     release_artifact_name,
@@ -535,3 +537,46 @@ def test_release_pipeline_plan_command_writes_github_outputs(tmp_path: Path) -> 
     assert plan["version"] == "0.2.1"
     assert plan["tag"] == "v0.2.1"
     assert "publish=true" in github_output.read_text(encoding="utf-8")
+
+
+def test_initial_release_notes_use_standard_future_sections() -> None:
+    notes = initial_release_notes(version="0.1.0", source_commit="6526cfe")
+
+    assert notes.startswith("## devbot 0.1.0\n")
+    assert "Source commit: `6526cfe`" in notes
+    for section in RELEASE_NOTE_SECTIONS:
+        assert f"### {section}\n" in notes
+    assert notes.index("### What's New") < notes.index("### Improvements")
+    assert "Portable Python release artifact" in notes
+    assert "Runtime automatic update discovery" in notes
+
+
+def test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract(
+    tmp_path: Path,
+) -> None:
+    version = authoritative_version(Path.cwd())
+    assert version == "0.1.0"
+    assert SemanticVersion.parse(version).tag == "v0.1.0"
+
+    artifact = build_artifact(tmp_path, version=version, os_name="portable", architecture="python")
+    manifest = checksum_manifest([artifact], expected_names=expected_artifact_names(version))
+
+    assert artifact.name == "devbot-0.1.0-portable-python.tar.gz"
+    assert f"  {artifact.name}\n" in manifest
+
+
+def test_initial_release_rejects_prior_stable_release_or_moved_tag() -> None:
+    with pytest.raises(ReleasePolicyError, match="release already exists"):
+        assert_tag_and_release_can_be_created(
+            tag="v0.1.0",
+            target_commit="6526cfe",
+            existing_tags={},
+            existing_releases=(ReleaseRecord("v0.1.0", "old-main"),),
+        )
+    with pytest.raises(ReleasePolicyError, match="refusing to move"):
+        assert_tag_and_release_can_be_created(
+            tag="v0.1.0",
+            target_commit="6526cfe",
+            existing_tags={"v0.1.0": "old-main"},
+            existing_releases=(),
+        )
