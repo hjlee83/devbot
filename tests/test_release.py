@@ -268,6 +268,49 @@ def test_release_rerun_is_idempotent_for_same_commit() -> None:
         )
         == "already-published"
     )
+    assert (
+        release_rerun_result(
+            tag="v0.2.0",
+            target_commit="sha",
+            existing_tags={"v0.2.0": "sha"},
+            existing_releases=(),
+        )
+        == "resume-with-tag"
+    )
+    assert (
+        release_rerun_result(
+            tag="v0.2.0",
+            target_commit="sha",
+            existing_tags={"v0.2.0": "sha"},
+            existing_releases=(ReleaseRecord("v0.2.0", "sha", draft=True),),
+        )
+        == "resume-draft"
+    )
+    with pytest.raises(ReleasePolicyError):
+        release_rerun_result(
+            tag="v0.2.0",
+            target_commit="sha",
+            existing_tags={"v0.2.0": "other"},
+            existing_releases=(),
+        )
+
+
+def test_release_workflow_resumes_partial_publication_states() -> None:
+    workflow = yaml.safe_load(Path(".github/workflows/release.yml").read_text(encoding="utf-8"))
+    publish_steps = "\n".join(
+        step.get("run", "") for step in workflow["jobs"]["publish-release"]["steps"]
+    )
+    step_conditions = [
+        step.get("if", "") for step in workflow["jobs"]["publish-release"]["steps"]
+    ]
+
+    assert "release_state=already-published" in publish_steps
+    assert "release_state=resume-with-tag" in publish_steps
+    assert "release_state=resume-draft" in publish_steps
+    assert "--clobber" in publish_steps
+    assert "Stable release $TAG exists but assets are incomplete" in publish_steps
+    assert "env.release_state == 'create'" in step_conditions
+    assert "env.release_state != 'already-published'" in step_conditions
 
 
 def test_safe_summary_fixture_contains_audit_fields_without_credentials() -> None:

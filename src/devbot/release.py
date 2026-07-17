@@ -373,19 +373,22 @@ def release_rerun_result(
     target_commit: str,
     existing_tags: dict[str, str],
     existing_releases: Iterable[ReleaseRecord],
-) -> Literal["already-published", "create"]:
+) -> Literal["already-published", "resume-draft", "resume-with-tag", "create"]:
     releases = tuple(existing_releases)
-    if existing_tags.get(tag) == target_commit and any(
-        release.tag_name == tag and release.target_commitish == target_commit
-        for release in releases
-    ):
+    tag_target = existing_tags.get(tag)
+    release = next((candidate for candidate in releases if candidate.tag_name == tag), None)
+    if tag_target is not None and tag_target != target_commit:
+        raise ReleasePolicyError(f"refusing to move existing release tag: {tag}")
+    if release is not None and release.target_commitish != target_commit:
+        raise ReleasePolicyError(f"release targets a different commit: {tag}")
+    if tag_target == target_commit and release is not None and not release.draft:
         return "already-published"
-    assert_tag_and_release_can_be_created(
-        tag=tag,
-        target_commit=target_commit,
-        existing_tags=existing_tags,
-        existing_releases=releases,
-    )
+    if tag_target == target_commit and release is not None and release.draft:
+        return "resume-draft"
+    if tag_target == target_commit:
+        return "resume-with-tag"
+    if release is not None:
+        raise ReleasePolicyError(f"release exists without matching tag: {tag}")
     return "create"
 
 

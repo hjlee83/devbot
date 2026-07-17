@@ -181,34 +181,83 @@ jobs:
             --version "${{ needs.plan-release.outputs.version }}" \
             --artifact-dir dist \
             --output dist/SHA256SUMS
-      - name: Create immutable tag
+      - name: Prepare idempotent release publication
         run: |
-          if git ls-remote --exit-code --tags origin "${{ needs.plan-release.outputs.tag }}" >/dev/null 2>&1; then
-            echo "Tag already exists; refusing to overwrite ${{ needs.plan-release.outputs.tag }}" >&2
-            exit 1
+          set -euo pipefail
+          TAG="${{ needs.plan-release.outputs.tag }}"
+          TARGET_SHA="${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
+          EXPECTED_ASSETS="$(for path in dist/*.tar.gz dist/SHA256SUMS; do basename "$path"; done | sort)"
+          TAG_TARGET=""
+          release_tag_exists=false
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            TAG_TARGET="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk '{print $1}')"
+            if [ -z "$TAG_TARGET" ]; then
+              TAG_TARGET="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
+            fi
+            if [ "$TAG_TARGET" != "$TARGET_SHA" ]; then
+              echo "Tag $TAG points at $TAG_TARGET, expected $TARGET_SHA; refusing to move it" >&2
+              exit 1
+            fi
+            release_tag_exists=true
+            echo "release_tag_exists=true" >> "$GITHUB_ENV"
+          else
+            echo "release_tag_exists=false" >> "$GITHUB_ENV"
           fi
-          if gh release view "${{ needs.plan-release.outputs.tag }}" >/dev/null 2>&1; then
-            echo "Release already exists; refusing duplicate publication ${{ needs.plan-release.outputs.tag }}" >&2
-            exit 1
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release view "$TAG" --json isDraft,targetCommitish,assets > release-state.json
+            RELEASE_TARGET="$(jq -r '.targetCommitish' release-state.json)"
+            if [ "$RELEASE_TARGET" != "$TARGET_SHA" ]; then
+              echo "Release $TAG targets $RELEASE_TARGET, expected $TARGET_SHA" >&2
+              exit 1
+            fi
+            IS_DRAFT="$(jq -r '.isDraft' release-state.json)"
+            ACTUAL_ASSETS="$(jq -r '.assets[].name' release-state.json | sort)"
+            if [ "$IS_DRAFT" = "false" ]; then
+              if [ "$ACTUAL_ASSETS" = "$EXPECTED_ASSETS" ]; then
+                echo "release_state=already-published" >> "$GITHUB_ENV"
+                exit 0
+              fi
+              echo "Stable release $TAG exists but assets are incomplete" >&2
+              exit 1
+            fi
+            echo "release_state=resume-draft" >> "$GITHUB_ENV"
+          else
+            if [ "${release_tag_exists}" = "true" ]; then
+              echo "release_state=resume-with-tag" >> "$GITHUB_ENV"
+            else
+              echo "release_state=create" >> "$GITHUB_ENV"
+            fi
           fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Create immutable tag
+        if: env.release_state == 'create'
+        run: |
           git tag --annotate "${{ needs.plan-release.outputs.tag }}" \
             --message "Release ${{ needs.plan-release.outputs.tag }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
           git push origin "${{ needs.plan-release.outputs.tag }}"
-        env:
-          GH_TOKEN: ${{ github.token }}
       - name: Create draft release
+        if: env.release_state == 'create' || env.release_state == 'resume-with-tag'
         run: |
           printf '%s\n' "$RELEASE_NOTES" > release-notes.md
           gh release create "${{ needs.plan-release.outputs.tag }}" dist/* \
             --draft \
             --verify-tag \
+            --target "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}" \
             --title "${{ needs.plan-release.outputs.tag }}" \
             --notes-file release-notes.md
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_NOTES: ${{ needs.plan-release.outputs.notes }}
+      - name: Complete draft release assets
+        if: env.release_state == 'resume-draft'
+        run: gh release upload "${{ needs.plan-release.outputs.tag }}" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Publish stable release
+        if: env.release_state != 'already-published'
         run: gh release edit "${{ needs.plan-release.outputs.tag }}" --draft=false
         env:
           GH_TOKEN: ${{ github.token }}

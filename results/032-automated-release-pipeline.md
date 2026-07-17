@@ -41,7 +41,7 @@
 | CP-032-9 atomic publication | workflow verifies artifacts/checksums before `gh release create --draft`, then publishes with `gh release edit --draft=false` |
 | CP-032-10 release notes | `test_release_note_generation_is_deterministic`; workflow passes generated notes through `--notes-file`; sample: `- minor: #67 Task 032: Automated Release Pipeline` |
 | CP-032-11 permissions | workflow top-level `contents: read`; release write permission only on `publish-release`; no PAT required |
-| CP-032-12 concurrency/idempotency | workflow `concurrency.group: release-${{ github.repository }}`; `test_release_rerun_is_idempotent_for_same_commit` |
+| CP-032-12 concurrency/idempotency | workflow `concurrency.group: release-${{ github.repository }}`; `test_release_rerun_is_idempotent_for_same_commit`; `test_release_workflow_resumes_partial_publication_states` |
 | CP-032-13 manual dispatch | workflow `workflow_dispatch` inputs `increment` and `commit_sha`; manual job rejects non-main commits and uses the same planner/artifact/checksum/publication path |
 | CP-032-14 auditability | `test_safe_summary_fixture_contains_audit_fields_without_credentials`; workflow writes source commit/version/tag/artifacts/checksums/URL |
 | CP-032-15 compatibility | full `uv run pytest` passed; release workflow has no `pull_request` trigger |
@@ -63,11 +63,20 @@
 - Release workflow의 `validate-main`은 `uv run devbot doctor --ci`를 사용한다.
 - `doctor --ci`는 지정 commit checkout 검증용이므로 startup self-update를 수행하지 않는다.
 
+## 재리뷰 Blocker 대응: Release Publication Idempotency
+
+- `release_rerun_result()`가 동일 commit의 기존 tag/release 상태를 `already-published`, `resume-with-tag`, `resume-draft`, `create`로 분류한다.
+- `publish-release` workflow는 기존 tag가 같은 commit을 가리키면 재사용하고, 다른 commit이면 fail-closed한다.
+- tag만 있고 Release가 없으면 기존 tag로 draft Release 생성을 계속한다.
+- draft Release가 있으면 `gh release upload --clobber`로 누락/교체 asset과 checksum을 보완한 뒤 stable publish를 재개한다.
+- stable Release가 이미 있고 expected artifact와 `SHA256SUMS`가 모두 있으면 `already-published`로 성공 처리한다.
+- stable Release가 불완전하거나 tag/release target이 충돌하면 fail-closed한다.
+
 ## Validation 결과
 
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv sync`: PASS
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv run ruff check .`: PASS
-- `uv run pytest`: PASS, 513 passed
+- `uv run pytest`: PASS, 514 passed
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache WORKSPACE_ROOT=/tmp/devbot-task032-workspace DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task032-workspace/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task032-workspace/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
 - `uv run devbot doctor --ci`: PASS. Agent executable/auth checks are skipped in CI profile while the report remains concise and secret-safe.
 
