@@ -9,7 +9,9 @@
 - Codex capability discovery는 process lifetime cache를 사용하되, 모든 필수 capability가 확인된 성공 결과만 cache한다.
 - Codex unattended 실행은 capability가 부족하거나 Git metadata 경로를 확인할 수 없으면 fail-closed로 `agent_configuration_invalid`를 반환한다.
 - doctor가 Agent availability, capability readiness, unattended execution readiness를 보고한다.
-- Startup Self Update를 추가해 doctor/daemon 실행 전 operator checkout만 `git fetch origin`, `git switch main`, `git pull --ff-only origin main` 순서로 갱신한다.
+- Startup Self Update를 추가해 doctor/daemon 실행 전 DevBot operator checkout만 `git fetch origin`, `git switch main`, `git pull --ff-only origin main` 순서로 갱신한다.
+- Startup Self Update는 Git common-dir 기준으로 operator checkout을 해석하며, `config.enabled_repositories`의 managed repositories를 순회하거나 변경하지 않는다.
+- Startup Self Update로 HEAD가 바뀌면 현재 프로세스를 `exec`로 재시작하고 `DEVBOT_STARTUP_SELF_UPDATED`로 재시작 루프를 방지한다.
 - Startup Self Update 실패 시 doctor/planner/workspace preparation/Agent 실행 전에 즉시 중단한다.
 
 ## 주요 설계 결정
@@ -17,7 +19,7 @@
 - Provider별 command construction은 Codex/Claude runner 안에 유지하고, 공통 launcher는 cwd/env/policy/diagnostics만 담당한다.
 - `AgentRunner.run_context()` 기본 구현은 기존 `run(repository, prompt)`로 위임해 기존 runner contract와 테스트 더블 호환성을 유지한다.
 - PollingService는 실제 context-aware runner에는 context를 넘기고, 기존 runner/service double에는 기존 signature로 fallback한다.
-- Startup Self Update는 Task/PR/PreparedWorkspace를 갱신하지 않고 config의 operator checkout `RepositoryConfig.local_path`만 대상으로 한다.
+- Startup Self Update는 Task/PR/PreparedWorkspace/managed repository를 갱신하지 않고 Git common-dir로 해석한 DevBot operator checkout만 대상으로 한다.
 - Startup Self Update 진단은 SHA, 결과, skip reason만 남기며 secret/prompt/token은 기록하지 않는다.
 
 ## Checkpoint Evidence
@@ -53,12 +55,14 @@
 - CP-031-10 Startup Self Update:
   - `startup_self_update_repository`
   - `tests/test_startup_self_update.py`
+  - `tests/test_main.py::test_startup_update_restarts_process_when_head_changes`
+  - `tests/test_main.py::test_startup_update_does_not_restart_twice`
 
 ## Validation
 
 - `uv sync`: PASS
 - `uv run ruff check .`: PASS
-- `uv run pytest`: PASS, 480 passed
+- `uv run pytest`: PASS, 484 passed
 - `uv run devbot doctor`: PASS
 - `uv run devbot --once --dry-run`: PASS
 
@@ -78,7 +82,10 @@ Note: an initial parallel run of `doctor` and `--once --dry-run` caused a Git re
 - `src/devbot/startup.py`
 - `tests/test_agent_execution.py`
 - `tests/test_doctor.py`
+- `tests/test_main.py`
+- `tests/test_main_loop.py`
 - `tests/test_startup_self_update.py`
+- `tests/test_timeline.py`
 
 ## 남은 TODO와 제한
 

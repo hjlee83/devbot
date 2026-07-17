@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -42,7 +43,12 @@ from devbot.observability import (
 from devbot.polling import PollingService, PollingStatus, run_forever
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
-from devbot.startup import StartupSelfUpdateError, run_startup_checks, run_startup_self_update
+from devbot.startup import (
+    STARTUP_SELF_UPDATE_ENV,
+    StartupSelfUpdateError,
+    run_startup_checks,
+    run_startup_self_update,
+)
 from devbot.timeline import TimelineError, TimelineService
 from devbot.workspace import build_agent_prompt
 from devbot.worktree import WorkspacePreparationError, WorktreeManager
@@ -331,6 +337,14 @@ def _run_doctor_command(config: DevBotConfig) -> int:
     return 0 if report.safe_to_start else 1
 
 
+def _restart_after_startup_update(final_sha: str) -> None:
+    if os.environ.get(STARTUP_SELF_UPDATE_ENV) == final_sha:
+        return
+    env = os.environ.copy()
+    env[STARTUP_SELF_UPDATE_ENV] = final_sha
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
 def _run_startup_self_update(config: DevBotConfig, logger: logging.Logger) -> bool:
     try:
         results = run_startup_self_update(config)
@@ -358,6 +372,8 @@ def _run_startup_self_update(config: DevBotConfig, logger: logging.Logger) -> bo
             result.result,
             result.skip_reason,
         )
+        if result.current_sha != result.final_sha:
+            _restart_after_startup_update(result.final_sha)
     return True
 
 

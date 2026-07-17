@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from devbot.models import DevBotConfig, RepositoryConfig
-from devbot.startup import StartupSelfUpdateError, run_startup_self_update
+from devbot.startup import (
+    STARTUP_SELF_UPDATE_ENV,
+    StartupSelfUpdateError,
+    run_startup_self_update,
+)
 
 
 def _run_git(*args: str, cwd: Path) -> None:
@@ -64,7 +68,7 @@ def test_startup_updates_operator_checkout_main_only(tmp_path: Path) -> None:
     repo, origin, operator = _repo_with_origin(tmp_path)
     _advance_origin(origin, tmp_path)
 
-    result = run_startup_self_update(_config(repo, tmp_path))[0]
+    result = run_startup_self_update(_config(repo, tmp_path), operator_checkout=operator)[0]
 
     assert result.result == "updated"
     assert (operator / "new.txt").exists()
@@ -75,7 +79,7 @@ def test_startup_rejects_dirty_main_checkout(tmp_path: Path) -> None:
     (operator / "dirty.txt").write_text("dirty\n", encoding="utf-8")
 
     with pytest.raises(StartupSelfUpdateError) as exc_info:
-        run_startup_self_update(_config(repo, tmp_path))
+        run_startup_self_update(_config(repo, tmp_path), operator_checkout=operator)
 
     assert "dirty" in exc_info.value.result.skip_reason
 
@@ -92,7 +96,7 @@ def test_startup_uses_ff_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr("devbot.startup.subprocess.run", _spy)
 
-    run_startup_self_update(_config(repo, tmp_path))
+    run_startup_self_update(_config(repo, tmp_path), operator_checkout=_operator)
 
     assert ("pull", "--ff-only", "origin", "main") in commands
     assert not any(cmd[:1] == ("merge",) for cmd in commands)
@@ -107,7 +111,7 @@ def test_startup_never_updates_task_branch_or_prepared_workspace(tmp_path: Path)
     marker.write_text("keep\n", encoding="utf-8")
     _advance_origin(origin, tmp_path)
 
-    run_startup_self_update(_config(repo, tmp_path))
+    run_startup_self_update(_config(repo, tmp_path), operator_checkout=operator)
 
     assert marker.read_text(encoding="utf-8") == "keep\n"
 
@@ -117,13 +121,13 @@ def test_startup_failure_prevents_doctor_planner_and_agent_execution(tmp_path: P
     _run_git("checkout", "-q", "-b", "task/not-main", cwd=operator)
 
     with pytest.raises(StartupSelfUpdateError):
-        run_startup_self_update(_config(repo, tmp_path))
+        run_startup_self_update(_config(repo, tmp_path), operator_checkout=operator)
 
 
 def test_startup_runs_doctor_after_successful_main_update(tmp_path: Path) -> None:
     repo, _origin, _operator = _repo_with_origin(tmp_path)
 
-    result = run_startup_self_update(_config(repo, tmp_path))[0]
+    result = run_startup_self_update(_config(repo, tmp_path), operator_checkout=_operator)[0]
 
     assert result.result == "already_current"
 
@@ -132,7 +136,7 @@ def test_startup_update_diagnostics_are_complete_and_redacted(tmp_path: Path) ->
     repo, origin, _operator = _repo_with_origin(tmp_path)
     _advance_origin(origin, tmp_path)
 
-    result = run_startup_self_update(_config(repo, tmp_path))[0]
+    result = run_startup_self_update(_config(repo, tmp_path), operator_checkout=_operator)[0]
 
     assert result.current_sha
     assert result.latest_sha
@@ -140,3 +144,29 @@ def test_startup_update_diagnostics_are_complete_and_redacted(tmp_path: Path) ->
     assert result.result in {"updated", "already_current"}
     assert "token" not in repr(result).lower()
 
+
+def test_startup_does_not_update_managed_repositories(tmp_path: Path) -> None:
+    operator_repo, operator_origin, operator = _repo_with_origin(tmp_path / "operator")
+    managed_repo, managed_origin, managed = _repo_with_origin(tmp_path / "managed")
+    _advance_origin(operator_origin, tmp_path / "operator-advance")
+    _advance_origin(managed_origin, tmp_path / "managed-advance")
+    managed_sha_before = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(managed), text=True
+    ).strip()
+    config = _config(managed_repo, tmp_path)
+
+    result = run_startup_self_update(config, operator_checkout=operator)[0]
+
+    managed_sha_after = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(managed), text=True
+    ).strip()
+    assert result.repository == str(operator)
+    assert result.result == "updated"
+    assert (operator / "new.txt").exists()
+    assert not (managed / "new.txt").exists()
+    assert managed_sha_after == managed_sha_before
+    assert operator_repo.local_path == operator
+
+
+def test_startup_update_restart_env_constant_is_available() -> None:
+    assert STARTUP_SELF_UPDATE_ENV == "DEVBOT_STARTUP_SELF_UPDATED"

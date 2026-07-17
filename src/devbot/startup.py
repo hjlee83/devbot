@@ -40,6 +40,8 @@ from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.workspace import inspect_workspace
 
+STARTUP_SELF_UPDATE_ENV = "DEVBOT_STARTUP_SELF_UPDATED"
+
 
 @dataclass(frozen=True, slots=True)
 class StartupCheck:
@@ -95,13 +97,39 @@ def _git_text(cwd: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def startup_self_update_repository(repository: RepositoryConfig) -> StartupSelfUpdateResult:
-    path = repository.local_path
+def resolve_operator_checkout(start_path: Path | None = None) -> Path:
+    """Resolve the DevBot operator checkout, even when invoked from one of
+    its Git worktrees.
+
+    `git rev-parse --git-common-dir` points at the main checkout's `.git`
+    directory for both the operator checkout and linked worktrees. Its
+    parent is therefore the one checkout Startup Self Update is allowed to
+    mutate.
+    """
+    cwd = start_path or Path.cwd()
+    completed = _git(cwd, "rev-parse", "--git-common-dir")
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout)
+    common_dir = Path(completed.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (cwd / common_dir).resolve()
+    if common_dir.name != ".git":
+        raise RuntimeError(f"unexpected git common dir: {common_dir}")
+    return common_dir.parent
+
+
+def startup_self_update_operator(
+    operator_checkout: Path | None = None,
+    *,
+    default_branch: str = "main",
+) -> StartupSelfUpdateResult:
+    path = operator_checkout or resolve_operator_checkout()
+    repository_name = str(path)
     try:
         current_sha = _git_text(path, "rev-parse", "HEAD")
     except Exception as exc:  # noqa: BLE001
         result = StartupSelfUpdateResult(
-            repository=repository.full_name,
+            repository=repository_name,
             current_sha="",
             latest_sha="",
             final_sha="",
@@ -113,7 +141,7 @@ def startup_self_update_repository(repository: RepositoryConfig) -> StartupSelfU
     def _fail(reason: str, *, latest_sha: str = "", final_sha: str | None = None) -> None:
         raise StartupSelfUpdateError(
             StartupSelfUpdateResult(
-                repository=repository.full_name,
+                repository=repository_name,
                 current_sha=current_sha,
                 latest_sha=latest_sha,
                 final_sha=final_sha if final_sha is not None else current_sha,
@@ -132,25 +160,25 @@ def startup_self_update_repository(repository: RepositoryConfig) -> StartupSelfU
         _fail("operator checkout dirty")
 
     branch = _git_text(path, "rev-parse", "--abbrev-ref", "HEAD")
-    if branch != repository.default_branch:
-        _fail(f"current branch is not {repository.default_branch}: {branch}")
+    if branch != default_branch:
+        _fail(f"current branch is not {default_branch}: {branch}")
 
-    fetch = _git(path, "fetch", "origin", repository.default_branch)
+    fetch = _git(path, "fetch", "origin", default_branch)
     if fetch.returncode != 0:
         _fail(f"fetch failed: {fetch.stderr or fetch.stdout}")
-    latest_sha = _git_text(path, "rev-parse", f"origin/{repository.default_branch}")
+    latest_sha = _git_text(path, "rev-parse", f"origin/{default_branch}")
 
-    switch = _git(path, "switch", repository.default_branch)
+    switch = _git(path, "switch", default_branch)
     if switch.returncode != 0:
         _fail(f"switch main failed: {switch.stderr or switch.stdout}", latest_sha=latest_sha)
 
-    pull = _git(path, "pull", "--ff-only", "origin", repository.default_branch)
+    pull = _git(path, "pull", "--ff-only", "origin", default_branch)
     if pull.returncode != 0:
         _fail(f"ff-only pull failed: {pull.stderr or pull.stdout}", latest_sha=latest_sha)
 
     final_sha = _git_text(path, "rev-parse", "HEAD")
     return StartupSelfUpdateResult(
-        repository=repository.full_name,
+        repository=repository_name,
         current_sha=current_sha,
         latest_sha=latest_sha,
         final_sha=final_sha,
@@ -158,12 +186,18 @@ def startup_self_update_repository(repository: RepositoryConfig) -> StartupSelfU
     )
 
 
-def run_startup_self_update(config: DevBotConfig) -> tuple[StartupSelfUpdateResult, ...]:
-    results: list[StartupSelfUpdateResult] = []
-    for repository in config.enabled_repositories:
-        result = startup_self_update_repository(repository)
-        results.append(result)
-    return tuple(results)
+def startup_self_update_repository(repository: RepositoryConfig) -> StartupSelfUpdateResult:
+    return startup_self_update_operator(
+        repository.local_path, default_branch=repository.default_branch
+    )
+
+
+def run_startup_self_update(
+    _config: DevBotConfig,
+    *,
+    operator_checkout: Path | None = None,
+) -> tuple[StartupSelfUpdateResult, ...]:
+    return (startup_self_update_operator(operator_checkout),)
 
 
 def check_repository_configuration(config: DevBotConfig) -> StartupCheck:
