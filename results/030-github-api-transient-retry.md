@@ -8,12 +8,18 @@
 - 401/403은 인증/권한 오류, 404는 not found로 유지했다.
 - transient GitHub 실패가 polling claim/read 단계에서 `blocked`/`manual-action` 라벨 전이로 이어지지 않도록 `GitHubTransientError`를 별도 처리했다.
 - retry 진단 로그는 status, attempt, delay, endpoint category, outcome, error type만 기록하고 Authorization/token은 기록하지 않는다.
+- Codex 실행 명령을 CLI help 기반으로 구성해 PreparedWorkspace cwd, `workspace-write`, approval `never`, network enabled, 최소 writable root를 강제한다.
+- PreparedWorkspace에서 `git rev-parse --git-dir`, `--git-common-dir`, `--show-toplevel`을 해석해 worktree Git metadata 접근을 안전하게 허용한다.
+- IMPLEMENT/REWORK 준비 단계에서 canonical Task branch와 `origin/main`을 fetch하고, clean worktree와 PR head를 확인한 뒤 rebase + `--force-with-lease`만 사용해 main에 동기화한다.
+- REVIEW 준비 단계는 PR head를 변경하지 않는 `synchronize_with_main=False` 경로를 사용하고, interactive approval 출력은 review summary 파싱 전에 `agent_configuration_invalid`로 manual-action 처리한다.
 
 ## 주요 설계 결정
 
 - read/write 클라이언트의 HTTP 메서드 래퍼에서 같은 `execute_with_github_retry()`를 호출하도록 해 정책 drift를 막았다.
 - retry 설정은 `GitHubRetryConfig`로 주입 가능하게 해 테스트에서 sleep과 random을 deterministic하게 대체했다.
 - transient exhaustion은 `GitHubTransientError`로 표면화해 polling/reliability가 GitHub API 계열 실패로 다루되 상태 mutation은 만들지 않게 했다.
+- Codex CLI 옵션은 설치 버전별 차이가 있어 `codex --help`와 `codex exec --help` capability를 확인한 뒤 지원되는 root 옵션을 exec 앞에 배치한다. 현재 확인 버전은 `codex-cli 0.144.1`이다.
+- main 동기화 충돌은 `git rebase --abort` 후 `task_branch_conflict`로 분류해 원래 branch/worktree를 보존한다.
 
 ## 수정 파일
 
@@ -21,9 +27,17 @@
 - `src/devbot/github_client.py`
 - `src/devbot/github_write_client.py`
 - `src/devbot/polling.py`
+- `src/devbot/worktree.py`
+- `src/devbot/agents/base.py`
+- `src/devbot/agents/codex.py`
+- `src/devbot/review.py`
 - `tests/test_github_client.py`
 - `tests/test_polling.py`
 - `tests/test_timeline.py`
+- `tests/test_agents_codex.py`
+- `tests/test_worktree.py`
+- `tests/test_review.py`
+- `tasks/030-github-api-transient-retry.md`
 
 ## Checkpoint Evidence
 
@@ -37,14 +51,22 @@
 | CP-030-6 idempotent recovery | `test_github_retry_recovery_does_not_duplicate_side_effects` |
 | CP-030-7 safe diagnostics | `test_github_retry_diagnostics_are_structured_and_redacted` |
 | CP-030-8 workflow compatibility | `test_existing_workflows_remain_compatible_with_github_retry`, full `uv run pytest` |
+| CP-030-9 non-interactive Codex execution | `test_codex_runner_builds_unattended_workspace_scoped_command` |
+| CP-030-10 interactive prompt detection | `test_interactive_approval_output_is_configuration_invalid_before_summary_parse` |
+| CP-030-11 interactive failure recovery | `test_interactive_approval_output_is_configuration_invalid_before_summary_parse` |
+| CP-030-12 effective policy diagnostics | `test_codex_runner_policy_reports_safe_effective_settings` |
+| CP-030-13 PreparedWorkspace Git metadata access | `test_prepared_workspace_resolves_git_metadata_paths`, `test_codex_runner_builds_unattended_workspace_scoped_command` |
+| CP-030-14 IMPLEMENT/REWORK main synchronization | `test_implement_prepare_rebases_latest_main_and_force_pushes_with_lease`, `test_dirty_worktree_is_not_rebased_or_overwritten`, `test_stale_pr_head_metadata_stops_execution` |
+| CP-030-15 conflict-safe recovery | `test_rebase_conflict_preserves_original_branch` |
+| CP-030-16 non-mutating latest-main review validation | `test_review_prepare_does_not_change_pr_head` |
 
 ## Validation 결과
 
 - `uv sync` PASS
 - `uv run ruff check .` PASS
-- `uv run pytest` PASS: 447 passed
-- `uv run devbot doctor` FAIL: `/tmp/devbot.lock`이 다른 프로세스에 의해 점유되어 `daemon_lock`만 실패. GitHub connectivity와 workspace checks는 OK.
-- `uv run devbot --once --dry-run` FAIL: 같은 `/tmp/devbot.lock` 점유로 시작하지 못함.
+- `uv run pytest` PASS: 456 passed
+- `uv run devbot doctor` PASS
+- `uv run devbot --once --dry-run` PASS: `NO_RUNNABLE_TASK` / `skipped_active_task` (Issue #62는 `devbot:rework` 상태였지만 처리 가능한 unprocessed rework 후보가 없어 dry-run으로 안전 종료)
 
 ## 수동 검증 결과
 
@@ -52,11 +74,15 @@
 - timeout/connection failure 분류는 `classify_github_failure()`에서 `requests.Timeout`, `requests.ConnectionError`를 transient로 다루도록 구현했다.
 - 401/403/404는 retry 대상이 아니며 각각 인증/권한, not found로 구분된다.
 - 실제 sleep이나 외부 네트워크에 의존하지 않도록 retry sleep/random은 테스트에서 주입했다.
+- Codex production command before: `codex exec <prompt>`.
+- Codex production command after: `codex -a never -s workspace-write -C <PreparedWorkspace> --add-dir <worktree-git-dir> --add-dir <git-common-dir> exec <prompt>` (설치 CLI capability에 따라 지원되는 옵션만 사용).
+- 현재 canonical workspace Git metadata: `git_dir=/Users/luna/workspace/devbot/.git/worktrees/issue-62`, `git_common_dir=/Users/luna/workspace/devbot/.git`, `top_level=/Users/luna/workspace/devbot/.worktrees/issue-62`.
+- main synchronization policy: canonical Task branch와 `origin/main` fetch, clean worktree/PR head 확인, DevBot 단독 소유 branch는 rebase 우선, rewrite push는 `--force-with-lease`만 허용.
+- review integration-validation method: REVIEW 준비는 `synchronize_with_main=False`로 PR head를 변경하지 않으며, latest-main 호환성은 isolated/non-mutating path에서 검증하도록 분리했다.
 
 ## 남은 TODO와 제한
 
-- 현재 작업 환경의 `/tmp/devbot.lock` 점유가 해제된 뒤 `uv run devbot doctor`와 `uv run devbot --once --dry-run`을 재실행해야 한다.
-- GitHub PR 본문 Evidence 갱신은 이 환경 지시상 네트워크/`gh` 사용이 금지되어 로컬 Result에만 기록했다.
+- PR #63 Evidence는 최종 commit/push 후 GitHub PR 본문 또는 댓글에 동일 내용을 반영해야 한다.
 
 ## 위험 요소
 

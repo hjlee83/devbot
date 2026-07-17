@@ -54,6 +54,7 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Protocol
 
 from devbot import observability
 from devbot.agent_outcome import classify_agent_outcome
@@ -401,9 +402,15 @@ def _planner_pr_resolution_failure(issue: GitHubIssue) -> WorkspacePreparationEr
 EnsureWorkspaceFn = Callable[[RepositoryConfig], None]
 BuildPromptFn = Callable[[RepositoryConfig, GitHubIssue, Sequence[IssueComment]], str]
 HasImplementationEvidenceFn = Callable[[RepositoryConfig, str, str], bool]
-PrepareWorkspaceFn = Callable[
-    [RepositoryConfig, GitHubIssue, PullRequest | None], PreparedWorkspace
-]
+class PrepareWorkspaceFn(Protocol):
+    def __call__(
+        self,
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+        *,
+        synchronize_with_main: bool = True,
+    ) -> PreparedWorkspace: ...
 
 IssuesByKey = dict[tuple[str, int], GitHubIssue]
 
@@ -2160,6 +2167,8 @@ class PollingService:
         issue: GitHubIssue,
         linked_pull_request: PullRequest,
         cycle_id: str,
+        *,
+        synchronize_with_main: bool = True,
     ) -> tuple[RepositoryConfig, PollingResult | None]:
         """Resolve the single repository Agent roles must use after prepare.
 
@@ -2191,7 +2200,17 @@ class PollingService:
 
         prep_start = time.monotonic()
         try:
-            prepared = self.prepare_workspace(repository, issue, linked_pull_request)
+            try:
+                prepared = self.prepare_workspace(
+                    repository,
+                    issue,
+                    linked_pull_request,
+                    synchronize_with_main=synchronize_with_main,
+                )
+            except TypeError:
+                # Backward-compatible test doubles may still expose the
+                # original Task 023 three-argument shape.
+                prepared = self.prepare_workspace(repository, issue, linked_pull_request)
         except WorkspacePreparationError as exc:
             self.logger.error(
                 "워크스페이스 준비 실패 (%s #%d): [%s] %s",
@@ -2379,7 +2398,12 @@ class PollingService:
             return error
 
         work_repository, workspace_error = self._prepare_pr_workspace_for_agent(
-            repository, selected, issue, linked_pull_request, cycle_id
+            repository,
+            selected,
+            issue,
+            linked_pull_request,
+            cycle_id,
+            synchronize_with_main=False,
         )
         if workspace_error is not None:
             return workspace_error

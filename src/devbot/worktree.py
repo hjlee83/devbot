@@ -49,6 +49,8 @@ class WorkspacePreparationFailure(StrEnum):
     WORKTREE_CREATION_FAILED = "worktree_creation_failed"
     WORKTREE_CONFLICT = "worktree_conflict"
     WORKSPACE_DIRTY = "workspace_dirty"
+    STALE_PR_HEAD = "stale_pr_head"
+    TASK_BRANCH_CONFLICT = "task_branch_conflict"
 
 
 class WorkspacePreparationError(RuntimeError):
@@ -78,6 +80,9 @@ class PreparedWorkspace:
     dirty: bool = False
     contract_path: str | None = None
     result_path: str | None = None
+    git_dir: Path | None = None
+    git_common_dir: Path | None = None
+    git_top_level: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +225,24 @@ def _current_branch(path: Path) -> str | None:
         return None
     branch = completed.stdout.strip()
     return None if branch == "HEAD" else branch
+
+
+def _git_stdout(path: Path, *args: str) -> str:
+    completed = _run_git(path, *args)
+    if completed.returncode != 0:
+        raise WorkspacePreparationError(
+            WorkspacePreparationFailure.WORKTREE_CREATION_FAILED,
+            f"git {' '.join(args)} failed: {completed.stderr or completed.stdout}",
+        )
+    return completed.stdout.strip()
+
+
+def _resolve_git_path(path: Path, arg: str) -> Path:
+    raw = _git_stdout(path, "rev-parse", arg)
+    resolved = Path(raw)
+    if not resolved.is_absolute():
+        resolved = path / resolved
+    return resolved.resolve()
 
 
 _PORCELAIN_ENTRY_RE = re.compile(r"^worktree (?P<path>.+)$", re.MULTILINE)
@@ -391,11 +414,62 @@ class WorktreeManager:
             )
         return False
 
+    def _verify_pr_head(self, target: Path, branch: str, pull_request: PullRequest | None) -> None:
+        if pull_request is None or len(pull_request.head_sha) < 40:
+            return
+        remote_head = _git_stdout(target, "rev-parse", f"origin/{branch}")
+        if remote_head != pull_request.head_sha:
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.STALE_PR_HEAD,
+                f"PR head metadata is stale: expected {pull_request.head_sha}, "
+                f"origin/{branch} is {remote_head}",
+            )
+
+    def _sync_task_branch_with_main(
+        self, target: Path, branch: str, base_branch: str, pull_request: PullRequest | None
+    ) -> None:
+        current_branch = _current_branch(target)
+        if current_branch != branch:
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.BRANCH_PR_MISMATCH,
+                f"prepared worktree is on {current_branch!r}, expected {branch!r}",
+            )
+        if pull_request is None:
+            return
+        if self.is_dirty(target):
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.WORKSPACE_DIRTY,
+                f"prepared worktree at {target} has uncommitted or untracked changes; "
+                "refusing to rebase or overwrite",
+            )
+        before = _git_stdout(target, "rev-parse", "HEAD")
+        completed = _run_git(target, "rebase", f"origin/{base_branch}")
+        if completed.returncode != 0:
+            conflicted = _run_git(target, "diff", "--name-only", "--diff-filter=U").stdout.strip()
+            _run_git(target, "rebase", "--abort")
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.TASK_BRANCH_CONFLICT,
+                "task_branch_conflict while rebasing "
+                f"{branch} onto origin/{base_branch}. Conflicted files: "
+                f"{conflicted or '(unknown)'}. Recovery: inspect {target}, resolve conflicts "
+                "manually, then push the canonical Task branch with --force-with-lease.",
+            )
+        after = _git_stdout(target, "rev-parse", "HEAD")
+        if after != before:
+            push = _run_git(target, "push", "--force-with-lease", "origin", f"HEAD:{branch}")
+            if push.returncode != 0:
+                raise WorkspacePreparationError(
+                    WorkspacePreparationFailure.REMOTE_SYNC_FAILED,
+                    f"git push --force-with-lease failed: {push.stderr or push.stdout}",
+                )
+
     def prepare(
         self,
         repository: RepositoryConfig,
         issue: GitHubIssue,
         linked_pull_request: PullRequest | None,
+        *,
+        synchronize_with_main: bool = True,
     ) -> PreparedWorkspace:
         """Resolve the Job's branch/PR (Scope §1 - `linked_pull_request` is
         whatever the caller already fetched from GitHub, so resolution
@@ -427,6 +501,9 @@ class WorktreeManager:
         reused = self._create_or_reuse(
             repository, target, branch, base_branch, create_branch=create_branch
         )
+        self._verify_pr_head(target, branch, linked_pull_request)
+        if synchronize_with_main:
+            self._sync_task_branch_with_main(target, branch, base_branch, linked_pull_request)
 
         return PreparedWorkspace(
             repository=replace(
@@ -443,6 +520,9 @@ class WorktreeManager:
             dirty=self.is_dirty(target),
             contract_path=parse_contract_path_from_issue_body(issue.body),
             result_path=parse_result_path_from_issue_body(issue.body),
+            git_dir=_resolve_git_path(target, "--git-dir"),
+            git_common_dir=_resolve_git_path(target, "--git-common-dir"),
+            git_top_level=_resolve_git_path(target, "--show-toplevel"),
         )
 
     def cleanup(

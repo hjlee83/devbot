@@ -21,6 +21,10 @@ Make DevBot resilient to temporary GitHub API failures and interactive Agent exe
 13. Classify interactive Agent output as `agent_configuration_invalid` rather than `review_failed` or an invalid review summary.
 14. Preserve Task state and provide an actionable recovery message when Agent configuration is interactive.
 15. Log the effective Agent execution policy without exposing secrets.
+16. Resolve PreparedWorkspace Git metadata paths with `git rev-parse` and pass only the PreparedWorkspace, worktree Git directory, and required Git common directory as writable roots.
+17. Before IMPLEMENT and REWORK, fetch `origin/main` and the canonical Task branch, verify the Task branch and PR head, reject dirty worktrees, and synchronize with latest main using rebase plus `--force-with-lease` only.
+18. Preserve the original Task branch/worktree on synchronization conflicts and route to `task_branch_conflict` manual action diagnostics.
+19. Before REVIEW, fetch latest main and PR head, review the exact PR head, and validate latest-main compatibility without mutating or pushing the PR branch.
 
 ## Out of Scope
 
@@ -112,6 +116,30 @@ Required test: `test_interactive_agent_configuration_preserves_task_state_and_re
 Startup or Agent-run diagnostics expose the effective Agent name, role, approval policy, sandbox mode, network policy, and workspace path without exposing credentials.
 
 Required test: `test_agent_execution_policy_diagnostics_are_safe_and_complete`
+
+### CP-030-13 — PreparedWorkspace Git metadata access
+
+DevBot resolves `git rev-parse --git-dir`, `git rev-parse --git-common-dir`, and `git rev-parse --show-toplevel` from the PreparedWorkspace and grants Codex only the minimum required writable roots.
+
+Required tests: `test_prepared_workspace_resolves_git_metadata_paths`, `test_codex_runner_builds_unattended_workspace_scoped_command`
+
+### CP-030-14 — IMPLEMENT/REWORK main synchronization
+
+IMPLEMENT and REWORK fetch the canonical Task branch and latest `origin/main`, verify the worktree is clean and on the canonical branch, verify PR-head metadata, rebase onto latest main, and push rewritten history only with `--force-with-lease`.
+
+Required tests: `test_implement_prepare_rebases_latest_main_and_force_pushes_with_lease`, `test_dirty_worktree_is_not_rebased_or_overwritten`, `test_stale_pr_head_metadata_stops_execution`
+
+### CP-030-15 — Conflict-safe recovery
+
+If main synchronization conflicts, DevBot aborts the rebase, preserves the Task branch/worktree contents, does not partially deliver, and reports `task_branch_conflict` with conflicted files and recovery instructions.
+
+Required test: `test_rebase_conflict_preserves_original_branch`
+
+### CP-030-16 — Non-mutating latest-main review validation
+
+REVIEW uses the exact current PR HEAD, does not rebase, merge, commit, or push the PR branch, and performs latest-main compatibility validation in an isolated/non-mutating path.
+
+Required test: `test_review_prepare_does_not_change_pr_head`
 
 ## Validation Gate
 

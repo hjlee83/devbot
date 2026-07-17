@@ -119,6 +119,16 @@ def _push_to_main(origin_path: Path, tmp_path: Path, filename: str) -> None:
     _run_git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=scratch)
 
 
+def _remote_head(origin_path: Path, ref: str) -> str:
+    completed = subprocess.run(
+        ["git", "ls-remote", str(origin_path), ref],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.split()[0]
+
+
 def _issue(*, number: int, title: str = "Some task", body: str = "") -> GitHubIssue:
     return GitHubIssue(
         repository="someone/myrepo",
@@ -219,6 +229,126 @@ def test_existing_task_branch_is_reused(tmp_path: Path) -> None:
     # No `devbot/...` fallback branch was ever generated for this Task.
     branches = _git_output("branch", "--list", cwd=repository.local_path)
     assert "devbot/" not in branches
+
+
+def test_prepared_workspace_resolves_git_metadata_paths(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=30)
+    _push_branch(origin, tmp_path, "task/030-metadata")
+    pull_request = _pull_request(head_ref="task/030-metadata", issue_number=30)
+
+    prepared = manager.prepare(repository, issue, pull_request)
+
+    assert prepared.git_dir is not None
+    assert prepared.git_common_dir is not None
+    assert prepared.git_top_level == prepared.worktree_path
+    assert prepared.git_dir.is_dir()
+    assert prepared.git_common_dir.is_dir()
+    assert prepared.git_dir != prepared.worktree_path
+
+
+def test_implement_prepare_rebases_latest_main_and_force_pushes_with_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=31)
+    _push_branch(origin, tmp_path, "task/030-sync", filename="task.txt")
+    _push_to_main(origin, tmp_path, "main-after-task.txt")
+    pull_request = _pull_request(head_ref="task/030-sync", issue_number=31)
+    commands: list[tuple[str, ...]] = []
+    real_run_git = subprocess.run
+
+    def _spy(args, *a, **kw):
+        if isinstance(args, list) and args[:1] == ["git"]:
+            commands.append(tuple(args[1:]))
+        return real_run_git(args, *a, **kw)
+
+    monkeypatch.setattr("devbot.worktree.subprocess.run", _spy)
+
+    prepared = manager.prepare(repository, issue, pull_request)
+
+    assert (prepared.worktree_path / "main-after-task.txt").exists()
+    assert any(cmd[:1] == ("rebase",) for cmd in commands)
+    assert any("--force-with-lease" in cmd for cmd in commands)
+    assert not any("--force" in cmd and "--force-with-lease" not in cmd for cmd in commands)
+
+
+def test_review_prepare_does_not_change_pr_head(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=32)
+    _push_branch(origin, tmp_path, "task/030-review", filename="task.txt")
+    before = _remote_head(origin, "refs/heads/task/030-review")
+    _push_to_main(origin, tmp_path, "main-after-review.txt")
+    pull_request = _pull_request(head_ref="task/030-review", issue_number=32)
+
+    prepared = manager.prepare(
+        repository, issue, pull_request, synchronize_with_main=False
+    )
+
+    after = _remote_head(origin, "refs/heads/task/030-review")
+    assert after == before
+    assert not (prepared.worktree_path / "main-after-review.txt").exists()
+
+
+def test_dirty_worktree_is_not_rebased_or_overwritten(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=33)
+    _push_branch(origin, tmp_path, "task/030-dirty")
+    pull_request = _pull_request(head_ref="task/030-dirty", issue_number=33)
+    prepared = manager.prepare(repository, issue, pull_request)
+    (prepared.worktree_path / "dirty.txt").write_text("keep me\n", encoding="utf-8")
+
+    with pytest.raises(WorkspacePreparationError) as exc_info:
+        manager.prepare(repository, issue, pull_request)
+
+    assert exc_info.value.category is WorkspacePreparationFailure.WORKSPACE_DIRTY
+    assert (prepared.worktree_path / "dirty.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_stale_pr_head_metadata_stops_execution(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=34)
+    _push_branch(origin, tmp_path, "task/030-stale")
+    stale_pr = _pull_request(head_ref="task/030-stale", issue_number=34)
+    stale_pr = PullRequest(
+        number=stale_pr.number,
+        head_ref=stale_pr.head_ref,
+        head_sha="0" * 40,
+        body=stale_pr.body,
+        html_url=stale_pr.html_url,
+    )
+
+    with pytest.raises(WorkspacePreparationError) as exc_info:
+        manager.prepare(repository, issue, stale_pr)
+
+    assert exc_info.value.category is WorkspacePreparationFailure.STALE_PR_HEAD
+
+
+def test_rebase_conflict_preserves_original_branch(tmp_path: Path) -> None:
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(number=35)
+    _push_branch(origin, tmp_path, "task/030-conflict", filename="README.md")
+    scratch = tmp_path / "scratch-conflict-main"
+    _clone(origin, scratch)
+    (scratch / "README.md").write_text("conflicting main\n", encoding="utf-8")
+    _run_git("add", ".", cwd=scratch)
+    _run_git("commit", "-q", "-m", "conflicting main", cwd=scratch)
+    _run_git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=scratch)
+    pull_request = _pull_request(head_ref="task/030-conflict", issue_number=35)
+
+    with pytest.raises(WorkspacePreparationError) as exc_info:
+        manager.prepare(repository, issue, pull_request)
+
+    assert exc_info.value.category is WorkspacePreparationFailure.TASK_BRANCH_CONFLICT
+    prepared_path = manager.worktree_path(repository, issue.number)
+    assert _git_output("status", "--porcelain", cwd=prepared_path).strip() == ""
+    assert "task work" in (prepared_path / "README.md").read_text(encoding="utf-8")
 
 
 def test_prepared_workspace_contains_planner_contract(tmp_path: Path) -> None:
