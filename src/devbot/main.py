@@ -20,7 +20,6 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
-from importlib.metadata import version as package_version
 from pathlib import Path
 
 from devbot.agent_execution import AgentExecutionContext
@@ -41,6 +40,7 @@ from devbot.observability import (
     log_startup_validation,
 )
 from devbot.polling import PollingService, PollingStatus, run_forever
+from devbot.release import authoritative_version
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
 from devbot.startup import (
@@ -235,12 +235,17 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
     _build_timeline_parser(subparsers)
     _build_worktree_parser(subparsers)
-    subparsers.add_parser(
+    doctor_parser = subparsers.add_parser(
         "doctor",
         help=(
             "설정/워크스페이스/GitHub 연결/Lock 상태를 점검하고 데몬 시작 가능 여부를 "
             "보고합니다 (읽기 전용, GitHub에 쓰지 않음)."
         ),
+    )
+    doctor_parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="CI 검증용으로 Agent 실행 파일/사용자 로그인 검사를 생략합니다.",
     )
     return parser.parse_args(argv)
 
@@ -328,11 +333,11 @@ def _run_timeline_command(args: argparse.Namespace, config: DevBotConfig) -> int
     return 0
 
 
-def _run_doctor_command(config: DevBotConfig) -> int:
+def _run_doctor_command(config: DevBotConfig, *, ci: bool = False) -> int:
     """`devbot doctor` (Task 019 CP-019-5): read-only, never acquires the
     daemon lock (`devbot.doctor.check_daemon_lock` only probes it), so it
     is safe to run alongside an already-running DevBot process."""
-    report = build_doctor_report(config)
+    report = build_doctor_report(config, ci=ci)
     print(render_doctor_report(report))
     return 0 if report.safe_to_start else 1
 
@@ -384,7 +389,7 @@ def main(
 ) -> int:
     args = _parse_args(argv)
     if args.version:
-        print(f"devbot {package_version('devbot')}")
+        print(f"devbot {authoritative_version()}")
         return 0
 
     logger = _configure_logging()
@@ -408,9 +413,9 @@ def main(
         return _run_worktree_command(args, config)
 
     if args.command == "doctor":
-        if not _run_startup_self_update(config, logger):
+        if not args.ci and not _run_startup_self_update(config, logger):
             return 1
-        return _run_doctor_command(config)
+        return _run_doctor_command(config, ci=args.ci)
 
     try:
         with ProcessLock(config.lock_file):

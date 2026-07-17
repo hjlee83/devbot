@@ -1,0 +1,282 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      increment:
+        description: "Controlled release increment"
+        type: choice
+        required: true
+        options: [patch, minor, major]
+      commit_sha:
+        description: "Validated main commit SHA to release"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  validate-main:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Reject manual non-main commit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$COMMIT_SHA" origin/main
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+
+      - name: uv sync
+        run: uv sync
+
+      - name: uv run ruff check .
+        run: uv run ruff check .
+
+      - name: uv run pytest
+        run: uv run pytest
+
+      - name: uv run devbot doctor --ci
+        run: uv run devbot doctor --ci
+        env:
+          WORKSPACE_ROOT: ${{ runner.temp }}
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: uv run devbot --once --dry-run
+        run: |
+          cat > "$RUNNER_TEMP/repositories.yaml" <<'EOF'
+          repositories:
+            - owner: hjlee83
+              repo: devbot
+              enabled: false
+              default_branch: main
+          EOF
+          uv run devbot --once --dry-run
+        env:
+          WORKSPACE_ROOT: ${{ runner.temp }}
+          DEVBOT_REPOSITORIES_PATH: ${{ runner.temp }}/repositories.yaml
+          GITHUB_TOKEN: ${{ github.token }}
+
+  plan-release:
+    needs: validate-main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      previous_version: ${{ steps.plan.outputs.previous_version }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      increment: ${{ steps.plan.outputs.increment }}
+      notes: ${{ steps.plan.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+      - name: Collect release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+        run: |
+          git rev-list origin/main > main-commits.txt
+          jq -R -s -c 'split("\n") | map(select(length > 0))' main-commits.txt > main-commits.json
+          gh api "repos/${{ github.repository }}/releases" --paginate \
+            --jq '.[] | {tag_name, target_commitish, draft, prerelease}' \
+            | jq -s . > releases.json
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            printf '{}\n' > release-event.json
+          else
+            gh api "repos/${{ github.repository }}/commits/$TARGET_SHA/pulls" \
+              -H "Accept: application/vnd.github+json" \
+              --jq '.[0]' > pull-request.json
+            jq -c -n --slurpfile pr pull-request.json '{pull_request: $pr[0]}' > release-event.json
+          fi
+      - name: Plan release
+        id: plan
+        run: |
+          uv run python scripts/release_pipeline.py plan \
+            --event-name "${{ github.event_name }}" \
+            --event-json release-event.json \
+            --releases-json releases.json \
+            --main-commits-json main-commits.json \
+            --initial-version "$(uv run python scripts/release_pipeline.py version --project-root .)" \
+            --target-commit "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}" \
+            --output release-plan.json \
+            --github-output "$GITHUB_OUTPUT" \
+            ${{ github.event_name == 'workflow_dispatch' && format('--increment {0}', inputs.increment) || '' }}
+
+  build-artifacts:
+    needs: plan-release
+    if: needs.plan-release.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+      - name: Build portable Python artifact
+        run: |
+          uv run python scripts/release_pipeline.py build-artifact \
+            --version "${{ needs.plan-release.outputs.version }}" \
+            --os-name portable \
+            --architecture python \
+            --output-dir dist \
+            --project-root .
+      - name: Smoke packaged DevBot
+        run: |
+          mkdir -p smoke
+          tar -xzf dist/*.tar.gz -C smoke
+          smoke/devbot-release/bin/devbot --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-portable-python
+          path: dist/*.tar.gz
+
+  publish-release:
+    needs: [validate-main, plan-release, build-artifacts]
+    if: needs.plan-release.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify artifacts and checksums
+        run: |
+          uv run python scripts/release_pipeline.py checksum-manifest \
+            --version "${{ needs.plan-release.outputs.version }}" \
+            --artifact-dir dist \
+            --output dist/SHA256SUMS
+      - name: Prepare idempotent release publication
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.plan-release.outputs.tag }}"
+          TARGET_SHA="${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
+          EXPECTED_ASSETS="$(for path in dist/*.tar.gz dist/SHA256SUMS; do basename "$path"; done | sort)"
+          TAG_TARGET=""
+          release_tag_exists=false
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            TAG_TARGET="$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk '{print $1}')"
+            if [ -z "$TAG_TARGET" ]; then
+              TAG_TARGET="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
+            fi
+            if [ "$TAG_TARGET" != "$TARGET_SHA" ]; then
+              echo "Tag $TAG points at $TAG_TARGET, expected $TARGET_SHA; refusing to move it" >&2
+              exit 1
+            fi
+            release_tag_exists=true
+            echo "release_tag_exists=true" >> "$GITHUB_ENV"
+          else
+            echo "release_tag_exists=false" >> "$GITHUB_ENV"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release view "$TAG" --json isDraft,targetCommitish,assets > release-state.json
+            RELEASE_TARGET="$(jq -r '.targetCommitish' release-state.json)"
+            if [ "$RELEASE_TARGET" != "$TARGET_SHA" ]; then
+              echo "Release $TAG targets $RELEASE_TARGET, expected $TARGET_SHA" >&2
+              exit 1
+            fi
+            IS_DRAFT="$(jq -r '.isDraft' release-state.json)"
+            ACTUAL_ASSETS="$(jq -r '.assets[].name' release-state.json | sort)"
+            if [ "$IS_DRAFT" = "false" ]; then
+              if [ "$ACTUAL_ASSETS" = "$EXPECTED_ASSETS" ]; then
+                echo "release_state=already-published" >> "$GITHUB_ENV"
+                exit 0
+              fi
+              echo "Stable release $TAG exists but assets are incomplete" >&2
+              exit 1
+            fi
+            echo "release_state=resume-draft" >> "$GITHUB_ENV"
+          else
+            if [ "${release_tag_exists}" = "true" ]; then
+              echo "release_state=resume-with-tag" >> "$GITHUB_ENV"
+            else
+              echo "release_state=create" >> "$GITHUB_ENV"
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Create immutable tag
+        if: env.release_state == 'create'
+        run: |
+          git tag --annotate "${{ needs.plan-release.outputs.tag }}" \
+            --message "Release ${{ needs.plan-release.outputs.tag }}" \
+            "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
+          git push origin "${{ needs.plan-release.outputs.tag }}"
+      - name: Create draft release
+        if: env.release_state == 'create' || env.release_state == 'resume-with-tag'
+        run: |
+          printf '%s\n' "$RELEASE_NOTES" > release-notes.md
+          gh release create "${{ needs.plan-release.outputs.tag }}" dist/* \
+            --draft \
+            --verify-tag \
+            --target "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}" \
+            --title "${{ needs.plan-release.outputs.tag }}" \
+            --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ needs.plan-release.outputs.notes }}
+      - name: Complete draft release assets
+        if: env.release_state == 'resume-draft'
+        run: gh release upload "${{ needs.plan-release.outputs.tag }}" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Publish stable release
+        if: env.release_state != 'already-published'
+        run: gh release edit "${{ needs.plan-release.outputs.tag }}" --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Write release summary
+        run: |
+          {
+            echo "source_commit=${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
+            echo "previous_version=${{ needs.plan-release.outputs.previous_version }}"
+            echo "selected_increment=${{ needs.plan-release.outputs.increment }}"
+            echo "new_version=${{ needs.plan-release.outputs.version }}"
+            echo "tag=${{ needs.plan-release.outputs.tag }}"
+            echo "artifact_names=$(ls dist/*.tar.gz | xargs -n1 basename | paste -sd ',')"
+            echo "checksums=$(cat dist/SHA256SUMS | paste -sd ';')"
+            echo "release_url=${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.plan-release.outputs.tag }}"
+          } >> "$GITHUB_STEP_SUMMARY"

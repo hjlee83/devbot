@@ -26,7 +26,7 @@ def _config(tmp_path: Path) -> DevBotConfig:
 
 
 def test_cli_version_prints_package_version(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch("devbot.main.package_version", return_value="9.8.7"):
+    with patch("devbot.main.authoritative_version", return_value="9.8.7"):
         exit_code = main(["--version"])
 
     assert exit_code == 0
@@ -34,11 +34,11 @@ def test_cli_version_prints_package_version(capsys: pytest.CaptureFixture[str]) 
 
 
 def test_cli_version_uses_authoritative_version_source() -> None:
-    with patch("devbot.main.package_version", return_value="1.2.3") as mock_version:
+    with patch("devbot.main.authoritative_version", return_value="1.2.3") as mock_version:
         exit_code = main(["--version"])
 
     assert exit_code == 0
-    mock_version.assert_called_once_with("devbot")
+    mock_version.assert_called_once_with()
 
 
 def test_cli_version_does_not_load_runtime_config(tmp_path: Path) -> None:
@@ -46,7 +46,7 @@ def test_cli_version_does_not_load_runtime_config(tmp_path: Path) -> None:
     invalid_repositories = tmp_path / "repositories.yaml"
     invalid_repositories.write_text("repositories: [", encoding="utf-8")
 
-    with patch("devbot.main.package_version", return_value="1.2.3"):
+    with patch("devbot.main.authoritative_version", return_value="1.2.3"):
         exit_code = main(
             ["--version"], env_path=missing_env, repositories_path=invalid_repositories
         )
@@ -56,7 +56,7 @@ def test_cli_version_does_not_load_runtime_config(tmp_path: Path) -> None:
 
 def test_cli_version_does_not_acquire_daemon_lock() -> None:
     with (
-        patch("devbot.main.package_version", return_value="1.2.3"),
+        patch("devbot.main.authoritative_version", return_value="1.2.3"),
         patch("devbot.main.ProcessLock") as mock_lock,
     ):
         exit_code = main(["--version"])
@@ -67,7 +67,7 @@ def test_cli_version_does_not_acquire_daemon_lock() -> None:
 
 def test_cli_version_does_not_contact_github() -> None:
     with (
-        patch("devbot.main.package_version", return_value="1.2.3"),
+        patch("devbot.main.authoritative_version", return_value="1.2.3"),
         patch("devbot.main.GitHubClient") as mock_read_client,
         patch("devbot.main.GitHubWriteClient") as mock_write_client,
     ):
@@ -80,7 +80,7 @@ def test_cli_version_does_not_contact_github() -> None:
 
 def test_cli_version_does_not_start_polling_or_agents() -> None:
     with (
-        patch("devbot.main.package_version", return_value="1.2.3"),
+        patch("devbot.main.authoritative_version", return_value="1.2.3"),
         patch("devbot.main.PollingService") as mock_polling,
         patch("devbot.main.run_forever") as mock_run_forever,
         patch("devbot.main.build_agent_runner") as mock_build_agent_runner,
@@ -140,6 +140,36 @@ def test_startup_update_does_not_restart_twice(
         assert _run_startup_self_update(_config(tmp_path), logging.getLogger("test")) is True
 
     mock_exec.assert_not_called()
+
+
+def test_doctor_ci_skips_startup_self_update(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\n"
+        "GITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("devbot.main._run_startup_self_update") as mock_update,
+        patch("devbot.main.build_doctor_report") as mock_report,
+        patch("devbot.main.render_doctor_report", return_value="doctor\n"),
+    ):
+        mock_report.return_value.safe_to_start = True
+        exit_code = main(["doctor", "--ci"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 0
+    mock_update.assert_not_called()
+    mock_report.assert_called_once()
+    assert mock_report.call_args.kwargs["ci"] is True
 
 
 def test_existing_cli_workflows_remain_compatible_with_version_command(

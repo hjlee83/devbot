@@ -15,12 +15,20 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
+from devbot.agent_execution import (
+    AgentExecutionContext,
+    AgentExecutionPolicy,
+    AgentLauncher,
+    AgentRole,
+)
 from devbot.agents.codex import CodexRunner
-from devbot.github_client import GitHubClient, GitHubClientError
+from devbot.github_client import GitHubClient, GitHubClientError, GitHubIssue
 from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.startup import StartupCheck, check_daemon_lock, run_startup_checks
-from devbot.worktree import WorktreeManager
+from devbot.worktree import PreparedWorkspace, WorktreeManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,13 +67,78 @@ def check_agent_roles(config: DevBotConfig) -> StartupCheck:
     )
 
 
-def check_agent_execution_readiness(agent_name: str, role: str) -> StartupCheck:
+def _doctor_execution_context(config: DevBotConfig, role: str) -> AgentExecutionContext:
+    repository = (
+        config.enabled_repositories[0]
+        if config.enabled_repositories
+        else RepositoryConfig(
+            owner="devbot",
+            repo="doctor",
+            enabled=False,
+            local_path=Path.cwd(),
+        )
+    )
+    prepared = PreparedWorkspace(
+        repository=repository,
+        branch=repository.default_branch,
+        base_branch=repository.default_branch,
+        issue_number=0,
+        pull_request=None,
+        worktree_path=repository.local_path,
+        reused=True,
+    )
+    issue = GitHubIssue(
+        repository=repository.full_name,
+        number=0,
+        title="doctor",
+        body="",
+        state="open",
+        labels=(),
+        created_at=datetime.now(UTC),
+    )
+    return AgentExecutionContext(
+        repository=repository,
+        prepared_workspace=prepared,
+        canonical_branch=repository.default_branch,
+        issue=issue,
+        pull_request=None,
+        execution_id=f"doctor:{role}:{repository.full_name}",
+        role=AgentRole.REVIEW if role == "reviewer" else AgentRole.IMPLEMENT,
+    )
+
+
+def _doctor_launcher(agent_name: str) -> AgentLauncher:
+    return AgentLauncher(
+        command_builder=lambda _context, _prompt: [agent_name, "--version"],
+        policy=AgentExecutionPolicy(
+            agent=agent_name,
+            version="unknown",
+            sandbox="doctor-readiness",
+            approval="none",
+            network="provider-default",
+            capability_summary={"doctor": True},
+        ),
+    )
+
+
+def check_agent_execution_readiness(
+    agent_name: str, role: str, config: DevBotConfig | None = None
+) -> StartupCheck:
     name = f"agent_execution_readiness[{role}:{agent_name}]"
     executable = "codex" if agent_name == "codex" else "claude" if agent_name == "claude" else ""
     if not executable or shutil.which(executable) is None:
         return StartupCheck(name, False, f"Agent executable not found: {agent_name}")
+    launcher = _doctor_launcher(executable)
+    context = _doctor_execution_context(config, role) if config is not None else None
+    launcher_env = launcher.environment(context) if context is not None else None
+    launcher_cwd = str(context.workspace) if context is not None else None
     version = subprocess.run(
-        [executable, "--version"], capture_output=True, text=True, check=False
+        [executable, "--version"],
+        cwd=launcher_cwd,
+        env=launcher_env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if version.returncode != 0:
         return StartupCheck(name, False, f"version discovery failed: {version.stderr}")
@@ -85,10 +158,21 @@ def check_agent_execution_readiness(agent_name: str, role: str) -> StartupCheck:
             True,
             f"version={(version.stdout or version.stderr).strip()} unattended_ready=True",
         )
+    if agent_name == "claude":
+        auth = subprocess.run(
+            [executable, "auth", "status"],
+            cwd=launcher_cwd,
+            env=launcher_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if auth.returncode != 0:
+            return StartupCheck(name, False, "authentication readiness failed")
     return StartupCheck(
         name,
         True,
-        f"version={(version.stdout or version.stderr).strip()} availability=True",
+        f"version={(version.stdout or version.stderr).strip()} availability=True auth_ready=True",
     )
 
 
@@ -115,13 +199,24 @@ def check_worktree_health(
     return StartupCheck(name, report.safe_to_start, detail)
 
 
-def build_doctor_report(config: DevBotConfig) -> DoctorReport:
+def build_doctor_report(config: DevBotConfig, *, ci: bool = False) -> DoctorReport:
     checks = list(run_startup_checks(config).checks)
     checks.append(check_daemon_lock(config.lock_file))
     checks.append(check_github_connectivity(config))
     checks.append(check_agent_roles(config))
-    checks.append(check_agent_execution_readiness(config.implementer_agent, "implementer"))
-    checks.append(check_agent_execution_readiness(config.reviewer_agent, "reviewer"))
+    if ci:
+        checks.append(
+            StartupCheck(
+                "agent_execution_readiness[ci]",
+                True,
+                "skipped Agent executable/auth checks in CI profile",
+            )
+        )
+    else:
+        checks.append(
+            check_agent_execution_readiness(config.implementer_agent, "implementer", config)
+        )
+        checks.append(check_agent_execution_readiness(config.reviewer_agent, "reviewer", config))
     manager = WorktreeManager(workspace_root=config.workspace_root)
     for repository in config.enabled_repositories:
         checks.append(check_worktree_health(repository, manager))
