@@ -10,6 +10,7 @@ from devbot.agents.base import AgentRunResult
 from devbot.agents.codex import CodexRunner
 from devbot.delivery import DeliveryResult, VerificationResult
 from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
+from devbot.github_retry import GitHubTransientError
 from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
 from devbot.issue_state import IssueStateWriter
 from devbot.models import AgentOutcome, DevBotConfig, RepositoryConfig, TaskState
@@ -149,6 +150,19 @@ def _config(repositories: list[RepositoryConfig], **overrides: object) -> DevBot
 
 def _no_op_workspace_check(_repository: RepositoryConfig) -> None:
     return None
+
+
+def _successful_delivery() -> MagicMock:
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=1, html_url="https://github.com/someone/myrepo/pull/1"),
+        dry_run=False,
+        message="delivered",
+    )
+    return delivery
 
 
 def _operator_repo(tmp_path: Path, *, name: str = "myrepo") -> RepositoryConfig:
@@ -781,6 +795,99 @@ def test_iteration_selects_one_ready_issue() -> None:
     assert result.task is not None
     assert (result.task.repository, result.task.number) == (repo.full_name, 7)
     assert result.status is PollingStatus.AGENT_COMPLETED
+
+
+def test_transient_github_failure_preserves_task_state() -> None:
+    repo = _repo("myrepo")
+    issue = _issue(repo.full_name, 30, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    write_client.set_labels.side_effect = GitHubTransientError(
+        "Transient GitHub API failure 503 exhausted",
+        status=503,
+        endpoint_category="write",
+        attempts=3,
+    )
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    implementer = MagicMock()
+    service = PollingService(
+        config=_config([repo], dry_run=False),
+        github_client=github_client,
+        implementer_runner=implementer,
+        reviewer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=_successful_delivery(),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.ITERATION_ERROR
+    write_client.set_labels.assert_called_once_with(repo, 30, ["devbot:working"])
+    write_client.create_comment.assert_not_called()
+    implementer.run.assert_not_called()
+
+
+def test_github_retry_recovery_does_not_duplicate_side_effects() -> None:
+    repo = _repo("myrepo")
+    issue = _issue(repo.full_name, 31, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    write_client.set_labels.side_effect = [
+        GitHubTransientError(
+            "Transient GitHub API failure 503 exhausted",
+            status=503,
+            endpoint_category="write",
+            attempts=3,
+        ),
+        None,
+        None,
+    ]
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    implementer = MagicMock()
+    implementer.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    service = PollingService(
+        config=_config([repo], dry_run=False),
+        github_client=github_client,
+        implementer_runner=implementer,
+        reviewer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=_successful_delivery(),
+    )
+
+    first = service.run_once()
+    second = service.run_once()
+
+    assert first.status is PollingStatus.ITERATION_ERROR
+    assert second.status is PollingStatus.DELIVERED
+    assert write_client.set_labels.call_args_list == [
+        ((repo, 31, ["devbot:working"]),),
+        ((repo, 31, ["devbot:working"]),),
+        ((repo, 31, ["devbot:review"]),),
+    ]
+    write_client.create_comment.assert_not_called()
+    implementer.run.assert_called_once()
+
+
+def test_existing_workflows_remain_compatible_with_github_retry() -> None:
+    repo = _repo("myrepo")
+    issue = _issue(repo.full_name, 32, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    implementer = MagicMock()
+    implementer.run.return_value = AgentRunResult(executed=True, dry_run=True, message="ok")
+    service = PollingService(
+        config=_config([repo]),
+        github_client=github_client,
+        implementer_runner=implementer,
+        reviewer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_COMPLETED
+    implementer.run.assert_called_once()
 
 
 def test_iteration_handles_empty_queue() -> None:

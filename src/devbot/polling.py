@@ -60,6 +60,7 @@ from devbot.agent_outcome import classify_agent_outcome
 from devbot.agents.base import AgentRunner, is_session_limit_output
 from devbot.delivery import DeliveryService, branch_has_implementation_evidence
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
+from devbot.github_retry import GitHubTransientError
 from devbot.issue_state import ClaimConflictError, IssueStateWriter
 from devbot.models import (
     AgentOutcome,
@@ -953,6 +954,27 @@ class PollingService:
 
         try:
             tasks, issues_by_key = self._collect(repositories, cycle_id)
+        except GitHubTransientError as exc:
+            self.logger.warning("일시적 GitHub 오류로 이번 cycle을 보류합니다: %s", exc)
+            results = [PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))]
+            observability.log_cycle_end(
+                self.logger,
+                observability.build_cycle_summary(
+                    cycle_id=cycle_id,
+                    start=cycle_start,
+                    candidates=[],
+                    selected=[],
+                    available_slots=self.config.max_concurrent_jobs,
+                    results=results,
+                ),
+            )
+            observability.log_cycle_result(
+                self.logger,
+                cycle_id,
+                _normalized_cycle_result([], results),
+                observability.elapsed_ms(cycle_start),
+            )
+            return results
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error("GitHub 조회 중 오류가 발생했습니다: %s", exc)
             results = [PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))]
@@ -1073,6 +1095,16 @@ class PollingService:
             return PollingResult(
                 status=PollingStatus.SKIPPED_ACTIVE_TASK, task=selected, message=str(exc)
             )
+        except GitHubTransientError as exc:
+            self.logger.warning(
+                "일시적 GitHub 오류로 Issue claim을 보류합니다 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "Issue claim 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -1102,6 +1134,25 @@ class PollingService:
 
         try:
             return self._run_claimed_implement_job(repository, selected, issue, cycle_id)
+        except GitHubTransientError as exc:
+            self.logger.warning(
+                "일시적 GitHub 오류로 Job을 보류합니다 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="transient_github_failure",
+                logger=self.logger,
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
         except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working` behind
             self.logger.error(
                 "예상하지 못한 예외로 Job 중단 (%s #%d): %s",

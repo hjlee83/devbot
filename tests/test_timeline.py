@@ -14,7 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from devbot.github_client import GitHubAPIError, GitHubClient
+from devbot.github_client import GitHubClient
+from devbot.github_retry import GitHubTransientError
 from devbot.github_write_client import GitHubWriteClient
 from devbot.main import _parse_args, main
 from devbot.models import RepositoryConfig
@@ -428,10 +429,10 @@ def test_timeline_update_failure_preserves_existing_comment() -> None:
         backend, clock=datetime(2026, 7, 15, 10, 10, tzinfo=UTC)
     )
 
-    with pytest.raises(GitHubAPIError):
+    with pytest.raises(GitHubTransientError):
         service.end(_repository(), 34, phase="dev", actor="claude", result="pushed", pr=35)
 
-    write_session.patch.assert_called_once()
+    assert write_session.patch.call_count == 3
     # 실패한 PATCH는 comment를 훼손하면 안 된다.
     assert backend.comments[comment_id] == original_body
 
