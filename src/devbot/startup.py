@@ -30,6 +30,7 @@ it stays out of this module) on top and is the place that decides what
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,6 +64,106 @@ class StartupValidationReport:
     @property
     def ok(self) -> bool:
         return not self.failed_checks
+
+
+@dataclass(frozen=True, slots=True)
+class StartupSelfUpdateResult:
+    repository: str
+    current_sha: str
+    latest_sha: str
+    final_sha: str
+    result: str
+    skip_reason: str = ""
+
+
+class StartupSelfUpdateError(RuntimeError):
+    def __init__(self, result: StartupSelfUpdateResult) -> None:
+        super().__init__(result.skip_reason)
+        self.result = result
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False
+    )
+
+
+def _git_text(cwd: Path, *args: str) -> str:
+    completed = _git(cwd, *args)
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout)
+    return completed.stdout.strip()
+
+
+def startup_self_update_repository(repository: RepositoryConfig) -> StartupSelfUpdateResult:
+    path = repository.local_path
+    try:
+        current_sha = _git_text(path, "rev-parse", "HEAD")
+    except Exception as exc:  # noqa: BLE001
+        result = StartupSelfUpdateResult(
+            repository=repository.full_name,
+            current_sha="",
+            latest_sha="",
+            final_sha="",
+            result="failed",
+            skip_reason=f"current SHA 확인 실패: {exc}",
+        )
+        raise StartupSelfUpdateError(result) from exc
+
+    def _fail(reason: str, *, latest_sha: str = "", final_sha: str | None = None) -> None:
+        raise StartupSelfUpdateError(
+            StartupSelfUpdateResult(
+                repository=repository.full_name,
+                current_sha=current_sha,
+                latest_sha=latest_sha,
+                final_sha=final_sha if final_sha is not None else current_sha,
+                result="failed",
+                skip_reason=reason,
+            )
+        )
+
+    status = _git(path, "status", "--porcelain")
+    if status.returncode != 0:
+        _fail(f"status 확인 실패: {status.stderr or status.stdout}")
+    dirty_lines = [
+        line for line in status.stdout.splitlines() if not line.startswith("?? .worktrees/")
+    ]
+    if dirty_lines:
+        _fail("operator checkout dirty")
+
+    branch = _git_text(path, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch != repository.default_branch:
+        _fail(f"current branch is not {repository.default_branch}: {branch}")
+
+    fetch = _git(path, "fetch", "origin", repository.default_branch)
+    if fetch.returncode != 0:
+        _fail(f"fetch failed: {fetch.stderr or fetch.stdout}")
+    latest_sha = _git_text(path, "rev-parse", f"origin/{repository.default_branch}")
+
+    switch = _git(path, "switch", repository.default_branch)
+    if switch.returncode != 0:
+        _fail(f"switch main failed: {switch.stderr or switch.stdout}", latest_sha=latest_sha)
+
+    pull = _git(path, "pull", "--ff-only", "origin", repository.default_branch)
+    if pull.returncode != 0:
+        _fail(f"ff-only pull failed: {pull.stderr or pull.stdout}", latest_sha=latest_sha)
+
+    final_sha = _git_text(path, "rev-parse", "HEAD")
+    return StartupSelfUpdateResult(
+        repository=repository.full_name,
+        current_sha=current_sha,
+        latest_sha=latest_sha,
+        final_sha=final_sha,
+        result="already_current" if current_sha == final_sha else "updated",
+    )
+
+
+def run_startup_self_update(config: DevBotConfig) -> tuple[StartupSelfUpdateResult, ...]:
+    results: list[StartupSelfUpdateResult] = []
+    for repository in config.enabled_repositories:
+        result = startup_self_update_repository(repository)
+        results.append(result)
+    return tuple(results)
 
 
 def check_repository_configuration(config: DevBotConfig) -> StartupCheck:

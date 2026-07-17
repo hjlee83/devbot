@@ -5,7 +5,9 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
+from devbot.agent_execution import AgentExecutionContext, AgentExecutionPolicy, AgentLauncher
 from devbot.agents.base import AgentRunner, AgentRunResult
 from devbot.models import AgentOutcome, RepositoryConfig
 
@@ -26,6 +28,7 @@ class CodexRunner(AgentRunner):
     approval_mode: str = "never"
     network_mode: str = "enabled"
     _capabilities: dict[str, bool] | None = field(default=None, repr=False)
+    _CAPABILITY_CACHE: ClassVar[dict[str, bool] | None] = None
 
     def _help(self, *args: str) -> str:
         completed = subprocess.run(
@@ -39,16 +42,21 @@ class CodexRunner(AgentRunner):
     def _detect_capabilities(self) -> dict[str, bool]:
         if self._capabilities is not None:
             return self._capabilities
+        if CodexRunner._CAPABILITY_CACHE is not None:
+            return CodexRunner._CAPABILITY_CACHE
         root_help = self._help()
         exec_help = self._help("exec")
         combined = f"{root_help}\n{exec_help}"
-        return {
+        capabilities = {
             "cd": "--cd" in combined or "-C," in combined,
             "add_dir": "--add-dir" in combined,
             "sandbox": "--sandbox" in combined,
             "approval": "--ask-for-approval" in root_help,
             "config": "--config" in combined,
         }
+        if all(capabilities.values()):
+            CodexRunner._CAPABILITY_CACHE = capabilities
+        return capabilities
 
     def _git_path(self, repository: RepositoryConfig, arg: str) -> Path | None:
         completed = subprocess.run(
@@ -121,6 +129,9 @@ class CodexRunner(AgentRunner):
         command.extend(["exec", prompt])
         return command
 
+    def command_for_context(self, context: AgentExecutionContext, prompt: str) -> list[str]:
+        return self.command_for(context.prepared_workspace.repository, prompt)
+
     def execution_policy(self, repository: RepositoryConfig) -> dict[str, object]:
         version = subprocess.run(
             [CODEX_COMMAND, "--version"], capture_output=True, text=True, check=False
@@ -161,6 +172,44 @@ class CodexRunner(AgentRunner):
             text=True,
             check=False,
         )
+        return AgentRunResult(
+            executed=True,
+            dry_run=False,
+            message=completed.stdout or completed.stderr,
+            returncode=completed.returncode,
+        )
+
+    def run_context(self, context: AgentExecutionContext, prompt: str) -> AgentRunResult:
+        if self.dry_run:
+            return AgentRunResult(
+                executed=False,
+                dry_run=True,
+                message=f"[dry-run] would run codex in {context.workspace}",
+            )
+        try:
+            capabilities = self._detect_capabilities()
+            launcher = AgentLauncher(
+                command_builder=self.command_for_context,
+                policy=AgentExecutionPolicy(
+                    agent="codex",
+                    version=self.execution_policy(context.prepared_workspace.repository)[
+                        "codex_version"
+                    ],
+                    sandbox=self.sandbox_mode,
+                    approval=self.approval_mode,
+                    network=self.network_mode,
+                    capability_summary=capabilities,
+                ),
+            )
+            completed = launcher.run(context, prompt)
+        except CodexConfigurationError as exc:
+            return AgentRunResult(
+                executed=False,
+                dry_run=False,
+                message=str(exc),
+                returncode=None,
+                outcome_hint=AgentOutcome.AGENT_CONFIGURATION_INVALID,
+            )
         return AgentRunResult(
             executed=True,
             dry_run=False,

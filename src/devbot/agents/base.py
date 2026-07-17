@@ -14,6 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from devbot.agent_execution import AgentExecutionContext
 from devbot.models import AgentOutcome, RepositoryConfig
 
 _APPROVAL_REQUIRED_PATTERNS = (
@@ -196,3 +197,12 @@ class AgentRunner(ABC):
     def run(self, repository: RepositoryConfig, prompt: str) -> AgentRunResult:
         """Run the agent for `repository` with the given task `prompt`."""
         raise NotImplementedError
+
+    def run_context(self, context: AgentExecutionContext, prompt: str) -> AgentRunResult:
+        """Run the agent using the shared execution context.
+
+        Providers override this to use `AgentLauncher`; the default keeps
+        legacy test doubles compatible while still forcing the prepared
+        workspace repository through the old interface.
+        """
+        return self.run(context.prepared_workspace.repository, prompt)

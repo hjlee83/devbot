@@ -45,6 +45,7 @@ wired one simply never sees that job type as a candidate.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import signal
@@ -57,6 +58,7 @@ from enum import Enum
 from typing import Protocol
 
 from devbot import observability
+from devbot.agent_execution import AgentExecutionContext, AgentRole
 from devbot.agent_outcome import classify_agent_outcome
 from devbot.agents.base import AgentRunner, is_session_limit_output
 from devbot.delivery import DeliveryService, branch_has_implementation_evidence
@@ -418,6 +420,58 @@ class PrepareWorkspaceFn(Protocol):
 ReviewIntegrationValidationFn = Callable[[PreparedWorkspace], ReviewIntegrationValidation]
 
 IssuesByKey = dict[tuple[str, int], GitHubIssue]
+
+
+def build_agent_execution_context(
+    *,
+    repository: RepositoryConfig,
+    prepared: PreparedWorkspace,
+    issue: GitHubIssue,
+    pull_request: PullRequest | None,
+    role: AgentRole,
+    cycle_id: str,
+) -> AgentExecutionContext:
+    return AgentExecutionContext(
+        repository=repository,
+        prepared_workspace=prepared,
+        canonical_branch=prepared.branch,
+        issue=issue,
+        pull_request=pull_request,
+        execution_id=f"{cycle_id}:{role.value}:{repository.full_name}#{issue.number}",
+        role=role,
+    )
+
+
+def _runner_overrides_context(runner: AgentRunner) -> bool:
+    try:
+        return type(runner).run_context is not AgentRunner.run_context
+    except AttributeError:
+        return False
+
+
+def _run_agent(
+    runner: AgentRunner,
+    repository: RepositoryConfig,
+    prompt: str,
+    context: AgentExecutionContext | None,
+) -> object:
+    if context is not None and _runner_overrides_context(runner):
+        return runner.run_context(context, prompt)
+    return runner.run(repository, prompt)
+
+
+def _accepts_keyword(callable_object: object, keyword: str) -> bool:
+    side_effect = getattr(callable_object, "side_effect", None)
+    if callable(side_effect):
+        callable_object = side_effect
+    try:
+        signature = inspect.signature(callable_object)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD or name == keyword
+        for name, parameter in signature.parameters.items()
+    )
 
 
 @dataclass
@@ -1513,7 +1567,21 @@ class PollingService:
 
         agent_start = time.monotonic()
         try:
-            agent_result = self.implementer_runner.run(work_repository, prompt)
+            context = (
+                build_agent_execution_context(
+                    repository=repository,
+                    prepared=prepared,
+                    issue=issue,
+                    pull_request=prepared.pull_request,
+                    role=AgentRole.IMPLEMENT,
+                    cycle_id=cycle_id,
+                )
+                if prepared is not None
+                else None
+            )
+            agent_result = _run_agent(
+                self.implementer_runner, work_repository, prompt, context
+            )
         except KeyboardInterrupt as exc:
             self.logger.error(
                 "AgentRunner 실행 중단 (%s #%d): %s", selected.repository, selected.number, exc
@@ -2313,9 +2381,33 @@ class PollingService:
 
         rework_start = time.monotonic()
         try:
-            rework_result = self.rework_service.process(  # type: ignore[union-attr]
-                work_repository, issue, linked_pull_request.head_ref, pr_comments
+            execution_context = (
+                build_agent_execution_context(
+                    repository=repository,
+                    prepared=_prepared,
+                    issue=issue,
+                    pull_request=linked_pull_request,
+                    role=AgentRole.REWORK,
+                    cycle_id=cycle_id,
+                )
+                if _prepared is not None
+                else None
             )
+            if _accepts_keyword(self.rework_service.process, "execution_context"):  # type: ignore[union-attr]
+                rework_result = self.rework_service.process(  # type: ignore[union-attr]
+                    work_repository,
+                    issue,
+                    linked_pull_request.head_ref,
+                    pr_comments,
+                    execution_context=execution_context,
+                )
+            else:
+                rework_result = self.rework_service.process(  # type: ignore[union-attr]
+                    work_repository,
+                    issue,
+                    linked_pull_request.head_ref,
+                    pr_comments,
+                )
         except ClaimConflictError as exc:  # CP-014-8: another Job already owns this Issue
             self.logger.warning(
                 "경쟁 claim으로 건너뜀 (%s #%d): %s", selected.repository, selected.number, exc
@@ -2435,9 +2527,33 @@ class PollingService:
 
         review_start = time.monotonic()
         try:
-            review_result = self.review_service.process(  # type: ignore[union-attr]
-                work_repository, issue, linked_pull_request, comments=pr_comments
+            execution_context = (
+                build_agent_execution_context(
+                    repository=repository,
+                    prepared=prepared,
+                    issue=issue,
+                    pull_request=linked_pull_request,
+                    role=AgentRole.REVIEW,
+                    cycle_id=cycle_id,
+                )
+                if prepared is not None
+                else None
             )
+            if _accepts_keyword(self.review_service.process, "execution_context"):  # type: ignore[union-attr]
+                review_result = self.review_service.process(  # type: ignore[union-attr]
+                    work_repository,
+                    issue,
+                    linked_pull_request,
+                    comments=pr_comments,
+                    execution_context=execution_context,
+                )
+            else:
+                review_result = self.review_service.process(  # type: ignore[union-attr]
+                    work_repository,
+                    issue,
+                    linked_pull_request,
+                    comments=pr_comments,
+                )
         except ClaimConflictError as exc:  # CP-014-8: another Job already owns this Issue
             self.logger.warning(
                 "경쟁 claim으로 건너뜀 (%s #%d): %s", selected.repository, selected.number, exc

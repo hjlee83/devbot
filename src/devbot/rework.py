@@ -31,6 +31,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from devbot.agent_execution import AgentExecutionContext
 from devbot.agents.base import AgentSessionLimitError
 from devbot.delivery import (
     CommitFn,
@@ -143,7 +144,7 @@ def find_unprocessed_devbot_comments(
     ]
 
 
-ApplyChangesFn = Callable[[RepositoryConfig, GitHubIssue, PullRequestComment], None]
+ApplyChangesFn = Callable[..., None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +206,7 @@ class ReworkService:
         issue: GitHubIssue,
         branch: str,
         comments: Sequence[PullRequestComment],
+        execution_context: AgentExecutionContext | None = None,
     ) -> ReworkResult:
         unprocessed = find_unprocessed_devbot_comments(comments)
         if not unprocessed:
@@ -285,7 +287,10 @@ class ReworkService:
             )
 
         try:
-            self.apply_changes(repository, working_issue, comment)
+            try:
+                self.apply_changes(repository, working_issue, comment, execution_context)
+            except TypeError:
+                self.apply_changes(repository, working_issue, comment)
         except AgentSessionLimitError as exc:
             # Task 019 CP-019-9: classify and add a clear recovery hint for
             # a session/usage-limit failure; still ends in devbot:blocked,
