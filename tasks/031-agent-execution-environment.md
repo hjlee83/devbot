@@ -14,6 +14,7 @@ Standardize Agent execution so implementer and reviewer roles receive the same e
 6. Cache Agent CLI version and capability discovery without allowing stale or failed discovery to bypass safety checks.
 7. Extend `devbot doctor` to validate configured Agent availability and unattended execution requirements.
 8. Preserve existing Codex safety guarantees from Task 030 and apply the shared context without regression.
+9. Add a startup self-update stage that updates only the operator checkout `main` branch before doctor, planning, workspace preparation, or Agent execution.
 
 ## Out of Scope
 
@@ -24,13 +25,14 @@ Standardize Agent execution so implementer and reviewer roles receive the same e
 - systemd, Docker, or VPS installation
 - GitHub App migration
 - Automatic merge
+- Automatic update of Task branches, PR branches, or PreparedWorkspaces during startup
 
 ## Planner Artifacts
 
 - Task Issue: #64
 - Branch: `task/031-agent-execution-environment`
 - Contract: `tasks/031-agent-execution-environment.md`
-- Pull Request: this Task's single Planner PR
+- Pull Request: #65
 - Result: `results/031-agent-execution-environment.md`
 
 ## Checkpoints
@@ -101,6 +103,38 @@ Task 030 retry, worktree, main synchronization, review integration validation, i
 
 Required test: `test_existing_workflows_remain_compatible_with_agent_execution_context`
 
+### CP-031-10 — Startup self-update of operator main only
+
+Before doctor, planning, workspace preparation, or Agent execution, DevBot updates only the operator checkout `main` branch.
+
+Required behavior:
+
+1. Resolve the operator checkout separately from every Task PreparedWorkspace.
+2. Refuse startup when the operator checkout has tracked or untracked changes.
+3. Run the equivalent of:
+   - `git fetch origin main`
+   - verify the operator checkout is on `main`
+   - `git pull --ff-only origin main`
+4. Never run a plain `git pull`, `git merge`, rebase, force push, or branch rewrite in the startup updater.
+5. Never update, switch, merge, rebase, or reset any Task branch, PR branch, or PreparedWorkspace during startup.
+6. If `main` cannot fast-forward, authentication fails, or update verification fails, do not run doctor, planner, workspace preparation, or any Agent.
+7. After a successful or already-current update, run startup stages in this order:
+   - operator-main self-update
+   - doctor
+   - planner/polling
+   - PreparedWorkspace preparation
+   - Agent execution
+8. Emit secret-safe diagnostics containing current SHA, remote main SHA, final SHA, result (`updated`, `already_current`, or `failed`), and failure reason.
+
+Required tests:
+- `test_startup_updates_operator_checkout_main_only`
+- `test_startup_rejects_dirty_main_checkout`
+- `test_startup_uses_ff_only`
+- `test_startup_never_updates_task_branch_or_prepared_workspace`
+- `test_startup_failure_prevents_doctor_planner_and_agent_execution`
+- `test_startup_runs_doctor_after_successful_main_update`
+- `test_startup_update_diagnostics_are_complete_and_redacted`
+
 ## Validation Gate
 
 Run from the Task PreparedWorkspace:
@@ -115,6 +149,8 @@ uv run devbot --once --dry-run
 
 Also demonstrate that implementer and reviewer dry-runs report the same canonical workspace and sanitized context without launching a real Agent process.
 
+Demonstrate startup self-update using isolated local Git repositories without mutating the Task branch or PreparedWorkspace. Tests must prove that only operator `main` can be fast-forwarded and that startup stops before doctor/planner/Agent execution on any update failure.
+
 ## Definition of Done
 
 - All checkpoints and required tests pass.
@@ -123,10 +159,13 @@ Also demonstrate that implementer and reviewer dry-runs report the same canonica
 - Environment and diagnostics are standardized and secret-safe.
 - Capability discovery is cached and fail-closed.
 - Doctor reports actionable Agent readiness.
+- Startup updates only the operator checkout `main` using fast-forward-only semantics.
+- Startup never mutates Task branches, PR branches, or PreparedWorkspaces.
+- Startup failures prevent all later startup and Agent stages.
 - Result and PR Evidence record actual implementation and validation outcomes.
-- DevBot reaches `devbot:ready-to-merge` on Issue #64 and the canonical PR.
+- DevBot reaches `devbot:ready-to-merge` on Issue #64 and PR #65.
 - Final merge remains manual.
 
 ## Branch and PR Policy
 
-Use exactly one Issue, one Branch, one Contract, and one Pull Request. Continue all implementation, review, and rework on `task/031-agent-execution-environment` and its linked Planner PR. Do not create a separate Execution Issue, branch, contract, or PR.
+Use exactly one Issue, one Branch, one Contract, and one Pull Request. Continue all implementation, review, and rework on `task/031-agent-execution-environment` and PR #65. Do not create a separate Execution Issue, branch, contract, or PR.
