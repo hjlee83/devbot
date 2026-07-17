@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from devbot.installation import INSTALL_ROOT_ENV
 from devbot.lock import ProcessLock
 from devbot.main import _run_startup_self_update, main
 from devbot.models import DevBotConfig
@@ -173,6 +174,39 @@ def test_existing_cli_workflows_remain_compatible_with_version_command(
 
     assert exit_code == 0
     mock_run_cycle.assert_called_once()
+
+
+def test_main_uses_install_root_for_startup_self_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operator = tmp_path / "operator"
+    (operator / "src" / "devbot").mkdir(parents=True)
+    (operator / "src" / "devbot" / "main.py").write_text("# main\n", encoding="utf-8")
+    (operator / "pyproject.toml").write_text("[project]\nname = 'devbot'\n", encoding="utf-8")
+    (operator / "config").mkdir()
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (operator / ".env").write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n",
+        encoding="utf-8",
+    )
+    (operator / "config" / "repositories.yaml").write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(INSTALL_ROOT_ENV, str(operator))
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True) as mock_update,
+        patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle,
+    ):
+        exit_code = main(["--once", "--dry-run"])
+
+    assert exit_code == 0
+    mock_run_cycle.assert_called_once()
+    assert mock_update.call_args.kwargs["operator_checkout"] == operator.resolve()
 
 
 def test_main_starts_and_exits_successfully(

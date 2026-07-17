@@ -59,6 +59,19 @@ Edit `config/repositories.yaml` to list the repositories DevBot manages.
 `local_path` for each repository is derived as `WORKSPACE_ROOT / repo`.
 Only `enabled: true` repositories are validated and managed.
 
+To run DevBot from any directory, install a small PATH launcher from the
+operator checkout:
+
+```bash
+uv run devbot install-launcher --bin-dir ~/.local/bin
+```
+
+The launcher stores the operator checkout path in
+`~/.config/devbot/install-root`, exports `DEVBOT_INSTALL_ROOT`, changes to that
+checkout, and forwards every CLI argument and exit code to the project entry
+point. If the metadata is missing or invalid, DevBot prints a recovery hint
+instead of guessing another checkout.
+
 ## Run
 
 ```bash
@@ -67,6 +80,7 @@ uv run devbot --once --dry-run   # same, but force dry-run regardless of DRY_RUN
 uv run devbot                    # continuous polling until SIGINT/SIGTERM
 uv run devbot --once --verbose   # same, but force DEBUG-level logs for this run only
 uv run devbot --version          # print the installed package version and exit
+devbot --once --dry-run          # after install-launcher, works from any directory
 ```
 
 Each iteration enforces one globally active Task and selects the next runnable

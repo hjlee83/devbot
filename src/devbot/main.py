@@ -31,6 +31,7 @@ from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
+from devbot.installation import InstallationError, install_launcher, resolve_install_root
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import DevBotConfig, IssueComment, RepositoryConfig
@@ -242,6 +243,25 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "보고합니다 (읽기 전용, GitHub에 쓰지 않음)."
         ),
     )
+    install_parser = subparsers.add_parser(
+        "install-launcher",
+        help=(
+            "현재 DevBot operator checkout을 PATH에서 실행 가능한 "
+            "전역 devbot launcher로 등록합니다."
+        ),
+    )
+    install_parser.add_argument(
+        "--bin-dir",
+        type=Path,
+        required=True,
+        help="launcher를 만들 PATH 디렉터리.",
+    )
+    install_parser.add_argument(
+        "--install-root",
+        type=Path,
+        default=None,
+        help="등록할 DevBot operator checkout. 생략하면 현재 설치 루트를 사용합니다.",
+    )
     return parser.parse_args(argv)
 
 
@@ -337,6 +357,20 @@ def _run_doctor_command(config: DevBotConfig) -> int:
     return 0 if report.safe_to_start else 1
 
 
+def _run_install_launcher_command(args: argparse.Namespace) -> int:
+    try:
+        root = resolve_install_root(args.install_root)
+        result = install_launcher(bin_dir=args.bin_dir, install_root=root)
+    except InstallationError as exc:
+        print(f"설치 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"launcher: {result.launcher_path}")
+    print(f"install_root: {result.install_root}")
+    print(f"metadata: {result.metadata_path}")
+    return 0
+
+
 def _restart_after_startup_update(final_sha: str) -> None:
     if os.environ.get(STARTUP_SELF_UPDATE_ENV) == final_sha:
         return
@@ -345,9 +379,14 @@ def _restart_after_startup_update(final_sha: str) -> None:
     os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
 
 
-def _run_startup_self_update(config: DevBotConfig, logger: logging.Logger) -> bool:
+def _run_startup_self_update(
+    config: DevBotConfig,
+    logger: logging.Logger,
+    *,
+    operator_checkout: Path | None = None,
+) -> bool:
     try:
-        results = run_startup_self_update(config)
+        results = run_startup_self_update(config, operator_checkout=operator_checkout)
     except StartupSelfUpdateError as exc:
         result = exc.result
         logger.error(
@@ -387,11 +426,19 @@ def main(
         print(f"devbot {package_version('devbot')}")
         return 0
 
+    if args.command == "install-launcher":
+        return _run_install_launcher_command(args)
+
     logger = _configure_logging()
 
     try:
-        config = load_config(env_path=env_path, repositories_path=repositories_path)
-    except ConfigError as exc:
+        install_root = resolve_install_root()
+        config = load_config(
+            env_path=env_path,
+            repositories_path=repositories_path,
+            install_root=install_root,
+        )
+    except (ConfigError, InstallationError) as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 1
 
@@ -408,14 +455,16 @@ def main(
         return _run_worktree_command(args, config)
 
     if args.command == "doctor":
-        if not _run_startup_self_update(config, logger):
+        if not _run_startup_self_update(config, logger, operator_checkout=install_root):
             return 1
         return _run_doctor_command(config)
 
     try:
         with ProcessLock(config.lock_file):
             log_startup(logger, config)
-            if config.enabled_repositories and not _run_startup_self_update(config, logger):
+            if config.enabled_repositories and not _run_startup_self_update(
+                config, logger, operator_checkout=install_root
+            ):
                 return 1
             # Task 019 CP-019-4: informational only (see
             # `devbot.startup`'s module docstring) - the two genuinely

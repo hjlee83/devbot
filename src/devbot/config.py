@@ -14,9 +14,8 @@ import yaml
 from dotenv import load_dotenv
 
 from devbot.agents import KNOWN_AGENT_NAMES
+from devbot.installation import default_repositories_path, resolve_install_root
 from devbot.models import DevBotConfig, RepositoryConfig
-
-DEFAULT_REPOSITORIES_PATH = Path("config/repositories.yaml")
 
 _DEFAULTS: dict[str, str] = {
     "POLL_INTERVAL_SECONDS": "60",
@@ -154,6 +153,7 @@ def _load_repositories(
 def load_config(
     env_path: Path | str | None = None,
     repositories_path: Path | str | None = None,
+    install_root: Path | str | None = None,
 ) -> DevBotConfig:
     """Load `.env` and `config/repositories.yaml` into a `DevBotConfig`.
 
@@ -161,7 +161,9 @@ def load_config(
     to point at fixture files instead of the real project files. Existing
     process environment variables always take precedence over `.env` values.
     """
-    load_dotenv(dotenv_path=env_path, override=False)
+    root = resolve_install_root(install_root)
+    resolved_env_path = Path(env_path) if env_path is not None else root / ".env"
+    load_dotenv(dotenv_path=resolved_env_path, override=False)
 
     workspace_root_raw = os.environ.get("WORKSPACE_ROOT")
     if not workspace_root_raw:
@@ -202,7 +204,7 @@ def load_config(
         else os.environ.get("DEVBOT_REPOSITORIES_PATH")
     )
     resolved_repositories_path = (
-        Path(repositories_path_raw) if repositories_path_raw else DEFAULT_REPOSITORIES_PATH
+        Path(repositories_path_raw) if repositories_path_raw else default_repositories_path(root)
     )
     repositories = _load_repositories(resolved_repositories_path, workspace_root)
 
