@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -459,7 +459,8 @@ def test_existing_devbot_once_cli_still_works(
         encoding="utf-8",
     )
 
-    exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
+    with patch("devbot.main._run_startup_self_update", return_value=True):
+        exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 0
 

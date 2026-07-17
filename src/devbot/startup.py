@@ -30,6 +30,7 @@ it stays out of this module) on top and is the place that decides what
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,8 @@ from devbot.delivery import DeliveryError, current_git_branch
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.workspace import inspect_workspace
+
+STARTUP_SELF_UPDATE_ENV = "DEVBOT_STARTUP_SELF_UPDATED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +66,138 @@ class StartupValidationReport:
     @property
     def ok(self) -> bool:
         return not self.failed_checks
+
+
+@dataclass(frozen=True, slots=True)
+class StartupSelfUpdateResult:
+    repository: str
+    current_sha: str
+    latest_sha: str
+    final_sha: str
+    result: str
+    skip_reason: str = ""
+
+
+class StartupSelfUpdateError(RuntimeError):
+    def __init__(self, result: StartupSelfUpdateResult) -> None:
+        super().__init__(result.skip_reason)
+        self.result = result
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False
+    )
+
+
+def _git_text(cwd: Path, *args: str) -> str:
+    completed = _git(cwd, *args)
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout)
+    return completed.stdout.strip()
+
+
+def resolve_operator_checkout(start_path: Path | None = None) -> Path:
+    """Resolve the DevBot operator checkout, even when invoked from one of
+    its Git worktrees.
+
+    `git rev-parse --git-common-dir` points at the main checkout's `.git`
+    directory for both the operator checkout and linked worktrees. Its
+    parent is therefore the one checkout Startup Self Update is allowed to
+    mutate.
+    """
+    cwd = start_path or Path.cwd()
+    completed = _git(cwd, "rev-parse", "--git-common-dir")
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout)
+    common_dir = Path(completed.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = (cwd / common_dir).resolve()
+    if common_dir.name != ".git":
+        raise RuntimeError(f"unexpected git common dir: {common_dir}")
+    return common_dir.parent
+
+
+def startup_self_update_operator(
+    operator_checkout: Path | None = None,
+    *,
+    default_branch: str = "main",
+) -> StartupSelfUpdateResult:
+    path = operator_checkout or resolve_operator_checkout()
+    repository_name = str(path)
+    try:
+        current_sha = _git_text(path, "rev-parse", "HEAD")
+    except Exception as exc:  # noqa: BLE001
+        result = StartupSelfUpdateResult(
+            repository=repository_name,
+            current_sha="",
+            latest_sha="",
+            final_sha="",
+            result="failed",
+            skip_reason=f"current SHA 확인 실패: {exc}",
+        )
+        raise StartupSelfUpdateError(result) from exc
+
+    def _fail(reason: str, *, latest_sha: str = "", final_sha: str | None = None) -> None:
+        raise StartupSelfUpdateError(
+            StartupSelfUpdateResult(
+                repository=repository_name,
+                current_sha=current_sha,
+                latest_sha=latest_sha,
+                final_sha=final_sha if final_sha is not None else current_sha,
+                result="failed",
+                skip_reason=reason,
+            )
+        )
+
+    status = _git(path, "status", "--porcelain")
+    if status.returncode != 0:
+        _fail(f"status 확인 실패: {status.stderr or status.stdout}")
+    dirty_lines = [
+        line for line in status.stdout.splitlines() if not line.startswith("?? .worktrees/")
+    ]
+    if dirty_lines:
+        _fail("operator checkout dirty")
+
+    branch = _git_text(path, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch != default_branch:
+        _fail(f"current branch is not {default_branch}: {branch}")
+
+    fetch = _git(path, "fetch", "origin", default_branch)
+    if fetch.returncode != 0:
+        _fail(f"fetch failed: {fetch.stderr or fetch.stdout}")
+    latest_sha = _git_text(path, "rev-parse", f"origin/{default_branch}")
+
+    switch = _git(path, "switch", default_branch)
+    if switch.returncode != 0:
+        _fail(f"switch main failed: {switch.stderr or switch.stdout}", latest_sha=latest_sha)
+
+    pull = _git(path, "pull", "--ff-only", "origin", default_branch)
+    if pull.returncode != 0:
+        _fail(f"ff-only pull failed: {pull.stderr or pull.stdout}", latest_sha=latest_sha)
+
+    final_sha = _git_text(path, "rev-parse", "HEAD")
+    return StartupSelfUpdateResult(
+        repository=repository_name,
+        current_sha=current_sha,
+        latest_sha=latest_sha,
+        final_sha=final_sha,
+        result="already_current" if current_sha == final_sha else "updated",
+    )
+
+
+def startup_self_update_repository(repository: RepositoryConfig) -> StartupSelfUpdateResult:
+    return startup_self_update_operator(
+        repository.local_path, default_branch=repository.default_branch
+    )
+
+
+def run_startup_self_update(
+    _config: DevBotConfig,
+    *,
+    operator_checkout: Path | None = None,
+) -> tuple[StartupSelfUpdateResult, ...]:
+    return (startup_self_update_operator(operator_checkout),)
 
 
 def check_repository_configuration(config: DevBotConfig) -> StartupCheck:

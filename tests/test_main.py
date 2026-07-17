@@ -1,10 +1,28 @@
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from devbot.lock import ProcessLock
-from devbot.main import main
+from devbot.main import _run_startup_self_update, main
+from devbot.models import DevBotConfig
+from devbot.startup import STARTUP_SELF_UPDATE_ENV, StartupSelfUpdateResult
+
+
+def _config(tmp_path: Path) -> DevBotConfig:
+    return DevBotConfig(
+        workspace_root=tmp_path / "workspace",
+        poll_interval_seconds=60,
+        lock_file=tmp_path / "devbot.lock",
+        default_agent="codex",
+        implementer_agent="codex",
+        reviewer_agent="codex",
+        max_concurrent_jobs=1,
+        dry_run=True,
+        github_token="token",
+        repositories=(),
+    )
 
 
 def test_cli_version_prints_package_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -75,6 +93,55 @@ def test_cli_version_does_not_start_polling_or_agents() -> None:
     mock_build_agent_runner.assert_not_called()
 
 
+def test_startup_update_restarts_process_when_head_changes(tmp_path: Path) -> None:
+    result = StartupSelfUpdateResult(
+        repository=str(tmp_path),
+        current_sha="old",
+        latest_sha="new",
+        final_sha="new",
+        result="updated",
+    )
+    captured: dict[str, object] = {}
+
+    def _execvpe(executable: str, argv: list[str], env: dict[str, str]) -> None:
+        captured["executable"] = executable
+        captured["argv"] = argv
+        captured["env"] = env
+        raise SystemExit(0)
+
+    with (
+        patch("devbot.main.run_startup_self_update", return_value=(result,)),
+        patch("devbot.main.os.execvpe", side_effect=_execvpe),
+        pytest.raises(SystemExit),
+    ):
+        _run_startup_self_update(_config(tmp_path), logging.getLogger("test"))
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env[STARTUP_SELF_UPDATE_ENV] == "new"
+
+
+def test_startup_update_does_not_restart_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(STARTUP_SELF_UPDATE_ENV, "new")
+    result = StartupSelfUpdateResult(
+        repository=str(tmp_path),
+        current_sha="old",
+        latest_sha="new",
+        final_sha="new",
+        result="updated",
+    )
+
+    with (
+        patch("devbot.main.run_startup_self_update", return_value=(result,)),
+        patch("devbot.main.os.execvpe") as mock_exec,
+    ):
+        assert _run_startup_self_update(_config(tmp_path), logging.getLogger("test")) is True
+
+    mock_exec.assert_not_called()
+
+
 def test_existing_cli_workflows_remain_compatible_with_version_command(
     tmp_path: Path,
 ) -> None:
@@ -94,7 +161,10 @@ def test_existing_cli_workflows_remain_compatible_with_version_command(
         encoding="utf-8",
     )
 
-    with patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle:
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle,
+    ):
         exit_code = main(
             ["--once", "--dry-run", "--verbose"],
             env_path=env_path,
@@ -133,7 +203,8 @@ def test_main_starts_and_exits_successfully(
         encoding="utf-8",
     )
 
-    exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
+    with patch("devbot.main._run_startup_self_update", return_value=True):
+        exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
     assert exit_code == 0
 

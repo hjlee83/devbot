@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from importlib.metadata import version as package_version
 from pathlib import Path
 
+from devbot.agent_execution import AgentExecutionContext
 from devbot.agents import build_agent_runner
 from devbot.agents.base import AgentRunner, AgentSessionLimitError, is_session_limit_output
 from devbot.config import ConfigError, load_config
@@ -41,7 +43,12 @@ from devbot.observability import (
 from devbot.polling import PollingService, PollingStatus, run_forever
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
-from devbot.startup import run_startup_checks
+from devbot.startup import (
+    STARTUP_SELF_UPDATE_ENV,
+    StartupSelfUpdateError,
+    run_startup_checks,
+    run_startup_self_update,
+)
 from devbot.timeline import TimelineError, TimelineService
 from devbot.workspace import build_agent_prompt
 from devbot.worktree import WorkspacePreparationError, WorktreeManager
@@ -62,13 +69,17 @@ def _apply_rework_changes(
     repository: RepositoryConfig,
     issue: GitHubIssue,
     comment: PullRequestComment,
+    execution_context: AgentExecutionContext | None = None,
 ) -> None:
     prompt = build_agent_prompt(
         repository,
         issue,
         [IssueComment(author=comment.author, body=comment.body)],
     )
-    result = implementer_runner.run(repository, prompt)
+    if execution_context is not None:
+        result = implementer_runner.run_context(execution_context, prompt)
+    else:
+        result = implementer_runner.run(repository, prompt)
     if result.failed:
         message = result.message or f"AgentRunner exited with code {result.returncode}"
         if is_session_limit_output(message):
@@ -326,6 +337,46 @@ def _run_doctor_command(config: DevBotConfig) -> int:
     return 0 if report.safe_to_start else 1
 
 
+def _restart_after_startup_update(final_sha: str) -> None:
+    if os.environ.get(STARTUP_SELF_UPDATE_ENV) == final_sha:
+        return
+    env = os.environ.copy()
+    env[STARTUP_SELF_UPDATE_ENV] = final_sha
+    os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+def _run_startup_self_update(config: DevBotConfig, logger: logging.Logger) -> bool:
+    try:
+        results = run_startup_self_update(config)
+    except StartupSelfUpdateError as exc:
+        result = exc.result
+        logger.error(
+            "startup self-update failed: repository=%s current_sha=%s latest_sha=%s "
+            "final_sha=%s result=%s skip_reason=%s",
+            result.repository,
+            result.current_sha,
+            result.latest_sha,
+            result.final_sha,
+            result.result,
+            result.skip_reason,
+        )
+        return False
+    for result in results:
+        logger.info(
+            "startup self-update: repository=%s current_sha=%s latest_sha=%s "
+            "final_sha=%s result=%s skip_reason=%s",
+            result.repository,
+            result.current_sha,
+            result.latest_sha,
+            result.final_sha,
+            result.result,
+            result.skip_reason,
+        )
+        if result.current_sha != result.final_sha:
+            _restart_after_startup_update(result.final_sha)
+    return True
+
+
 def main(
     argv: Sequence[str] | None = None,
     env_path: Path | str | None = None,
@@ -357,11 +408,15 @@ def main(
         return _run_worktree_command(args, config)
 
     if args.command == "doctor":
+        if not _run_startup_self_update(config, logger):
+            return 1
         return _run_doctor_command(config)
 
     try:
         with ProcessLock(config.lock_file):
             log_startup(logger, config)
+            if config.enabled_repositories and not _run_startup_self_update(config, logger):
+                return 1
             # Task 019 CP-019-4: informational only (see
             # `devbot.startup`'s module docstring) - the two genuinely
             # fatal startup conditions (bad config, a duplicate daemon

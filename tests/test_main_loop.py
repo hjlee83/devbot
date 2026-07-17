@@ -65,7 +65,10 @@ def _write_fixture(tmp_path: Path, *, lock_file: Path | None = None) -> tuple[Pa
 def test_run_once_exits_after_single_iteration(tmp_path: Path) -> None:
     env_path, repositories_path = _write_fixture(tmp_path)
 
-    with patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle:
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.polling.PollingService.run_cycle") as mock_run_cycle,
+    ):
         mock_run_cycle.return_value = [PollingResult(status=PollingStatus.NO_READY_TASK)]
         exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
 
@@ -90,7 +93,10 @@ def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    with patch("devbot.main.PollingService") as mock_service_cls:
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.main.PollingService") as mock_service_cls,
+    ):
         mock_service_cls.return_value.run_cycle.return_value = [
             PollingResult(status=PollingStatus.NO_READY_TASK)
         ]
@@ -111,7 +117,10 @@ def test_cli_dry_run_flag_forces_dry_run_regardless_of_env(tmp_path: Path) -> No
 def test_cli_constructs_rework_service(tmp_path: Path) -> None:
     env_path, repositories_path = _write_fixture(tmp_path)
 
-    with patch("devbot.main.PollingService") as mock_service_cls:
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.main.PollingService") as mock_service_cls,
+    ):
         mock_service_cls.return_value.run_cycle.return_value = [
             PollingResult(status=PollingStatus.NO_READY_TASK)
         ]
@@ -395,6 +404,7 @@ def test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero(
         return real_subprocess_run(args, *a, **kw)  # type: ignore[arg-type]
 
     with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
         patch("devbot.github_client.GitHubClient.list_issues", return_value=[ready_issue]),
         patch("devbot.github_client.GitHubClient.list_pull_requests", return_value=[]),
         patch("devbot.github_write_client.GitHubWriteClient.set_labels") as mock_set_labels,

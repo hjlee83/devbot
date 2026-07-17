@@ -1,8 +1,13 @@
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from devbot.doctor import build_doctor_report, check_agent_roles, render_doctor_report
+from devbot.doctor import (
+    build_doctor_report,
+    check_agent_execution_readiness,
+    check_agent_roles,
+    render_doctor_report,
+)
 from devbot.github_client import GitHubAuthenticationError, GitHubUser
 from devbot.lock import ProcessLock
 from devbot.models import DevBotConfig, RepositoryConfig
@@ -146,6 +151,29 @@ def test_doctor_reports_configured_implementer_and_reviewer() -> None:
     assert check.ok is True
     assert "implementer=claude" in check.detail
     assert "reviewer=codex" in check.detail
+
+
+def test_doctor_reports_agent_execution_readiness() -> None:
+    capabilities = {
+        "approval": True,
+        "sandbox": True,
+        "cd": True,
+        "add_dir": True,
+        "config": True,
+    }
+
+    with (
+        patch("devbot.doctor.shutil.which", return_value="/usr/local/bin/codex"),
+        patch("devbot.doctor.subprocess.run") as mock_run,
+        patch("devbot.doctor.CodexRunner._detect_capabilities", return_value=capabilities),
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="codex 1.0\n", stderr="")
+        check = check_agent_execution_readiness("codex", "reviewer")
+
+    assert check.ok is True
+    assert check.name == "agent_execution_readiness[reviewer:codex]"
+    assert "version=codex 1.0" in check.detail
+    assert "unattended_ready=True" in check.detail
 
 
 # ---- CP-023-10: doctor reports Job worktree health ----

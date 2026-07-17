@@ -196,8 +196,13 @@ def load_config(
         _resolve_role_agent("REVIEWER_AGENT", raw_default_agent, _DEFAULT_REVIEWER_AGENT),
     )
 
+    repositories_path_raw = (
+        str(repositories_path)
+        if repositories_path is not None
+        else os.environ.get("DEVBOT_REPOSITORIES_PATH")
+    )
     resolved_repositories_path = (
-        Path(repositories_path) if repositories_path is not None else DEFAULT_REPOSITORIES_PATH
+        Path(repositories_path_raw) if repositories_path_raw else DEFAULT_REPOSITORIES_PATH
     )
     repositories = _load_repositories(resolved_repositories_path, workspace_root)
 

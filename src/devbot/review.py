@@ -32,6 +32,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from devbot.agent_execution import AgentExecutionContext
 from devbot.agents.base import AgentRunner, is_approval_required_output, is_session_limit_output
 from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
@@ -201,6 +202,7 @@ class ReviewService:
         issue: GitHubIssue,
         pull_request: PullRequest,
         comments: Sequence[PullRequestComment] = (),
+        execution_context: AgentExecutionContext | None = None,
     ) -> ReviewResult:
         if self.dry_run:
             return ReviewResult(
@@ -259,7 +261,10 @@ class ReviewService:
         prompt = self.build_prompt(repository, issue, pull_request)
 
         try:
-            result = self.reviewer_runner.run(repository, prompt)
+            if execution_context is not None:
+                result = self.reviewer_runner.run_context(execution_context, prompt)
+            else:
+                result = self.reviewer_runner.run(repository, prompt)
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - record, then block
             reason = f"리뷰 Agent 실행 중 오류로 중단: {exc!r}"
             self.state_writer.block(repository, working_issue, reason, job_type=JobType.REVIEW)

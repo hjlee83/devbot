@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 
+from devbot.agent_execution import AgentExecutionContext, AgentExecutionPolicy, AgentLauncher
 from devbot.agents.base import AgentRunner, AgentRunResult
 from devbot.models import AgentOutcome, RepositoryConfig
 
@@ -63,6 +64,49 @@ class ClaudeRunner(AgentRunner):
                 outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
             )
 
+        return AgentRunResult(
+            executed=True,
+            dry_run=False,
+            message=completed.stdout or completed.stderr,
+            returncode=completed.returncode,
+        )
+
+    def command_for_context(self, _context: AgentExecutionContext, prompt: str) -> list[str]:
+        return [CLAUDE_COMMAND, "-p", prompt, "--permission-mode", "acceptEdits"]
+
+    def run_context(self, context: AgentExecutionContext, prompt: str) -> AgentRunResult:
+        if self.dry_run:
+            return AgentRunResult(
+                executed=False,
+                dry_run=True,
+                message=f"[dry-run] would run claude in {context.workspace}",
+            )
+        launcher = AgentLauncher(
+            command_builder=self.command_for_context,
+            policy=AgentExecutionPolicy(
+                agent="claude",
+                version="unknown",
+                sandbox="provider-default",
+                approval="acceptEdits",
+                network="provider-default",
+                capability_summary={"non_interactive": True},
+            ),
+        )
+        try:
+            completed = launcher.run(context, prompt, timeout=self.timeout_seconds)
+        except FileNotFoundError:
+            return AgentRunResult(
+                executed=False,
+                dry_run=False,
+                message=f"Claude CLI({CLAUDE_COMMAND})가 설치되어 있지 않습니다.",
+            )
+        except subprocess.TimeoutExpired:
+            return AgentRunResult(
+                executed=False,
+                dry_run=False,
+                message=f"Claude CLI 실행이 {self.timeout_seconds}초 안에 끝나지 않았습니다.",
+                outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
+            )
         return AgentRunResult(
             executed=True,
             dry_run=False,

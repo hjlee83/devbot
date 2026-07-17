@@ -12,8 +12,11 @@ Validation Gate gives `devbot --once`).
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from dataclasses import dataclass
 
+from devbot.agents.codex import CodexRunner
 from devbot.github_client import GitHubClient, GitHubClientError
 from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.startup import StartupCheck, check_daemon_lock, run_startup_checks
@@ -56,6 +59,39 @@ def check_agent_roles(config: DevBotConfig) -> StartupCheck:
     )
 
 
+def check_agent_execution_readiness(agent_name: str, role: str) -> StartupCheck:
+    name = f"agent_execution_readiness[{role}:{agent_name}]"
+    executable = "codex" if agent_name == "codex" else "claude" if agent_name == "claude" else ""
+    if not executable or shutil.which(executable) is None:
+        return StartupCheck(name, False, f"Agent executable not found: {agent_name}")
+    version = subprocess.run(
+        [executable, "--version"], capture_output=True, text=True, check=False
+    )
+    if version.returncode != 0:
+        return StartupCheck(name, False, f"version discovery failed: {version.stderr}")
+    if agent_name == "codex":
+        capabilities = CodexRunner(dry_run=True)._detect_capabilities()
+        required = ("approval", "sandbox", "cd", "add_dir", "config")
+        missing = [key for key in required if not capabilities.get(key)]
+        if missing:
+            return StartupCheck(
+                name,
+                False,
+                f"unattended capability missing={','.join(missing)} "
+                f"version={(version.stdout or version.stderr).strip()}",
+            )
+        return StartupCheck(
+            name,
+            True,
+            f"version={(version.stdout or version.stderr).strip()} unattended_ready=True",
+        )
+    return StartupCheck(
+        name,
+        True,
+        f"version={(version.stdout or version.stderr).strip()} availability=True",
+    )
+
+
 def check_worktree_health(
     repository: RepositoryConfig, manager: WorktreeManager
 ) -> StartupCheck:
@@ -84,6 +120,8 @@ def build_doctor_report(config: DevBotConfig) -> DoctorReport:
     checks.append(check_daemon_lock(config.lock_file))
     checks.append(check_github_connectivity(config))
     checks.append(check_agent_roles(config))
+    checks.append(check_agent_execution_readiness(config.implementer_agent, "implementer"))
+    checks.append(check_agent_execution_readiness(config.reviewer_agent, "reviewer"))
     manager = WorktreeManager(workspace_root=config.workspace_root)
     for repository in config.enabled_repositories:
         checks.append(check_worktree_health(repository, manager))
