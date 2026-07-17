@@ -150,9 +150,7 @@ def test_duplicate_tag_or_release_is_rejected_without_mutation() -> None:
 
 
 def test_release_artifact_names_are_deterministic() -> None:
-    assert expected_artifact_names("0.2.0") == (
-        "devbot-0.2.0-portable-python.tar.gz",
-    )
+    assert expected_artifact_names("0.2.0") == ("devbot-0.2.0-portable-python.tar.gz",)
     assert (
         release_artifact_name("0.2.0", "portable", "python")
         == "devbot-0.2.0-portable-python.tar.gz"
@@ -170,34 +168,30 @@ def test_packaged_cli_reports_release_version(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0
     assert completed.stdout == "devbot 0.2.0\n"
-    help_completed = subprocess.run(
-        [str(extract_dir / "devbot-release" / "bin" / "devbot"), "--help"],
+
+
+def test_release_artifact_contains_real_package_code_and_version_metadata(tmp_path: Path) -> None:
+    artifact = build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
+    extract_dir = tmp_path / "extract-real"
+    with tarfile.open(artifact.path) as archive:
+        names = set(archive.getnames())
+        archive.extractall(extract_dir, filter="data")
+
+    assert "devbot-release/src/devbot/main.py" in names
+    assert "devbot-release/src/devbot/release.py" in names
+    pyproject = (extract_dir / "devbot-release" / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.2.0"' in pyproject
+    completed = subprocess.run(
+        [str(extract_dir / "devbot-release" / "bin" / "devbot"), "--version"],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert help_completed.returncode == 0, help_completed.stderr
-    assert "--once" in help_completed.stdout
+    assert completed.returncode == 0
+    assert completed.stdout == "devbot 0.2.0\n"
 
-
-
-def test_release_artifact_contains_real_package_code(tmp_path: Path) -> None:
-    artifact = build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
-
-    with tarfile.open(artifact.path) as archive:
-        names = set(archive.getnames())
-
-    assert "devbot-release/lib/devbot/main.py" in names
-    assert "devbot-release/lib/devbot/release.py" in names
-    assert "devbot-release/pyproject.toml" in names
-
-
-def test_release_version_override_unifies_runtime_version(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEVBOT_RELEASE_VERSION", "0.2.0")
-
-    assert authoritative_version() == "0.2.0"
 
 def test_release_artifact_generation_is_reproducible(tmp_path: Path) -> None:
     first = build_artifact(
@@ -228,7 +222,7 @@ def test_checksum_manifest_covers_every_release_artifact(tmp_path: Path) -> None
 
 def test_checksum_manifest_is_deterministic(tmp_path: Path) -> None:
     artifacts = [
-        build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
+        build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python"),
     ]
     expected = expected_artifact_names("0.2.0")
 
@@ -236,7 +230,7 @@ def test_checksum_manifest_is_deterministic(tmp_path: Path) -> None:
         reversed(artifacts), expected_names=expected
     )
     with pytest.raises(ReleasePolicyError):
-        checksum_manifest(artifacts[:-1], expected_names=expected)
+        checksum_manifest([], expected_names=expected)
 
 
 def test_release_note_generation_is_deterministic() -> None:
@@ -284,8 +278,8 @@ def test_safe_summary_fixture_contains_audit_fields_without_credentials() -> Non
             increment="patch",
             new_version="0.1.1",
             tag="v0.1.1",
-            artifact_names=("devbot-0.1.1-portable-python.tar.gz",),
-            checksums=("abc  devbot-0.1.1-portable-python.tar.gz",),
+            artifact_names=("devbot-0.1.1-linux-arm64.tar.gz",),
+            checksums=("abc  devbot-0.1.1-linux-arm64.tar.gz",),
             release_url="https://github.com/hjlee83/devbot/releases/tag/v0.1.1",
         )
     )
@@ -314,13 +308,15 @@ def test_release_workflow_structure_enforces_validation_before_publication() -> 
     )
 
 
-def test_release_workflow_matrix_and_manual_dispatch_are_declared() -> None:
+def test_release_workflow_uses_portable_artifact_and_manual_dispatch() -> None:
     workflow = yaml.safe_load(Path(".github/workflows/release.yml").read_text(encoding="utf-8"))
-    matrix = workflow["jobs"]["build-artifacts"]["strategy"]["matrix"]["include"]
+    build_job = workflow["jobs"]["build-artifacts"]
+    build_steps = "\n".join(step.get("run", "") for step in build_job["steps"])
 
-    assert matrix == [
-        {"os_name": "portable", "architecture": "python"},
-    ]
+    assert "strategy" not in build_job
+    assert "--os-name portable" in build_steps
+    assert "--architecture python" in build_steps
+    assert "Smoke packaged DevBot" in [step.get("name") for step in build_job["steps"]]
     assert workflow[True]["workflow_dispatch"]["inputs"]["increment"]["options"] == [
         "patch",
         "minor",

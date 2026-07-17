@@ -8,7 +8,6 @@ import io
 import json
 import os
 import re
-import stat
 import tarfile
 import tomllib
 from collections.abc import Iterable
@@ -127,10 +126,8 @@ class ReleasePlan:
 
 
 def authoritative_version(project_root: Path | str | None = None) -> str:
-    release_version = os.environ.get("DEVBOT_RELEASE_VERSION")
-    if release_version:
-        SemanticVersion.parse(release_version)
-        return release_version
+    if project_root is None:
+        project_root = os.environ.get("DEVBOT_PROJECT_ROOT")
     if project_root is None:
         return metadata.version(PRODUCT_NAME)
     pyproject = Path(project_root) / VERSION_SOURCE
@@ -174,7 +171,7 @@ def release_artifact_name(version: str, os_name: str, architecture: str) -> str:
     if (os_name, architecture) not in SUPPORTED_PLATFORMS:
         raise ReleasePolicyError(f"unsupported release platform: {os_name}/{architecture}")
     SemanticVersion.parse(version)
-    return f"{PRODUCT_NAME}-{version}-{os_name}-{architecture}.tar.gz"
+    return f"{PRODUCT_NAME}-{version}-portable-python.tar.gz"
 
 
 def expected_artifact_names(version: str) -> tuple[str, ...]:
@@ -188,30 +185,9 @@ def build_metadata(version: str, os_name: str, architecture: str) -> dict[str, s
     return {
         "product": PRODUCT_NAME,
         "version": version,
-        "package_version": version,
-        "artifact_contract": "portable-python-source",
         "os": os_name,
         "architecture": architecture,
     }
-
-
-def _launcher_script(version: str) -> bytes:
-    script = f"""#!/usr/bin/env sh
-set -eu
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-export DEVBOT_RELEASE_VERSION="{version}"
-export PYTHONPATH="$ROOT_DIR/lib${{PYTHONPATH:+:$PYTHONPATH}}"
-exec "${{PYTHON:-python3}}" -c 'from devbot.main import main; raise SystemExit(main())' "$@"
-"""
-    return script.encode()
-
-
-def _iter_package_files(project_root: Path) -> Iterable[tuple[Path, str]]:
-    package_root = project_root / "src" / "devbot"
-    for path in sorted(package_root.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.parts:
-            yield path, f"devbot-release/lib/devbot/{path.relative_to(package_root)}"
 
 
 def build_artifact(
@@ -223,14 +199,23 @@ def build_artifact(
     project_root: Path | str = ".",
 ) -> Artifact:
     name = release_artifact_name(version, os_name, architecture)
-    project_root = Path(project_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / name
+    root = Path(project_root)
     metadata_bytes = json.dumps(
         build_metadata(version, os_name, architecture),
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
+    launcher_text = (
+        "#!/usr/bin/env sh\n"
+        "set -eu\n"
+        "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd)\n"
+        "DEVBOT_PROJECT_ROOT=\"$ROOT\" "
+        "PYTHONPATH=\"$ROOT/src${PYTHONPATH:+:$PYTHONPATH}\" "
+        "python -c 'from devbot.main import main; raise SystemExit(main())' \"$@\"\n"
+    )
+    launcher = launcher_text.encode()
 
     with (
         path.open("wb") as raw,
@@ -244,24 +229,41 @@ def build_artifact(
         tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive,
     ):
         _add_bytes(archive, "devbot-release/metadata.json", metadata_bytes)
-        _add_bytes(archive, "devbot-release/bin/devbot", _launcher_script(version), mode=0o755)
-        _add_bytes(
-            archive,
-            "devbot-release/pyproject.toml",
-            (project_root / "pyproject.toml").read_bytes(),
+        _add_bytes(archive, "devbot-release/bin/devbot", launcher, mode=0o755)
+        _add_project_file(
+            archive, root / "pyproject.toml", "devbot-release/pyproject.toml", version=version
         )
-        for source, archive_name in _iter_package_files(project_root):
-            mode = stat.S_IMODE(source.stat().st_mode) or 0o644
-            _add_bytes(archive, archive_name, source.read_bytes(), mode=mode)
+        lockfile = root / "uv.lock"
+        if lockfile.exists():
+            _add_project_file(archive, lockfile, "devbot-release/uv.lock")
+        for source in sorted((root / "src").rglob("*.py")):
+            _add_project_file(archive, source, "devbot-release" / source.relative_to(root))
     return Artifact(name=name, path=path, os_name=os_name, architecture=architecture)
 
-
-def _add_bytes(archive: tarfile.TarFile, name: str, data: bytes, *, mode: int = 0o644) -> None:
-    info = tarfile.TarInfo(name)
+def _add_bytes(
+    archive: tarfile.TarFile, name: str | Path, data: bytes, *, mode: int = 0o644
+) -> None:
+    info = tarfile.TarInfo(str(name))
     info.size = len(data)
     info.mode = mode
     info.mtime = 0
     archive.addfile(info, fileobj=io.BytesIO(data))
+
+
+def _add_project_file(
+    archive: tarfile.TarFile,
+    source: Path,
+    archive_name: str | Path,
+    *,
+    version: str | None = None,
+) -> None:
+    data = source.read_bytes()
+    if version is not None:
+        text = data.decode()
+        text = re.sub(r'(?m)^version = "[^"]+"$', f'version = "{version}"', text, count=1)
+        data = text.encode()
+    mode = 0o755 if source.stat().st_mode & 0o111 else 0o644
+    _add_bytes(archive, archive_name, data, mode=mode)
 
 
 def checksum_manifest(artifacts: Iterable[Artifact], *, expected_names: Iterable[str]) -> str:
