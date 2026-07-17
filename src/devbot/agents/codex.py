@@ -7,9 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from devbot.agents.base import AgentRunner, AgentRunResult
-from devbot.models import RepositoryConfig
+from devbot.models import AgentOutcome, RepositoryConfig
 
 CODEX_COMMAND = "codex"
+
+
+class CodexConfigurationError(RuntimeError):
+    """Raised when Codex CLI cannot satisfy DevBot's unattended policy."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,18 @@ class CodexRunner(AgentRunner):
         roots = [repository.local_path.resolve()]
         git_dir = self._git_path(repository, "--git-dir")
         common_dir = self._git_path(repository, "--git-common-dir")
+        if git_dir is None:
+            raise CodexConfigurationError(
+                "agent_configuration_invalid: missing required Git metadata writable root "
+                "`git rev-parse --git-dir`. Recovery: run Codex from a prepared Git "
+                "worktree and grant the resolved worktree Git directory as writable."
+            )
+        if common_dir is None:
+            raise CodexConfigurationError(
+                "agent_configuration_invalid: missing required Git metadata writable root "
+                "`git rev-parse --git-common-dir`. Recovery: run Codex from a prepared "
+                "Git worktree and grant the resolved Git common directory as writable."
+            )
         for path in (git_dir, common_dir, *self.extra_writable_roots):
             if path is not None and path not in roots:
                 roots.append(path)
@@ -73,25 +89,35 @@ class CodexRunner(AgentRunner):
 
     def command_for(self, repository: RepositoryConfig, prompt: str) -> list[str]:
         caps = self._detect_capabilities()
-        command = [CODEX_COMMAND]
-        if caps["approval"]:
-            command.extend(["-a", self.approval_mode])
-        if caps["sandbox"]:
-            command.extend(["-s", self.sandbox_mode])
-        if caps["cd"]:
-            command.extend(["-C", str(repository.local_path)])
-        if caps["config"]:
-            command.extend(
-                [
-                    "-c",
-                    "shell_environment_policy.inherit=\"all\"",
-                    "-c",
-                    "sandbox_workspace_write.network_access=true",
-                ]
+        required = {
+            "approval": "approval=never via --ask-for-approval/-a",
+            "sandbox": "workspace sandbox via --sandbox/-s",
+            "cd": "PreparedWorkspace cwd via --cd/-C",
+            "add_dir": "Git metadata writable roots via --add-dir",
+            "config": "network enforcement via --config/-c",
+        }
+        missing = [description for key, description in required.items() if not caps[key]]
+        if missing:
+            raise CodexConfigurationError(
+                "agent_configuration_invalid: Codex CLI is missing required unattended "
+                f"capabilities: {', '.join(missing)}. Recovery: upgrade Codex CLI or "
+                "adjust the runner integration before retrying; DevBot did not launch "
+                "the Agent process."
             )
+        command = [CODEX_COMMAND]
+        command.extend(["-a", self.approval_mode])
+        command.extend(["-s", self.sandbox_mode])
+        command.extend(["-C", str(repository.local_path)])
+        command.extend(
+            [
+                "-c",
+                "shell_environment_policy.inherit=\"all\"",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+            ]
+        )
         for root in self._writable_roots(repository)[1:]:
-            if caps["add_dir"]:
-                command.extend(["--add-dir", str(root)])
+            command.extend(["--add-dir", str(root)])
         command.extend(["exec", prompt])
         return command
 
@@ -117,8 +143,19 @@ class CodexRunner(AgentRunner):
                 message=f"[dry-run] would run codex in {repository.local_path}",
             )
 
+        try:
+            command = self.command_for(repository, prompt)
+        except CodexConfigurationError as exc:
+            return AgentRunResult(
+                executed=False,
+                dry_run=False,
+                message=str(exc),
+                returncode=None,
+                outcome_hint=AgentOutcome.AGENT_CONFIGURATION_INVALID,
+            )
+
         completed = subprocess.run(
-            self.command_for(repository, prompt),
+            command,
             cwd=str(repository.local_path),
             capture_output=True,
             text=True,

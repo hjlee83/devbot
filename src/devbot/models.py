@@ -83,6 +83,7 @@ class AgentOutcome(StrEnum):
     IMPLEMENTATION_SKIPPED = "implementation_skipped"
     NO_REPOSITORY_CHANGES = "no_repository_changes"
     APPROVAL_REQUIRED = "approval_required"
+    AGENT_CONFIGURATION_INVALID = "agent_configuration_invalid"
     NETWORK_BLOCKED = "network_blocked"
     SESSION_LIMIT = "session_limit"
     RESUMABLE_INTERRUPTION = "resumable_interruption"

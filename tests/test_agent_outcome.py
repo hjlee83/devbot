@@ -27,6 +27,7 @@ def test_agent_outcome_classification() -> None:
         "implementation_skipped",
         "no_repository_changes",
         "approval_required",
+        "agent_configuration_invalid",
         "network_blocked",
         "session_limit",
         "resumable_interruption",
@@ -214,6 +215,10 @@ def test_agent_outcome_state_transition() -> None:
             assert transition.target_state in (TaskState.MANUAL_ACTION, TaskState.BLOCKED)
 
     assert transition_for(AgentOutcome.APPROVAL_REQUIRED).target_state is TaskState.MANUAL_ACTION
+    assert (
+        transition_for(AgentOutcome.AGENT_CONFIGURATION_INVALID).target_state
+        is TaskState.MANUAL_ACTION
+    )
     assert transition_for(AgentOutcome.NETWORK_BLOCKED).target_state is TaskState.MANUAL_ACTION
     assert transition_for(AgentOutcome.REPOSITORY_LOCKED).target_state is TaskState.MANUAL_ACTION
     assert transition_for(AgentOutcome.SESSION_LIMIT).target_state is TaskState.BLOCKED

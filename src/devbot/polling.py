@@ -118,6 +118,7 @@ _LOGGER_NAME = "devbot"
 _MANUAL_ACTION_OUTCOMES = frozenset(
     {
         AgentOutcome.APPROVAL_REQUIRED,
+        AgentOutcome.AGENT_CONFIGURATION_INVALID,
         AgentOutcome.NETWORK_BLOCKED,
         AgentOutcome.REPOSITORY_LOCKED,
         AgentOutcome.IMPLEMENTATION_SKIPPED,

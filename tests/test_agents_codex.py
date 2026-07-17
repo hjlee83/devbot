@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from devbot.agents.codex import CodexRunner
-from devbot.models import RepositoryConfig
+from devbot.models import AgentOutcome, RepositoryConfig
 
 
 def _repository() -> RepositoryConfig:
@@ -39,10 +39,26 @@ def test_agent_dry_run_does_not_execute_process() -> None:
 
 def test_runner_uses_target_repository_directory() -> None:
     repository = _repository()
-    runner = CodexRunner(dry_run=False)
+    runner = CodexRunner(
+        dry_run=False,
+        _capabilities={
+            "cd": True,
+            "add_dir": True,
+            "sandbox": True,
+            "approval": True,
+            "config": True,
+        },
+    )
 
     with patch("devbot.agents.codex.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        def _fake_run(args, **_kwargs):
+            if args[:2] == ["git", "rev-parse"] and args[2] == "--git-dir":
+                return MagicMock(returncode=0, stdout=".git/worktrees/issue-62\n", stderr="")
+            if args[:2] == ["git", "rev-parse"] and args[2] == "--git-common-dir":
+                return MagicMock(returncode=0, stdout="/tmp/workspace/.git\n", stderr="")
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        mock_run.side_effect = _fake_run
         result = runner.run(repository, prompt="do the thing")
 
     _, kwargs = mock_run.call_args_list[-1]
@@ -123,3 +139,53 @@ def test_codex_runner_policy_reports_safe_effective_settings() -> None:
     assert policy["network_mode"] == "enabled"
     assert policy["codex_version"] == "codex-cli 0.144.1"
     assert str(repository.local_path.resolve()) in policy["writable_roots"]
+
+
+def test_codex_runner_fails_closed_when_required_capability_is_missing() -> None:
+    repository = _repository()
+    runner = CodexRunner(
+        dry_run=False,
+        _capabilities={
+            "cd": True,
+            "add_dir": True,
+            "sandbox": True,
+            "approval": False,
+            "config": True,
+        },
+    )
+
+    with patch("devbot.agents.codex.subprocess.run") as mock_run:
+        result = runner.run(repository, prompt="do the thing")
+
+    assert result.executed is False
+    assert result.outcome_hint is AgentOutcome.AGENT_CONFIGURATION_INVALID
+    assert "agent_configuration_invalid" in result.message
+    assert "approval=never" in result.message
+    assert not any(call.args[0][0:2] == ["codex", "exec"] for call in mock_run.call_args_list)
+
+
+def test_codex_runner_fails_closed_when_git_metadata_root_is_missing() -> None:
+    repository = _repository()
+    runner = CodexRunner(
+        dry_run=False,
+        _capabilities={
+            "cd": True,
+            "add_dir": True,
+            "sandbox": True,
+            "approval": True,
+            "config": True,
+        },
+    )
+
+    def _fake_run(args, **_kwargs):
+        if args[:2] == ["git", "rev-parse"]:
+            return MagicMock(returncode=1, stdout="", stderr="not a git repo")
+        return MagicMock(returncode=0, stdout="ok", stderr="")
+
+    with patch("devbot.agents.codex.subprocess.run", side_effect=_fake_run) as mock_run:
+        result = runner.run(repository, prompt="do the thing")
+
+    assert result.executed is False
+    assert result.outcome_hint is AgentOutcome.AGENT_CONFIGURATION_INVALID
+    assert "git rev-parse --git-dir" in result.message
+    assert not any(call.args[0][0:2] == ["codex", "exec"] for call in mock_run.call_args_list)

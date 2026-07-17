@@ -57,7 +57,7 @@
 | CP-030-6 idempotent recovery | `test_github_retry_recovery_does_not_duplicate_side_effects` |
 | CP-030-7 safe diagnostics | `test_github_retry_diagnostics_are_structured_and_redacted` |
 | CP-030-8 workflow compatibility | `test_existing_workflows_remain_compatible_with_github_retry`, full `uv run pytest` |
-| CP-030-9 non-interactive Codex execution | `test_codex_runner_builds_unattended_workspace_scoped_command` |
+| CP-030-9 non-interactive Codex execution | `test_codex_runner_builds_unattended_workspace_scoped_command`, `test_codex_runner_fails_closed_when_required_capability_is_missing`, `test_codex_runner_fails_closed_when_git_metadata_root_is_missing` |
 | CP-030-10 interactive prompt detection | `test_interactive_approval_output_is_configuration_invalid_before_summary_parse` |
 | CP-030-11 interactive failure recovery | `test_interactive_approval_output_is_configuration_invalid_before_summary_parse` |
 | CP-030-12 effective policy diagnostics | `test_codex_runner_policy_reports_safe_effective_settings` |
@@ -68,12 +68,13 @@
 | Review comment 1 repository-local future worktrees | `test_worktree_default_root_is_repository_local_dot_worktrees`, `test_job_uses_isolated_worktree`, `test_doctor_reports_worktree_health` |
 | Review comment 2 isolated latest-main validation | `test_review_integration_validation_uses_non_mutating_merge_tree`, `test_review_validates_latest_main_integration_before_agent`, `test_review_stops_when_latest_main_integration_conflicts` |
 | Review comment 3 enforced Codex network policy | `test_codex_runner_builds_unattended_workspace_scoped_command` |
+| Re-review blocker fail-closed Codex capability detection | `test_codex_runner_fails_closed_when_required_capability_is_missing`, `test_codex_runner_fails_closed_when_git_metadata_root_is_missing` |
 
 ## Validation 결과
 
 - `uv sync` PASS
 - `uv run ruff check .` PASS
-- `uv run pytest` PASS: 461 passed
+- `uv run pytest` PASS: 463 passed
 - `uv run devbot doctor` PASS
 - `uv run devbot --once --dry-run` PASS: `REVIEW`. REVIEW 준비에서 repository-local `.worktrees` PreparedWorkspace를 사용했고, `git merge-tree --write-tree origin/main HEAD` integration validation이 `mergeable=True`를 보고한 뒤 reviewer dry-run으로 안전 종료했다.
 
