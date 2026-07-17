@@ -34,10 +34,15 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          fetch-depth: 0
 
       - name: Reject manual non-main commit
         if: github.event_name == 'workflow_dispatch'
-        run: test "$(git branch -r --contains "${{ inputs.commit_sha }}" | grep -c 'origin/main')" -gt 0
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$COMMIT_SHA" origin/main
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.3.2
@@ -91,6 +96,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@v8.3.2
         with:
@@ -122,6 +128,7 @@ jobs:
             --releases-json releases.json \
             --main-commits-json main-commits.json \
             --initial-version "$(uv run python scripts/release_pipeline.py version --project-root .)" \
+            --target-commit "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}" \
             --output release-plan.json \
             --github-output "$GITHUB_OUTPUT" \
             ${{ github.event_name == 'workflow_dispatch' && format('--increment {0}', inputs.increment) || '' }}

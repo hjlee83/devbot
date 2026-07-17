@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -32,7 +33,11 @@ from devbot.release import (
 
 
 def _pr(
-    *, labels: tuple[str, ...], merged: bool = True, base_ref: str = "main"
+    *,
+    labels: tuple[str, ...],
+    merged: bool = True,
+    base_ref: str = "main",
+    merge_commit_sha: str = "abc123",
 ) -> PullRequestMetadata:
     return PullRequestMetadata(
         number=67,
@@ -40,9 +45,36 @@ def _pr(
         labels=labels,
         merged=merged,
         base_ref=base_ref,
-        merge_commit_sha="abc123",
+        merge_commit_sha=merge_commit_sha,
     )
 
+
+
+def test_release_pipeline_closed_unmerged_pr_is_not_treated_as_merged() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "release_pipeline", Path("scripts/release_pipeline.py")
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    pr = module._pr_metadata(
+        {
+            "pull_request": {
+                "number": 67,
+                "title": "Task 032",
+                "labels": [{"name": "release:patch"}],
+                "state": "closed",
+                "merged": False,
+                "merged_at": None,
+                "base": {"ref": "main"},
+                "merge_commit_sha": "commit-a",
+            }
+        }
+    )
+
+    assert pr.merged is False
 
 def test_runtime_and_package_version_use_authoritative_version_source(
     capsys: pytest.CaptureFixture[str],
@@ -258,6 +290,71 @@ def test_release_plan_uses_pr_label_and_latest_stable_release() -> None:
     assert plan.tag == "v0.3.0"
 
 
+
+def test_release_plan_reuses_existing_stable_release_for_target_commit() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:patch",), merge_commit_sha="commit-a"),
+        releases=(
+            ReleaseRecord("v0.1.0", "commit-zero"),
+            ReleaseRecord("v0.1.1", "commit-a"),
+        ),
+        main_commits={"commit-zero", "commit-a"},
+        initial_version="0.1.0",
+        target_commit="commit-a",
+    )
+
+    assert plan.publish is False
+    assert plan.increment is None
+    assert plan.previous_version == "0.1.1"
+    assert plan.new_version == "0.1.1"
+    assert plan.tag == "v0.1.1"
+    assert plan.reason == "existing release for target commit"
+
+
+def test_release_plan_recovers_existing_draft_release_for_target_commit() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:patch",), merge_commit_sha="commit-a"),
+        releases=(
+            ReleaseRecord("v0.1.0", "commit-zero"),
+            ReleaseRecord("v0.1.1", "commit-a", draft=True),
+        ),
+        main_commits={"commit-zero", "commit-a"},
+        initial_version="0.1.0",
+        target_commit="commit-a",
+    )
+
+    assert plan.publish is True
+    assert plan.increment is None
+    assert plan.new_version == "0.1.1"
+    assert plan.tag == "v0.1.1"
+
+
+def test_release_plan_bumps_next_commit_after_existing_release() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:patch",), merge_commit_sha="commit-b"),
+        releases=(ReleaseRecord("v0.1.1", "commit-a"),),
+        main_commits={"commit-a", "commit-b"},
+        initial_version="0.1.0",
+        target_commit="commit-b",
+    )
+
+    assert plan.publish is True
+    assert plan.previous_version == "0.1.1"
+    assert plan.increment == "patch"
+    assert plan.new_version == "0.1.2"
+    assert plan.tag == "v0.1.2"
+
+
+def test_release_plan_rejects_target_commit_mismatch() -> None:
+    with pytest.raises(ReleasePolicyError, match="merge commit does not match"):
+        release_plan_for_pr(
+            _pr(labels=("release:patch",), merge_commit_sha="commit-other"),
+            releases=(),
+            main_commits={"commit-a"},
+            initial_version="0.1.0",
+            target_commit="commit-a",
+        )
+
 def test_release_rerun_is_idempotent_for_same_commit() -> None:
     assert (
         release_rerun_result(
@@ -313,6 +410,15 @@ def test_release_workflow_resumes_partial_publication_states() -> None:
     assert "env.release_state != 'already-published'" in step_conditions
 
 
+def test_release_workflow_uses_full_history_target_commit_plan_and_ancestry_check() -> None:
+    workflow_text = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "fetch-depth: 0" in workflow_text
+    assert "git merge-base --is-ancestor" in workflow_text
+    assert "git branch -r --contains" not in workflow_text
+    assert "--target-commit" in workflow_text
+
+
 def test_safe_summary_fixture_contains_audit_fields_without_credentials() -> None:
     rendered = validate_release_summary(
         ReleaseSummary(
@@ -321,8 +427,8 @@ def test_safe_summary_fixture_contains_audit_fields_without_credentials() -> Non
             increment="patch",
             new_version="0.1.1",
             tag="v0.1.1",
-            artifact_names=("devbot-0.1.1-linux-arm64.tar.gz",),
-            checksums=("abc  devbot-0.1.1-linux-arm64.tar.gz",),
+            artifact_names=("devbot-0.1.1-portable-python.tar.gz",),
+            checksums=("abc  devbot-0.1.1-portable-python.tar.gz",),
             release_url="https://github.com/hjlee83/devbot/releases/tag/v0.1.1",
         )
     )
@@ -409,6 +515,8 @@ def test_release_pipeline_plan_command_writes_github_outputs(tmp_path: Path) -> 
             str(main_commits),
             "--initial-version",
             "0.1.0",
+            "--target-commit",
+            "new",
             "--output",
             str(output),
             "--github-output",

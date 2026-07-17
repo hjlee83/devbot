@@ -81,7 +81,6 @@ def _pr_metadata(payload: dict[str, object]) -> PullRequestMetadata:
     merged = bool(
         pull_request.get("merged", False)
         or pull_request.get("merged_at") is not None
-        or pull_request.get("state") == "closed"
     )
     return PullRequestMetadata(
         number=int(pull_request["number"]),
@@ -135,6 +134,7 @@ def _plan(args: argparse.Namespace) -> int:
             releases=releases,
             main_commits=main_commits,
             initial_version=args.initial_version,
+            target_commit=args.target_commit,
         )
     else:
         event_payload = _load_json(args.event_json)
@@ -145,6 +145,7 @@ def _plan(args: argparse.Namespace) -> int:
             releases=releases,
             main_commits=main_commits,
             initial_version=args.initial_version,
+            target_commit=args.target_commit,
         )
     _write_plan_outputs(args, plan)
     return 0
@@ -178,6 +179,7 @@ def main() -> int:
     plan.add_argument("--releases-json", required=True)
     plan.add_argument("--main-commits-json", required=True)
     plan.add_argument("--initial-version", required=True)
+    plan.add_argument("--target-commit", required=True)
     plan.add_argument("--output", required=True)
     plan.add_argument("--github-output")
     plan.add_argument("--increment", choices=["patch", "minor", "major"])

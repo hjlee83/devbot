@@ -290,16 +290,51 @@ def release_notes(pr: PullRequestMetadata, increment: ReleaseIncrement, version:
     )
 
 
+def release_for_target_commit(
+    releases: Iterable[ReleaseRecord], target_commit: str
+) -> ReleaseRecord | None:
+    matches = [release for release in releases if release.target_commitish == target_commit]
+    if not matches:
+        return None
+    stable = [release for release in matches if not release.draft and not release.prerelease]
+    if stable:
+        return max(stable, key=lambda release: SemanticVersion.parse_tag(release.tag_name))
+    drafts = [release for release in matches if release.draft and not release.prerelease]
+    if drafts:
+        return max(drafts, key=lambda release: SemanticVersion.parse_tag(release.tag_name))
+    return None
+
+
 def release_plan_for_pr(
     pr: PullRequestMetadata,
     *,
     releases: Iterable[ReleaseRecord],
     main_commits: set[str],
     initial_version: str,
+    target_commit: str | None = None,
 ) -> ReleasePlan:
+    releases_tuple = tuple(releases)
+    if target_commit is not None and pr.merge_commit_sha != target_commit:
+        raise ReleasePolicyError("release PR merge commit does not match target commit")
+    existing_for_target = (
+        release_for_target_commit(releases_tuple, target_commit)
+        if target_commit is not None
+        else None
+    )
+    if existing_for_target is not None:
+        version = SemanticVersion.parse_tag(existing_for_target.tag_name)
+        return ReleasePlan(
+            publish=existing_for_target.draft,
+            previous_version=str(version),
+            increment=None,
+            new_version=str(version),
+            tag=existing_for_target.tag_name,
+            notes="",
+            reason="existing release for target commit",
+        )
     increment = release_increment_for_pr(pr)
     base = latest_stable_version(
-        releases,
+        releases_tuple,
         main_commits=main_commits,
         initial_version=initial_version,
     )
@@ -331,11 +366,29 @@ def manual_release_plan(
     releases: Iterable[ReleaseRecord],
     main_commits: set[str],
     initial_version: str,
+    target_commit: str | None = None,
 ) -> ReleasePlan:
     if increment == "none":
         raise ReleasePolicyError("manual release increment cannot be none")
+    releases_tuple = tuple(releases)
+    existing_for_target = (
+        release_for_target_commit(releases_tuple, target_commit)
+        if target_commit is not None
+        else None
+    )
+    if existing_for_target is not None:
+        version = SemanticVersion.parse_tag(existing_for_target.tag_name)
+        return ReleasePlan(
+            publish=existing_for_target.draft,
+            previous_version=str(version),
+            increment=None,
+            new_version=str(version),
+            tag=existing_for_target.tag_name,
+            notes="",
+            reason="existing release for target commit",
+        )
     base = latest_stable_version(
-        releases,
+        releases_tuple,
         main_commits=main_commits,
         initial_version=initial_version,
     )

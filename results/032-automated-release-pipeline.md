@@ -12,7 +12,7 @@
 
 - 권위 버전 소스는 `pyproject.toml`의 `[project].version`이다. 설치된 CLI는 package metadata를 읽고, source-tree release tooling은 같은 값을 `pyproject.toml`에서 읽는다.
 - 릴리스 정책은 GitHub API 호출과 분리된 pure helper로 작성했다. tag 중복, release 중복, semantic version 계산, artifact naming, checksum manifest, release notes를 로컬 테스트로 검증할 수 있다.
-- `plan-release`는 merge commit에 연결된 PR metadata와 기존 stable Release 목록을 입력으로 사용한다. `release:none`은 publish=false로 종료하고, 누락/충돌 release label은 fail-closed로 처리한다.
+- `plan-release`는 대상 commit SHA를 명시 입력으로 받아 merge commit에 연결된 PR metadata와 기존 Release 목록을 검증한다. 같은 target commit에 stable/draft Release가 이미 있으면 새 버전을 증가시키지 않고 기존 version/tag를 재사용한다. `release:none`은 publish=false로 종료하고, 누락/충돌 release label은 fail-closed로 처리한다.
 - Artifact naming contract는 updater와 일치하는 portable Python artifact `devbot-<version>-portable-python.tar.gz`로 고정했다.
 - Artifact는 실제 `src/` 패키지 코드, version이 주입된 `pyproject.toml`, `uv.lock`, metadata, `bin/devbot` launcher를 포함하는 deterministic tarball로 구성했다. gzip/tar metadata 시간을 고정해 동일 입력의 artifact byte가 재현된다.
 
@@ -31,8 +31,8 @@
 | Checkpoint | Evidence |
 | --- | --- |
 | CP-032-1 authoritative version | `test_runtime_and_package_version_use_authoritative_version_source`, `test_release_tag_and_embedded_version_must_match` |
-| CP-032-2 release intent | `test_release_increment_is_selected_from_merged_pr_label`, `test_missing_or_conflicting_release_labels_fail_closed`, `test_release_none_skips_publication`, `test_release_pipeline_plan_command_writes_github_outputs` |
-| CP-032-3 next version | `test_next_semantic_version_is_calculated_from_latest_stable_tag`, `test_prerelease_draft_and_malformed_tags_are_ignored`, `test_release_plan_uses_pr_label_and_latest_stable_release` |
+| CP-032-2 release intent | `test_release_increment_is_selected_from_merged_pr_label`, `test_missing_or_conflicting_release_labels_fail_closed`, `test_release_none_skips_publication`, `test_release_pipeline_closed_unmerged_pr_is_not_treated_as_merged`, `test_release_pipeline_plan_command_writes_github_outputs` |
+| CP-032-3 next version | `test_next_semantic_version_is_calculated_from_latest_stable_tag`, `test_prerelease_draft_and_malformed_tags_are_ignored`, `test_release_plan_uses_pr_label_and_latest_stable_release`, `test_release_plan_reuses_existing_stable_release_for_target_commit`, `test_release_plan_bumps_next_commit_after_existing_release` |
 | CP-032-4 validation gate | `test_release_workflow_structure_enforces_validation_before_publication`; workflow `publish-release` needs `validate-main` |
 | CP-032-5 safe tag/release | `test_release_tag_targets_validated_main_commit`, `test_duplicate_tag_or_release_is_rejected_without_mutation` |
 | CP-032-6 artifacts | `test_release_artifact_names_are_deterministic`, `test_release_artifact_generation_is_reproducible`; workflow builds portable/python artifact without an OS/architecture matrix |
@@ -41,8 +41,8 @@
 | CP-032-9 atomic publication | workflow verifies artifacts/checksums before `gh release create --draft`, then publishes with `gh release edit --draft=false` |
 | CP-032-10 release notes | `test_release_note_generation_is_deterministic`; workflow passes generated notes through `--notes-file`; sample: `- minor: #67 Task 032: Automated Release Pipeline` |
 | CP-032-11 permissions | workflow top-level `contents: read`; release write permission only on `publish-release`; no PAT required |
-| CP-032-12 concurrency/idempotency | workflow `concurrency.group: release-${{ github.repository }}`; `test_release_rerun_is_idempotent_for_same_commit`; `test_release_workflow_resumes_partial_publication_states` |
-| CP-032-13 manual dispatch | workflow `workflow_dispatch` inputs `increment` and `commit_sha`; manual job rejects non-main commits and uses the same planner/artifact/checksum/publication path |
+| CP-032-12 concurrency/idempotency | workflow `concurrency.group: release-${{ github.repository }}`; `test_release_plan_reuses_existing_stable_release_for_target_commit`; `test_release_plan_recovers_existing_draft_release_for_target_commit`; `test_release_rerun_is_idempotent_for_same_commit`; `test_release_workflow_resumes_partial_publication_states` |
+| CP-032-13 manual dispatch | workflow `workflow_dispatch` inputs `increment` and `commit_sha`; manual job rejects non-main commits with `git merge-base --is-ancestor` after full-history checkout and uses the same planner/artifact/checksum/publication path; `test_release_workflow_uses_full_history_target_commit_plan_and_ancestry_check` |
 | CP-032-14 auditability | `test_safe_summary_fixture_contains_audit_fields_without_credentials`; workflow writes source commit/version/tag/artifacts/checksums/URL |
 | CP-032-15 compatibility | full `uv run pytest` passed; release workflow has no `pull_request` trigger |
 
@@ -72,19 +72,32 @@
 - stable Release가 이미 있고 expected artifact와 `SHA256SUMS`가 모두 있으면 `already-published`로 성공 처리한다.
 - stable Release가 불완전하거나 tag/release target이 충돌하면 fail-closed한다.
 
+## 재리뷰 Blocker 대응: Target Commit Plan Idempotency
+
+- `scripts/release_pipeline.py plan`은 이제 `--target-commit`을 필수 입력으로 받는다.
+- PR 기반 release planning은 PR `merge_commit_sha`가 target commit과 정확히 일치하지 않으면 fail-closed한다.
+- `pull_request.state == "closed"`만으로 merged로 판단하지 않고, `merged == true` 또는 `merged_at`만 병합 evidence로 사용한다.
+- 같은 target commit에 stable Release가 이미 있으면 publish=false로 기존 version/tag를 반환해 동일 commit 재실행이 새 patch version을 만들지 않는다.
+- 같은 target commit에 draft Release가 있으면 기존 version/tag로 publish=true를 반환해 partial publication을 이어간다.
+- 다음 commit은 기존 stable Release를 base로 새 version을 계산한다.
+- `workflow_dispatch`의 main 포함 검증은 shallow `git branch -r --contains` 대신 full-history checkout 후 `git merge-base --is-ancestor`를 사용한다.
+
 ## Validation 결과
 
-- `UV_CACHE_DIR=/tmp/devbot-uv-cache uv sync`: PASS
-- `UV_CACHE_DIR=/tmp/devbot-uv-cache uv run ruff check .`: PASS
-- `uv run pytest`: PASS, 514 passed
-- `UV_CACHE_DIR=/tmp/devbot-uv-cache WORKSPACE_ROOT=/tmp/devbot-task032-workspace DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task032-workspace/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task032-workspace/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
-- `uv run devbot doctor --ci`: PASS. Agent executable/auth checks are skipped in CI profile while the report remains concise and secret-safe.
+- `UV_CACHE_DIR=/tmp/devbot-pr67-uv-cache uv sync`: PASS
+- `UV_CACHE_DIR=/tmp/devbot-pr67-uv-cache uv run ruff check .`: PASS
+- `UV_CACHE_DIR=/tmp/devbot-pr67-uv-cache uv run pytest -q`: PASS, 520 passed
+- `UV_CACHE_DIR=/tmp/devbot-pr67-uv-cache WORKSPACE_ROOT=/tmp/devbot-pr67-runtime DEVBOT_REPOSITORIES_PATH=/tmp/devbot-pr67-runtime/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-pr67-runtime/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
+- `UV_CACHE_DIR=/tmp/devbot-pr67-uv-cache WORKSPACE_ROOT=/tmp/devbot-pr67-doctor-runtime DEVBOT_REPOSITORIES_PATH=/tmp/devbot-pr67-doctor-runtime/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-pr67-doctor-runtime/devbot.lock GITHUB_TOKEN=$(gh auth token) uv run devbot doctor --ci`: PASS, `safe_to_start: yes`. Agent executable/auth checks are skipped in CI profile while the report remains concise and secret-safe.
+- `uv run devbot doctor`: NOT RUN TO PASS in PR checkout. 일반 doctor는 startup self-update 정책상 operator checkout이 clean `main`이어야 하므로 Task branch 검증에서는 `doctor --ci`를 사용했다; dirty PR checkout에서 실행 시 `operator checkout dirty`로 fail-closed함을 확인했다.
 
 ## 수동 검증 결과
 
 - `uv run python scripts/release_pipeline.py version --project-root .`: `0.1.0`
 - `scripts/release_pipeline.py plan` fixture: PASS
-  - previous version `0.2.0`, `release:patch` PR metadata → new version `0.2.1`, tag `v0.2.1`
+  - target commit `new`, previous version `0.2.0`, `release:patch` PR metadata → new version `0.2.1`, tag `v0.2.1`
+  - same target commit existing stable Release → existing version/tag reused, publish=false
+  - same target commit existing draft Release → existing version/tag reused, publish=true
 - 대표 artifact 생성: PASS
   - `devbot-0.2.0-portable-python.tar.gz`
 - checksum manifest 생성: PASS
