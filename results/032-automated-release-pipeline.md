@@ -55,11 +55,19 @@
 - Release workflow는 artifact extract 후 `bin/devbot --version` smoke를 수행한다.
 - 검증 테스트는 artifact 안에 `src/devbot/main.py`, `src/devbot/release.py`, release version이 주입된 `pyproject.toml`이 들어 있고 실제 package code 기반 launcher가 계산된 version을 출력함을 확인한다.
 
+## 재리뷰 Blocker 대응: CI Doctor Profile
+
+- `devbot doctor --ci`를 추가했다.
+- CI profile은 repository/GitHub/config/worktree/release validation에 필요한 checks는 유지하고, GitHub-hosted runner에 없는 Agent executable 및 사용자 로그인 readiness checks만 생략한다.
+- 일반 `devbot doctor`는 기존 Codex/Claude executable/auth readiness checks를 유지한다.
+- Release workflow의 `validate-main`은 `uv run devbot doctor --ci`를 사용한다.
+- `doctor --ci`는 지정 commit checkout 검증용이므로 startup self-update를 수행하지 않는다.
+
 ## Validation 결과
 
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv sync`: PASS
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv run ruff check .`: PASS
-- `UV_CACHE_DIR=/tmp/devbot-task032-uv-cache UV_PROJECT_ENVIRONMENT=/tmp/devbot-task032-fix-98351-venv uv run pytest`: PASS, 507 passed
+- `uv run pytest`: PASS, 513 passed
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache WORKSPACE_ROOT=/tmp/devbot-task032-workspace DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task032-workspace/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task032-workspace/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
 - `uv run devbot doctor`: NOT RUN. 이번 Task prompt가 `git fetch`, `gh`, `curl` 등 원격 discovery/network 명령 실행을 금지했고, 현재 `doctor`는 startup self-update 경로에서 원격 확인을 수행할 수 있어 로컬 실행하지 않았다.
 

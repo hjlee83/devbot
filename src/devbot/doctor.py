@@ -199,13 +199,24 @@ def check_worktree_health(
     return StartupCheck(name, report.safe_to_start, detail)
 
 
-def build_doctor_report(config: DevBotConfig) -> DoctorReport:
+def build_doctor_report(config: DevBotConfig, *, ci: bool = False) -> DoctorReport:
     checks = list(run_startup_checks(config).checks)
     checks.append(check_daemon_lock(config.lock_file))
     checks.append(check_github_connectivity(config))
     checks.append(check_agent_roles(config))
-    checks.append(check_agent_execution_readiness(config.implementer_agent, "implementer", config))
-    checks.append(check_agent_execution_readiness(config.reviewer_agent, "reviewer", config))
+    if ci:
+        checks.append(
+            StartupCheck(
+                "agent_execution_readiness[ci]",
+                True,
+                "skipped Agent executable/auth checks in CI profile",
+            )
+        )
+    else:
+        checks.append(
+            check_agent_execution_readiness(config.implementer_agent, "implementer", config)
+        )
+        checks.append(check_agent_execution_readiness(config.reviewer_agent, "reviewer", config))
     manager = WorktreeManager(workspace_root=config.workspace_root)
     for repository in config.enabled_repositories:
         checks.append(check_worktree_health(repository, manager))

@@ -142,6 +142,36 @@ def test_startup_update_does_not_restart_twice(
     mock_exec.assert_not_called()
 
 
+def test_doctor_ci_skips_startup_self_update(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\n"
+        "GITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("devbot.main._run_startup_self_update") as mock_update,
+        patch("devbot.main.build_doctor_report") as mock_report,
+        patch("devbot.main.render_doctor_report", return_value="doctor\n"),
+    ):
+        mock_report.return_value.safe_to_start = True
+        exit_code = main(["doctor", "--ci"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 0
+    mock_update.assert_not_called()
+    mock_report.assert_called_once()
+    assert mock_report.call_args.kwargs["ci"] is True
+
+
 def test_existing_cli_workflows_remain_compatible_with_version_command(
     tmp_path: Path,
 ) -> None:

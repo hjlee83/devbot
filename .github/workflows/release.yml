@@ -53,8 +53,8 @@ jobs:
       - name: uv run pytest
         run: uv run pytest
 
-      - name: uv run devbot doctor
-        run: uv run devbot doctor
+      - name: uv run devbot doctor --ci
+        run: uv run devbot doctor --ci
         env:
           WORKSPACE_ROOT: ${{ runner.temp }}
           GITHUB_TOKEN: ${{ github.token }}

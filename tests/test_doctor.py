@@ -209,6 +209,44 @@ def test_doctor_checks_claude_auth_with_launcher_environment(
         assert "GITHUB_TOKEN" not in env
 
 
+
+def test_doctor_ci_profile_skips_agent_auth_readiness(tmp_path: Path) -> None:
+    repo_path = tmp_path / "myrepo"
+    _init_git_repo(repo_path)
+    config = _config([_repo(repo_path)], reviewer_agent="claude")
+
+    with (
+        patch(
+            "devbot.github_client.GitHubClient.get_authenticated_user",
+            return_value=GitHubUser(login="devbot-user", id=1),
+        ),
+        patch("devbot.doctor.shutil.which", return_value=None),
+    ):
+        report = build_doctor_report(config, ci=True)
+
+    names = {check.name for check in report.checks}
+    assert "agent_execution_readiness[ci]" in names
+    assert "agent_execution_readiness[reviewer:claude]" not in names
+    ci_check = next(
+        check for check in report.checks if check.name == "agent_execution_readiness[ci]"
+    )
+    assert ci_check.ok is True
+    assert "skipped Agent executable/auth checks" in ci_check.detail
+    assert report.safe_to_start is True
+
+
+def test_doctor_default_profile_keeps_agent_auth_readiness(tmp_path: Path) -> None:
+    repo_path = tmp_path / "myrepo"
+    _init_git_repo(repo_path)
+    config = _config([_repo(repo_path)], reviewer_agent="claude")
+
+    with patch("devbot.doctor.shutil.which", return_value=None):
+        report = build_doctor_report(config)
+
+    names = {check.name for check in report.checks}
+    assert "agent_execution_readiness[reviewer:claude]" in names
+    assert "agent_execution_readiness[ci]" not in names
+
 # ---- CP-023-10: doctor reports Job worktree health ----
 
 
