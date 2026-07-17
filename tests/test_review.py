@@ -308,6 +308,26 @@ def test_invalid_review_summary_moves_issue_to_blocked() -> None:
     write_client.create_comment.assert_not_called()
 
 
+def test_interactive_approval_output_is_configuration_invalid_before_summary_parse() -> None:
+    reviewer_runner = MagicMock()
+    reviewer_runner.run.return_value = AgentRunResult(
+        executed=True,
+        dry_run=False,
+        message="Should I proceed? approval required before running this command",
+    )
+    service, _, state_writer, write_client = _service(reviewer_runner=reviewer_runner)
+
+    result = _process(service)
+
+    assert result.status is None
+    assert result.issue_state is TaskState.MANUAL_ACTION
+    assert result.message == "manual-action: agent_configuration_invalid"
+    assert "agent_configuration_invalid" in result.diagnostic
+    state_writer.require_manual_action.assert_called_once()
+    state_writer.block.assert_not_called()
+    write_client.create_comment.assert_not_called()
+
+
 def test_review_summary_with_both_statuses_moves_issue_to_blocked() -> None:
     """Both `MERGE READY` and `REQUEST CHANGES` present is just as invalid
     as neither - exactly one is required."""

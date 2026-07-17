@@ -176,7 +176,7 @@ def test_doctor_reports_worktree_health(tmp_path: Path) -> None:
     # An on-disk directory under the worktree root that Git itself does not
     # know about is a real conflict (a future `prepare()` for that path
     # would fail) - reported, but never fatal to the whole daemon.
-    orphaned = workspace_root / ".devbot-worktrees" / "myrepo" / "issue-99"
+    orphaned = repo_path / ".worktrees" / "issue-99"
     orphaned.mkdir(parents=True)
 
     with patch(

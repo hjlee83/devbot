@@ -211,6 +211,16 @@ AGENT_OUTCOME_TRANSITIONS: dict[AgentOutcome, AgentOutcomeTransition] = {
             "Issue를 devbot:ready로 되돌리세요."
         ),
     ),
+    AgentOutcome.AGENT_CONFIGURATION_INVALID: AgentOutcomeTransition(
+        proceeds_to_delivery=False,
+        target_state=TaskState.MANUAL_ACTION,
+        retryable=False,
+        recovery_hint=(
+            "Agent CLI가 필수 비대화형 실행 정책을 지원하지 않거나 Git metadata writable "
+            "root를 확보하지 못했습니다. Codex CLI 버전과 sandbox 설정을 확인한 뒤 "
+            "Issue를 이전 상태로 되돌리세요."
+        ),
+    ),
     AgentOutcome.NETWORK_BLOCKED: AgentOutcomeTransition(
         proceeds_to_delivery=False,
         target_state=TaskState.MANUAL_ACTION,

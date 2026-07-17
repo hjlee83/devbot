@@ -54,12 +54,14 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Protocol
 
 from devbot import observability
 from devbot.agent_outcome import classify_agent_outcome
 from devbot.agents.base import AgentRunner, is_session_limit_output
 from devbot.delivery import DeliveryService, branch_has_implementation_evidence
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
+from devbot.github_retry import GitHubTransientError
 from devbot.issue_state import ClaimConflictError, IssueStateWriter
 from devbot.models import (
     AgentOutcome,
@@ -94,6 +96,7 @@ from devbot.workspace import (
 )
 from devbot.worktree import (
     PreparedWorkspace,
+    ReviewIntegrationValidation,
     WorkspacePreparationError,
     WorkspacePreparationFailure,
     parse_branch_from_issue_body,
@@ -115,6 +118,7 @@ _LOGGER_NAME = "devbot"
 _MANUAL_ACTION_OUTCOMES = frozenset(
     {
         AgentOutcome.APPROVAL_REQUIRED,
+        AgentOutcome.AGENT_CONFIGURATION_INVALID,
         AgentOutcome.NETWORK_BLOCKED,
         AgentOutcome.REPOSITORY_LOCKED,
         AgentOutcome.IMPLEMENTATION_SKIPPED,
@@ -400,9 +404,18 @@ def _planner_pr_resolution_failure(issue: GitHubIssue) -> WorkspacePreparationEr
 EnsureWorkspaceFn = Callable[[RepositoryConfig], None]
 BuildPromptFn = Callable[[RepositoryConfig, GitHubIssue, Sequence[IssueComment]], str]
 HasImplementationEvidenceFn = Callable[[RepositoryConfig, str, str], bool]
-PrepareWorkspaceFn = Callable[
-    [RepositoryConfig, GitHubIssue, PullRequest | None], PreparedWorkspace
-]
+class PrepareWorkspaceFn(Protocol):
+    def __call__(
+        self,
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+        *,
+        synchronize_with_main: bool = True,
+    ) -> PreparedWorkspace: ...
+
+
+ReviewIntegrationValidationFn = Callable[[PreparedWorkspace], ReviewIntegrationValidation]
 
 IssuesByKey = dict[tuple[str, int], GitHubIssue]
 
@@ -434,6 +447,7 @@ class PollingService:
     # this) preserves the exact pre-Task-023 behavior - the Agent and
     # delivery run directly against the operator checkout, as always.
     prepare_workspace: PrepareWorkspaceFn | None = None
+    validate_review_integration: ReviewIntegrationValidationFn | None = None
     state_writer: IssueStateWriter | None = None
     delivery: DeliveryService | None = None
     rework_service: ReworkService | None = None
@@ -953,6 +967,27 @@ class PollingService:
 
         try:
             tasks, issues_by_key = self._collect(repositories, cycle_id)
+        except GitHubTransientError as exc:
+            self.logger.warning("일시적 GitHub 오류로 이번 cycle을 보류합니다: %s", exc)
+            results = [PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))]
+            observability.log_cycle_end(
+                self.logger,
+                observability.build_cycle_summary(
+                    cycle_id=cycle_id,
+                    start=cycle_start,
+                    candidates=[],
+                    selected=[],
+                    available_slots=self.config.max_concurrent_jobs,
+                    results=results,
+                ),
+            )
+            observability.log_cycle_result(
+                self.logger,
+                cycle_id,
+                _normalized_cycle_result([], results),
+                observability.elapsed_ms(cycle_start),
+            )
+            return results
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error("GitHub 조회 중 오류가 발생했습니다: %s", exc)
             results = [PollingResult(status=PollingStatus.ITERATION_ERROR, message=str(exc))]
@@ -1073,6 +1108,16 @@ class PollingService:
             return PollingResult(
                 status=PollingStatus.SKIPPED_ACTIVE_TASK, task=selected, message=str(exc)
             )
+        except GitHubTransientError as exc:
+            self.logger.warning(
+                "일시적 GitHub 오류로 Issue claim을 보류합니다 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
                 "Issue claim 실패 (%s #%d): %s", selected.repository, selected.number, exc
@@ -1102,6 +1147,25 @@ class PollingService:
 
         try:
             return self._run_claimed_implement_job(repository, selected, issue, cycle_id)
+        except GitHubTransientError as exc:
+            self.logger.warning(
+                "일시적 GitHub 오류로 Job을 보류합니다 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            safe_end(
+                self.timeline,
+                repository,
+                issue.number,
+                phase="dev",
+                actor=self.config.implementer_agent,
+                result="transient_github_failure",
+                logger=self.logger,
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
         except Exception as exc:  # noqa: BLE001 - CP-014-7: never leave `working` behind
             self.logger.error(
                 "예상하지 못한 예외로 Job 중단 (%s #%d): %s",
@@ -2109,7 +2173,9 @@ class PollingService:
         issue: GitHubIssue,
         linked_pull_request: PullRequest,
         cycle_id: str,
-    ) -> tuple[RepositoryConfig, PollingResult | None]:
+        *,
+        synchronize_with_main: bool = True,
+    ) -> tuple[RepositoryConfig, PollingResult | None, PreparedWorkspace | None]:
         """Resolve the single repository Agent roles must use after prepare.
 
         Task 027 invariant: once `WorktreeManager.prepare()` returns a
@@ -2120,7 +2186,7 @@ class PollingService:
         resume handling.
         """
         if self.prepare_workspace is None:
-            return repository, None
+            return repository, None, None
 
         try:
             ensure_repository_present(repository)
@@ -2136,11 +2202,22 @@ class PollingService:
                 PollingResult(
                     status=PollingStatus.WORKSPACE_INVALID, task=selected, message=str(exc)
                 ),
+                None,
             )
 
         prep_start = time.monotonic()
         try:
-            prepared = self.prepare_workspace(repository, issue, linked_pull_request)
+            try:
+                prepared = self.prepare_workspace(
+                    repository,
+                    issue,
+                    linked_pull_request,
+                    synchronize_with_main=synchronize_with_main,
+                )
+            except TypeError:
+                # Backward-compatible test doubles may still expose the
+                # original Task 023 three-argument shape.
+                prepared = self.prepare_workspace(repository, issue, linked_pull_request)
         except WorkspacePreparationError as exc:
             self.logger.error(
                 "워크스페이스 준비 실패 (%s #%d): [%s] %s",
@@ -2156,6 +2233,7 @@ class PollingService:
                     task=selected,
                     message=f"{exc.category.value}: {exc}",
                 ),
+                None,
             )
         finally:
             observability.log_stage(
@@ -2183,9 +2261,10 @@ class PollingService:
                 PollingResult(
                     status=PollingStatus.WORKSPACE_INVALID, task=selected, message=message
                 ),
+                prepared,
             )
 
-        return prepared.repository, None
+        return prepared.repository, None, prepared
 
     def _run_rework_job(
         self,
@@ -2226,7 +2305,7 @@ class PollingService:
         if error is not None:
             return error
 
-        work_repository, workspace_error = self._prepare_pr_workspace_for_agent(
+        work_repository, workspace_error, _prepared = self._prepare_pr_workspace_for_agent(
             repository, selected, issue, linked_pull_request, cycle_id
         )
         if workspace_error is not None:
@@ -2327,11 +2406,32 @@ class PollingService:
         if error is not None:
             return error
 
-        work_repository, workspace_error = self._prepare_pr_workspace_for_agent(
-            repository, selected, issue, linked_pull_request, cycle_id
+        work_repository, workspace_error, prepared = self._prepare_pr_workspace_for_agent(
+            repository,
+            selected,
+            issue,
+            linked_pull_request,
+            cycle_id,
+            synchronize_with_main=False,
         )
         if workspace_error is not None:
             return workspace_error
+
+        if prepared is not None and self.validate_review_integration is not None:
+            integration = self.validate_review_integration(prepared)
+            self.logger.info(
+                "Review integration validation: pr_head=%s mergeability=%s method=%s result=%s",
+                linked_pull_request.head_sha,
+                integration.mergeable,
+                integration.method,
+                integration.message,
+            )
+            if not integration.mergeable:
+                return PollingResult(
+                    status=PollingStatus.BLOCKED,
+                    task=selected,
+                    message=f"latest-main integration validation failed: {integration.message}",
+                )
 
         review_start = time.monotonic()
         try:

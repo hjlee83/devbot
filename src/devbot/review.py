@@ -32,7 +32,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from devbot.agents.base import AgentRunner, is_session_limit_output
+from devbot.agents.base import AgentRunner, is_approval_required_output, is_session_limit_output
 from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
@@ -293,6 +293,25 @@ class ReviewService:
             )
 
         review_text = result.message
+        if is_approval_required_output(review_text):
+            reason = (
+                "Reviewer Agent 실행 정책이 비대화형 실행을 보장하지 못했습니다 "
+                f"(agent_configuration_invalid):\n\n{review_text}"
+            )
+            self.state_writer.require_manual_action(
+                repository, working_issue, reason, job_type=JobType.REVIEW
+            )
+            _end("manual-action")
+            return ReviewResult(
+                triggered=True,
+                status=None,
+                issue_state=TaskState.MANUAL_ACTION,
+                message="manual-action: agent_configuration_invalid",
+                diagnostic=(
+                    f"cycle={current_attempt} last_outcome=agent_configuration_invalid "
+                    "next_action=manual-action"
+                ),
+            )
         status = _parse_review_status(review_text)
         if status is None:
             reason = (

@@ -8,6 +8,7 @@ those land in a later Task.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +16,7 @@ from typing import Any
 
 import requests
 
+from devbot.github_retry import GitHubRetryConfig, execute_with_github_retry
 from devbot.models import RepositoryConfig
 
 GITHUB_API_BASE_URL = "https://api.github.com"
@@ -26,7 +28,7 @@ class GitHubClientError(RuntimeError):
 
 
 class GitHubAuthenticationError(GitHubClientError):
-    """Raised when GitHub rejects the credentials (401)."""
+    """Raised when GitHub rejects credentials or permissions (401/403)."""
 
 
 class GitHubNotFoundError(GitHubClientError):
@@ -102,7 +104,7 @@ def _raise_for_status(response: requests.Response) -> None:
 
     message = _error_message(response)
     status = response.status_code
-    if status == 401:
+    if status in (401, 403):
         raise GitHubAuthenticationError(f"GitHub authentication failed: {message}")
     if status == 404:
         raise GitHubNotFoundError(f"GitHub resource not found: {message}")
@@ -161,20 +163,29 @@ class GitHubClient:
         *,
         base_url: str = GITHUB_API_BASE_URL,
         session: requests.Session | None = None,
+        retry_config: GitHubRetryConfig | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         self.token = token
         self.base_url = base_url.rstrip("/")
         self._session = session or requests.Session()
+        self.retry_config = retry_config or GitHubRetryConfig()
+        self.logger = logger
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> requests.Response:
-        response = self._session.get(
-            f"{self.base_url}{path}",
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.github+json",
-            },
-            params=params,
-            timeout=30,
+        response = execute_with_github_retry(
+            lambda: self._session.get(
+                f"{self.base_url}{path}",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                params=params,
+                timeout=30,
+            ),
+            config=self.retry_config,
+            endpoint_category="read",
+            logger=self.logger,
         )
         _raise_for_status(response)
         return response

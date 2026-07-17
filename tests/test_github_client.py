@@ -1,7 +1,9 @@
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from devbot.github_client import (
     GitHubAPIError,
@@ -10,6 +12,12 @@ from devbot.github_client import (
     GitHubClientError,
     GitHubNotFoundError,
 )
+from devbot.github_retry import (
+    GitHubRetryConfig,
+    GitHubTransientError,
+    classify_github_failure,
+)
+from devbot.github_write_client import GitHubWriteClient
 from devbot.models import RepositoryConfig
 
 
@@ -30,6 +38,7 @@ def _mock_response(
     response.ok = 200 <= status_code < 300
     response.json.return_value = json_data
     response.text = text
+    response.headers = {}
     return response
 
 
@@ -209,10 +218,163 @@ def test_github_authentication_error_is_translated() -> None:
 def test_github_generic_error_is_translated() -> None:
     session = MagicMock()
     session.get.return_value = _mock_response(status_code=500, json_data={"message": "boom"})
-    client = GitHubClient("token123", session=session)
+    client = GitHubClient(
+        "token123",
+        session=session,
+        retry_config=GitHubRetryConfig(max_attempts=1, sleep=lambda _delay: None),
+    )
 
-    with pytest.raises(GitHubAPIError):
+    with pytest.raises(GitHubTransientError):
         client.get_authenticated_user()
+
+
+def test_github_failure_classification_distinguishes_transient_and_permanent_errors() -> None:
+    for status in (429, 500, 502, 503, 504):
+        assert classify_github_failure(status=status) == "transient"
+    assert classify_github_failure(requests.Timeout("timed out")) == "transient"
+    assert classify_github_failure(requests.ConnectionError("connection failed")) == "transient"
+    assert classify_github_failure(status=401) == "authentication_or_permission"
+    assert classify_github_failure(status=403) == "authentication_or_permission"
+    assert classify_github_failure(status=404) == "not_found"
+
+
+def test_github_transient_failure_retries_with_bounded_backoff() -> None:
+    session = MagicMock()
+    session.get.side_effect = [
+        _mock_response(status_code=500, json_data={"message": "boom"}),
+        _mock_response(status_code=502, json_data={"message": "bad gateway"}),
+        _mock_response(status_code=200, json_data={"login": "octocat", "id": 42}),
+    ]
+    delays: list[float] = []
+    retry_config = GitHubRetryConfig(
+        max_attempts=3,
+        base_delay_seconds=1.0,
+        max_delay_seconds=10.0,
+        jitter_ratio=0.0,
+        sleep=delays.append,
+    )
+    client = GitHubClient("token123", session=session, retry_config=retry_config)
+
+    assert client.get_authenticated_user().login == "octocat"
+
+    assert session.get.call_count == 3
+    assert delays == [1.0, 2.0]
+
+    session.get.side_effect = [
+        _mock_response(status_code=503, json_data={"message": "unavailable"}),
+        _mock_response(status_code=504, json_data={"message": "timeout"}),
+    ]
+    delays.clear()
+    capped_client = GitHubClient(
+        "token123",
+        session=session,
+        retry_config=GitHubRetryConfig(
+            max_attempts=2,
+            base_delay_seconds=1.0,
+            max_delay_seconds=1.0,
+            jitter_ratio=0.0,
+            sleep=delays.append,
+        ),
+    )
+
+    with pytest.raises(GitHubTransientError):
+        capped_client.get_authenticated_user()
+
+    assert delays == [1.0]
+
+
+def test_github_retry_after_header_is_honored() -> None:
+    session = MagicMock()
+    retry_response = _mock_response(status_code=429, json_data={"message": "slow down"})
+    retry_response.headers = {"Retry-After": "9"}
+    session.get.side_effect = [
+        retry_response,
+        _mock_response(status_code=200, json_data={"login": "octocat", "id": 42}),
+    ]
+    delays: list[float] = []
+    client = GitHubClient(
+        "token123",
+        session=session,
+        retry_config=GitHubRetryConfig(
+            max_attempts=2,
+            base_delay_seconds=1.0,
+            max_delay_seconds=5.0,
+            jitter_ratio=0.0,
+            sleep=delays.append,
+        ),
+    )
+
+    client.get_authenticated_user()
+
+    assert delays == [5.0]
+
+
+def test_github_read_and_write_clients_share_retry_policy() -> None:
+    delays: list[float] = []
+    retry_config = GitHubRetryConfig(
+        max_attempts=2,
+        base_delay_seconds=0.5,
+        max_delay_seconds=5.0,
+        jitter_ratio=0.0,
+        sleep=delays.append,
+    )
+    read_session = MagicMock()
+    read_session.get.side_effect = [
+        _mock_response(status_code=500, json_data={"message": "boom"}),
+        _mock_response(status_code=200, json_data={"login": "octocat", "id": 42}),
+    ]
+    write_session = MagicMock()
+    write_session.put.side_effect = [
+        _mock_response(status_code=500, json_data={"message": "boom"}),
+        _mock_response(status_code=200, json_data={}),
+    ]
+
+    GitHubClient(
+        "token123", session=read_session, retry_config=retry_config
+    ).get_authenticated_user()
+    GitHubWriteClient("token123", session=write_session, retry_config=retry_config).set_labels(
+        _repository(), 1, ["devbot:working"]
+    )
+
+    assert read_session.get.call_count == 2
+    assert write_session.put.call_count == 2
+    assert delays == [0.5, 0.5]
+
+
+def test_github_retry_diagnostics_are_structured_and_redacted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = logging.getLogger("tests.github_retry")
+    session = MagicMock()
+    session.get.side_effect = [
+        _mock_response(status_code=500, json_data={"message": "boom"}),
+        _mock_response(status_code=200, json_data={"login": "octocat", "id": 42}),
+    ]
+    client = GitHubClient(
+        "super-secret-token",
+        session=session,
+        retry_config=GitHubRetryConfig(
+            max_attempts=2,
+            base_delay_seconds=0.25,
+            max_delay_seconds=1.0,
+            jitter_ratio=0.0,
+            sleep=lambda _delay: None,
+        ),
+        logger=logger,
+    )
+
+    with caplog.at_level(logging.INFO, logger="tests.github_retry"):
+        client.get_authenticated_user()
+
+    log_text = caplog.text
+    assert "github_api_retry" in log_text
+    assert "status=500" in log_text
+    assert "attempt=1" in log_text
+    assert "delay_seconds=0.250" in log_text
+    assert "endpoint_category=read" in log_text
+    assert "outcome=retrying" in log_text
+    assert "super-secret-token" not in log_text
+    assert "Authorization" not in log_text
 
 
 def test_client_exposes_read_operations_only() -> None:
