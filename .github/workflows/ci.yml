@@ -32,7 +32,7 @@ jobs:
 
       - name: uv run devbot --once --dry-run
         run: |
-          cat > config/repositories.yaml <<'EOF'
+          cat > "$RUNNER_TEMP/repositories.yaml" <<'EOF'
           repositories:
             - owner: hjlee83
               repo: devbot
@@ -42,4 +42,5 @@ jobs:
           uv run devbot --once --dry-run
         env:
           WORKSPACE_ROOT: ${{ runner.temp }}
+          DEVBOT_REPOSITORIES_PATH: ${{ runner.temp }}/repositories.yaml
           GITHUB_TOKEN: ${{ github.token }}

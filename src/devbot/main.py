@@ -415,7 +415,7 @@ def main(
     try:
         with ProcessLock(config.lock_file):
             log_startup(logger, config)
-            if not _run_startup_self_update(config, logger):
+            if config.enabled_repositories and not _run_startup_self_update(config, logger):
                 return 1
             # Task 019 CP-019-4: informational only (see
             # `devbot.startup`'s module docstring) - the two genuinely

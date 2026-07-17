@@ -12,6 +12,8 @@
 - Startup Self Update를 추가해 doctor/daemon 실행 전 DevBot operator checkout만 `git fetch origin`, `git switch main`, `git pull --ff-only origin main` 순서로 갱신한다.
 - Startup Self Update는 Git common-dir 기준으로 operator checkout을 해석하며, `config.enabled_repositories`의 managed repositories를 순회하거나 변경하지 않는다.
 - Startup Self Update로 HEAD가 바뀌면 현재 프로세스를 `exec`로 재시작하고 `DEVBOT_STARTUP_SELF_UPDATED`로 재시작 루프를 방지한다.
+- `--once` daemon 경로는 enabled repository가 없으면 doctor/planner/workspace/Agent가 실행되지 않으므로 Startup Self Update를 생략해 CI no-op smoke test가 PR checkout을 변경하지 않는다.
+- `DEVBOT_REPOSITORIES_PATH` 환경 변수로 repositories 설정 파일을 checkout 밖 temp path에서 읽을 수 있게 했다.
 - Startup Self Update 실패 시 doctor/planner/workspace preparation/Agent 실행 전에 즉시 중단한다.
 
 ## 주요 설계 결정
@@ -62,14 +64,17 @@
 
 - `uv sync`: PASS
 - `uv run ruff check .`: PASS
-- `uv run pytest`: PASS, 484 passed
+- `uv run pytest`: PASS, 485 passed
 - `uv run devbot doctor`: PASS
 - `uv run devbot --once --dry-run`: PASS
+- CI-style temp repository config smoke: PASS
 
 Note: an initial parallel run of `doctor` and `--once --dry-run` caused a Git remote ref lock during concurrent Startup Self Update fetch. The serial rerun of `uv run devbot --once --dry-run` passed.
 
 ## 수정 파일
 
+- `.github/workflows/ci.yml`
+- `src/devbot/config.py`
 - `src/devbot/agent_execution.py`
 - `src/devbot/agents/base.py`
 - `src/devbot/agents/claude.py`
@@ -81,6 +86,7 @@ Note: an initial parallel run of `doctor` and `--once --dry-run` caused a Git re
 - `src/devbot/rework.py`
 - `src/devbot/startup.py`
 - `tests/test_agent_execution.py`
+- `tests/test_config.py`
 - `tests/test_doctor.py`
 - `tests/test_main.py`
 - `tests/test_main_loop.py`

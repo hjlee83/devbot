@@ -53,6 +53,20 @@ def test_load_valid_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert config.repositories[0].enabled is True
 
 
+def test_repositories_path_can_come_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path, repo="from-env", enabled=False)
+    monkeypatch.setenv("DEVBOT_REPOSITORIES_PATH", str(repositories_path))
+
+    config = load_config(env_path=env_path)
+
+    assert config.repositories[0].repo == "from-env"
+    assert config.repositories[0].enabled is False
+
+
 def test_missing_required_config_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = _write_env(tmp_path, workspace_root=None)
     repositories_path = _write_repositories_yaml(tmp_path)
