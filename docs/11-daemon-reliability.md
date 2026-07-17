@@ -123,6 +123,33 @@ daemon lock 상태는 `run_startup_checks()`에 포함되지 않는다 - 이 함
 Lock 상태는 `devbot doctor`(5절)가 daemon이 lock을 얻기 *전에* 별도로
 확인한다.
 
+## 4-1. Startup Self-Update (세 번째 fatal 조건)
+
+`devbot.startup.run_startup_self_update()`는 `run_startup_checks()`와는
+**별개의 함수**이며, `ProcessLock` 획득 직후 `run_startup_checks()`보다
+먼저 실행된다(`devbot.main.main()`). 이 함수는 WARNING이 아니라 **fatal**이다
+- 실패하면 8절의 `ConfigError`/`LockAcquisitionError`와 마찬가지로
+`GitHubWriteClient`가 생성되기 전에 `main()`을 종료 코드 1로 멈춘다.
+
+동작: operator checkout(devbot 자기 자신)이 `git status --porcelain`상
+깨끗하고(`.worktrees/` 아래 untracked 항목 제외) `main` branch 위에 있으면,
+`origin/main`을 fetch해 `pull --ff-only`로 최신화하고(merge/rebase/force-push는
+절대 사용하지 않음), SHA가 바뀌었으면 `os.execvpe`로 새 코드를 반영해
+재시작한다.
+
+각 실패는 `StartupSelfUpdateResult.reason_code`로 구분된다: `dirty_checkout`,
+`wrong_branch`, `status_check_failed`, `fetch_failed`, `switch_failed`,
+`pull_failed`, `current_sha_failed`.
+
+**CP-B0-1**: 데몬/`--once` 호출부는 `allow_dirty_skip=config.dry_run`을
+넘긴다 - `reason_code == "dirty_checkout"`이고 `allow_dirty_skip`이 참일
+때만 WARNING으로 강등되어 실행이 계속된다. `DRY_RUN`은 기본값이 `"true"`이므로
+(`devbot.config`), `DRY_RUN=false`를 명시한 실제 배포만 예전처럼 엄격하게
+막힌다. 다른 모든 `reason_code`(브랜치 불일치, fetch/switch/pull 실패 등)는
+dry-run 여부와 무관하게 여전히 fatal이다 - 더 심각한 문제를 조용히 넘기지
+않기 위함. `devbot doctor`(`--ci` 아닌 일반 실행)는 이 우회를 받지 않는다 -
+진단이 목적이므로 dirty 체크아웃도 정확히 보고해야 한다는 의도적 설계다.
+
 ## 5. `devbot doctor`
 
 ```bash
@@ -166,10 +193,11 @@ daemon 전체를 죽일 수 있었다. `run_forever()`도 `polling_service.run_o
 
 ## 8. Fatal 실패 처리
 
-`ConfigError`/`LockAcquisitionError`는 `devbot.main.main()`이 `PollingService`나
-`GitHubWriteClient`를 생성하기 전에 잡아 즉시 종료 코드 1로 반환한다 - 이
-시점까지 GitHub에 대한 쓰기 호출은 물리적으로 발생할 수 없다
-(`tests/test_main_loop.py::test_daemon_stops_on_fatal_failure`가
+`ConfigError`/`LockAcquisitionError`/`StartupSelfUpdateError`(4-1절, 단
+`dirty_checkout`이 dry-run 하에서 우회된 경우는 제외)는 `devbot.main.main()`이
+`PollingService`나 `GitHubWriteClient`를 생성하기 전에 잡아 즉시 종료 코드
+1로 반환한다 - 이 시점까지 GitHub에 대한 쓰기 호출은 물리적으로 발생할 수
+없다 (`tests/test_main_loop.py::test_daemon_stops_on_fatal_failure`가
 `GitHubWriteClient`가 한 번도 생성되지 않음을 직접 검증한다).
 
 ## 9. Agent 세션 제한 처리

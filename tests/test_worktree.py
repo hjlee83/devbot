@@ -329,6 +329,45 @@ def test_review_prepare_does_not_change_pr_head(tmp_path: Path) -> None:
     assert not (prepared.worktree_path / "main-after-review.txt").exists()
 
 
+def test_dry_run_prepare_does_not_rebase_or_force_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CP-B0-1 regression: dry_run must stop `_sync_task_branch_with_main`
+    before its first local mutation (rebase), let alone the remote one
+    (force-push) - mirrors `test_implement_prepare_rebases_latest_main_and_
+    force_pushes_with_lease` with the assertions inverted."""
+    repository, origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace", dry_run=True)
+    issue = _issue(number=33)
+    _push_branch(origin, tmp_path, "task/030-dry-run", filename="task.txt")
+    before = _remote_head(origin, "refs/heads/task/030-dry-run")
+    _push_to_main(origin, tmp_path, "main-after-dry-run.txt")
+    pull_request = _pull_request(head_ref="task/030-dry-run", issue_number=33)
+    commands: list[tuple[str, ...]] = []
+    real_run_git = subprocess.run
+
+    def _spy(args, *a, **kw):
+        if isinstance(args, list) and args[:1] == ["git"]:
+            commands.append(tuple(args[1:]))
+        return real_run_git(args, *a, **kw)
+
+    monkeypatch.setattr("devbot.worktree.subprocess.run", _spy)
+
+    prepared = manager.prepare(repository, issue, pull_request)
+
+    after = _remote_head(origin, "refs/heads/task/030-dry-run")
+    assert after == before
+    assert not any(cmd[:1] == ("rebase",) for cmd in commands)
+    assert not any(cmd[:1] == ("push",) for cmd in commands)
+    assert not (prepared.worktree_path / "main-after-dry-run.txt").exists()
+
+
+def test_worktree_manager_dry_run_defaults_to_false(tmp_path: Path) -> None:
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+
+    assert manager.dry_run is False
+
+
 def test_review_integration_validation_uses_non_mutating_merge_tree(tmp_path: Path) -> None:
     repository, origin = _make_operator_repo(tmp_path)
     manager = WorktreeManager(workspace_root=tmp_path / "workspace")

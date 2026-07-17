@@ -63,14 +63,14 @@
 - **검증**: 전체 테스트 527 passed, ruff clean. 실사용 DRY_RUN 재현은 생략(REWORK job 재현에 branch+PR+연결이슈 필요해 비용 대비 가치 낮음 — 단위/통합 테스트가 정확한 문제 텍스트로 이미 결정론적으로 검증함).
 - **미착수**: git commit 여부는 사용자 확인 대기 중.
 
-### B0-1. 구조적 병목 해소 — self-update 게이트 + dry-run 안전 버그 *(Phase A 실측, 아직 미착수)*
+### B0-1. 구조적 병목 해소 — self-update 게이트 + dry-run 안전 버그 *(완료, 2026-07-18)*
 
-라벨보다 상류에서 루프를 막거나 위험하게 만드는 두 가지.
+라벨보다 상류에서 루프를 막거나 위험하게 만드는 세 가지를 수정. 상세 설계는 `~/.claude/plans/sunny-hopping-kazoo.md`, 결정 기록은 `docs/07-decisions.md`의 "2026-07-18 — Startup self-update" 항목, 운영 문서는 `docs/11-daemon-reliability.md` §4-1.
 
-- **self-update 게이트 완화**: "커밋 안 한 변경 1건이라도 있으면 전체 중단" 대신, 개발 중 안전하게 우회할 수 있는 경로를 만든다(예: `--once`/`--dry-run`에 한해 스킵 허용, 또는 명시적 플래그). 실서비스 자동 실행에서는 여전히 안전하게 막되, 사람이 손으로 개발 중일 때 데몬 자체가 죽지 않게 한다.
-- **dry-run 안전 구멍 봉합**: `_sync_task_branch_with_main`(REWORK, PR-연결 IMPLEMENT 경로)이 `dry_run`을 존중하도록 수정 — dry-run 중에는 절대 실제 push가 나가지 않게.
-- **(부수) Timeline dev:start/dev:end 정합성**: dry-run에서 start/end 기록 스킵 여부를 일관되게.
-- 완료 기준: 손으로 작업 중인 상태(untracked 파일 있음)에서도 `--once --dry-run`이 정상 진행되고, dry-run 중 어떤 job_type에서도 원격 push가 발생하지 않음을 재검증.
+- **self-update 게이트 완화**: `StartupSelfUpdateResult`에 `reason_code` 추가, `dirty_checkout`만 `allow_dirty_skip=config.dry_run`으로 우회 가능. `DRY_RUN` 기본값이 `"true"`라 실제로 `DRY_RUN=false`를 명시한 배포만 여전히 엄격. `devbot doctor`(비-`--ci`)는 의도적으로 우회 대상에서 제외(진단 목적).
+- **dry-run 안전 구멍 봉합**: `WorktreeManager`에 `dry_run` 필드 추가, `_sync_task_branch_with_main`이 `git rebase`(로컬 변경) 직전에 조기 리턴 — `DeliveryService`의 기존 관례(검증은 실행, 첫 변경 전에 리턴)를 그대로 따름.
+- **Timeline dev:start/dev:end 정합성**: `raise TimelineMissingStartError(...)`만 `if not self.dry_run`으로 가드(블록 전체 아님) — 실제 이전 이벤트 이력이 있는 이슈의 idempotent 중복-end 체크는 그대로 유지.
+- **검증**: 이 세션 자체의 미커밋 변경(12개 파일)이 있는 상태에서 `--once --dry-run --verbose`가 실제로 정상 진행되는 것을 실측 확인(`git stash` 불필요해짐). 전체 테스트 535 passed, ruff clean.
 
 ### B1. 라벨/상태기 정리
 

@@ -252,3 +252,65 @@ correct fix.
 `review.py`'s `DEFAULT_REVIEW_LOOP_LIMIT = 3` was also, separately, wired
 into `devbot.config`/`devbot.models` as the `REVIEW_LOOP_LIMIT` environment
 variable (previously hardcoded, not configurable without a code change).
+
+## 2026-07-18 — Startup self-update: bypass only a dirty operator checkout, only under dry-run (CP-B0-1)
+
+`devbot.startup.run_startup_self_update()` was already a third fatal
+startup condition alongside `ConfigError`/`LockAcquisitionError` (see
+`docs/11-daemon-reliability.md` §4-1, added by this same entry) - the
+2026-07-15 "Startup validation is informational" entry above describes
+`run_startup_checks()` only and predates this gate; it is not being
+corrected here, just superseded in scope by this one.
+
+The gate's problem was not that it existed, but that it collapsed every
+failure reason into one fatal outcome with no bypass: `git status
+--porcelain` reporting a single uncommitted file (any file, tracked or
+untracked, outside `.worktrees/`) aborted the entire run before the
+polling cycle ever started - daemon, `--once`, dry-run, all alike. In
+practice this meant a developer doing ordinary manual work on the devbot
+repository itself (exactly the mode `docs/14-autonomy-first-roadmap.md`'s
+Phase A/B0/B0-1 work happens in) could not run so much as a `--dry-run`
+smoke test without first `git stash`-ing.
+
+The fix adds a machine-matchable `StartupSelfUpdateResult.reason_code`
+(`dirty_checkout`, `wrong_branch`, `status_check_failed`, `fetch_failed`,
+`switch_failed`, `pull_failed`, `current_sha_failed`) and a new
+`_run_startup_self_update(..., allow_dirty_skip: bool = False)` parameter.
+Only `reason_code == "dirty_checkout"`, and only when the caller opts in,
+is downgraded to a warning and treated as non-fatal. The daemon/`--once`
+call site passes `allow_dirty_skip=config.dry_run` - since `DRY_RUN`
+defaults to `"true"` (`devbot.config`), only a deployment that has
+explicitly set `DRY_RUN=false` (opted into real writes) keeps the gate
+unconditionally strict. Every other `reason_code` stays fatal regardless of
+dry-run, since those indicate a more serious problem (wrong branch,
+network failure, ...) an operator should see immediately rather than run
+past silently. `devbot doctor` (without `--ci`) is deliberately *not*
+given this bypass - its job is accurate diagnosis, not convenience, so it
+keeps reporting a dirty checkout strictly.
+
+Two related, independently-discovered safety gaps in the same Phase A/B0-1
+investigation were fixed in the same pass:
+
+- **`WorktreeManager` had no `dry_run` awareness at all** (every sibling
+  service in `devbot.main`'s startup wiring - `DeliveryService`,
+  `ReworkService`, `ReviewService`, `IssueStateWriter`, `TimelineService` -
+  already receives `dry_run=config.dry_run`; `WorktreeManager` was the one
+  outlier). Its `_sync_task_branch_with_main()` could run a real `git
+  rebase` and, if that moved HEAD, a real `git push --force-with-lease` to
+  the remote Task branch - regardless of `dry_run` - for REWORK jobs and
+  IMPLEMENT jobs with an already-existing linked PR. Fixed by adding
+  `dry_run: bool = False` to `WorktreeManager` and returning before the
+  rebase (mirroring `DeliveryService.deliver()`'s existing precedent: run
+  the non-mutating checks for real, then stop before the first local
+  mutation under dry_run).
+- **Timeline `dev:start`/`dev:end` pairing ignored `dry_run`.**
+  `TimelineService`'s only `dry_run` check gates the final GitHub comment
+  write; the "end without a matching start" validation ran unconditionally
+  against freshly-fetched real state. Since `dry_run` also silently
+  suppresses `start()`'s own write, a dry-run `start()`→`end()` pair always
+  logged a spurious `TimelineMissingStartError` warning (via `safe_end`,
+  which swallows it - never a functional bug, just log noise on every
+  dry-run cycle). Fixed by guarding only the `raise` itself with `if not
+  self.dry_run`, not the whole pairing block, so a dry-run `end()` against
+  an Issue with *real* prior history still correctly honors the existing
+  idempotent-duplicate-end passthrough above it.

@@ -360,11 +360,29 @@ def _restart_after_startup_update(final_sha: str) -> None:
     os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
 
 
-def _run_startup_self_update(config: DevBotConfig, logger: logging.Logger) -> bool:
+def _run_startup_self_update(
+    config: DevBotConfig, logger: logging.Logger, *, allow_dirty_skip: bool = False
+) -> bool:
     try:
         results = run_startup_self_update(config)
     except StartupSelfUpdateError as exc:
         result = exc.result
+        # CP-B0-1: only a dirty *operator checkout* is safe to treat as
+        # non-fatal, and only when the caller opted in (daemon/--once under
+        # --dry-run) - a developer's uncommitted local edits shouldn't stop
+        # a supervised, no-real-effects run. Every other reason_code (wrong
+        # branch, fetch/switch/pull failure, ...) stays fatal regardless,
+        # since those indicate a more serious problem an operator should see
+        # immediately rather than silently run past.
+        if allow_dirty_skip and result.reason_code == "dirty_checkout":
+            logger.warning(
+                "startup self-update skipped: dirty operator checkout allowed under "
+                "dry-run (repository=%s current_sha=%s skip_reason=%s)",
+                result.repository,
+                result.current_sha,
+                result.skip_reason,
+            )
+            return True
         logger.error(
             "startup self-update failed: repository=%s current_sha=%s latest_sha=%s "
             "final_sha=%s result=%s skip_reason=%s",
@@ -430,7 +448,9 @@ def main(
     try:
         with ProcessLock(config.lock_file):
             log_startup(logger, config)
-            if config.enabled_repositories and not _run_startup_self_update(config, logger):
+            if config.enabled_repositories and not _run_startup_self_update(
+                config, logger, allow_dirty_skip=config.dry_run
+            ):
                 return 1
             # Task 019 CP-019-4: informational only (see
             # `devbot.startup`'s module docstring) - the two genuinely
@@ -452,7 +472,9 @@ def main(
             # REWORK Job runs in its own isolated Git worktree under
             # `config.workspace_root`, resolved and synchronized by DevBot
             # itself before the Agent ever runs (see `devbot.worktree`).
-            worktree_manager = WorktreeManager(workspace_root=config.workspace_root)
+            worktree_manager = WorktreeManager(
+                workspace_root=config.workspace_root, dry_run=config.dry_run
+            )
             # Task 024: automatic Timeline recording. `dry_run=config.dry_run`
             # (not the manual `timeline` CLI's own `False` default - see
             # `_run_timeline_command` above) so automatic writes obey the

@@ -412,6 +412,43 @@ def test_timeline_rejects_end_without_start() -> None:
     assert backend.comments == {}
 
 
+def test_timeline_end_without_start_does_not_raise_under_dry_run() -> None:
+    """CP-B0-1 regression: dry_run suppresses start()'s own write (same
+    gate as end()'s), so a missing pairing here reflects that suppression,
+    not a genuine inconsistency - must not raise."""
+    backend = _FakeGitHubBackend(issue_number=34, labels=["devbot:working"])
+    service, _read_session, write_session = _service(
+        backend, clock=datetime(2026, 7, 15, 9, 30, tzinfo=UTC), dry_run=True
+    )
+
+    outcome = service.end(_repository(), 34, phase="review", actor="codex", result="merge-ready")
+
+    assert not outcome.idempotent
+    write_session.post.assert_not_called()
+    write_session.patch.assert_not_called()
+    assert backend.comments == {}
+
+
+def test_dry_run_safe_start_end_pair_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    """Reproduces the originally-observed bug directly through
+    safe_start/safe_end: a dry-run dev:start followed by dev:end must not
+    log a "대응하는 시작 이벤트가 없어" warning."""
+    backend = _FakeGitHubBackend(issue_number=42, labels=["devbot:working"])
+    clock = datetime(2026, 7, 16, 9, 0, tzinfo=UTC)
+    service, _read_session, write_session = _service(backend, clock=clock, dry_run=True)
+    logger = logging.getLogger("devbot-test-dry-run-pairing")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        safe_start(service, _repository(), 42, phase="dev", actor="claude", logger=logger)
+        safe_end(
+            service, _repository(), 42, phase="dev", actor="claude", result="pushed",
+            logger=logger,
+        )
+
+    assert caplog.records == []
+    write_session.post.assert_not_called()
+
+
 # --- CP-018-10 -------------------------------------------------------------
 
 

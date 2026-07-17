@@ -82,6 +82,7 @@ def test_startup_rejects_dirty_main_checkout(tmp_path: Path) -> None:
         run_startup_self_update(_config(repo, tmp_path), operator_checkout=operator)
 
     assert "dirty" in exc_info.value.result.skip_reason
+    assert exc_info.value.result.reason_code == "dirty_checkout"
 
 
 def test_startup_uses_ff_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,8 +121,10 @@ def test_startup_failure_prevents_doctor_planner_and_agent_execution(tmp_path: P
     repo, _origin, operator = _repo_with_origin(tmp_path)
     _run_git("checkout", "-q", "-b", "task/not-main", cwd=operator)
 
-    with pytest.raises(StartupSelfUpdateError):
+    with pytest.raises(StartupSelfUpdateError) as exc_info:
         run_startup_self_update(_config(repo, tmp_path), operator_checkout=operator)
+
+    assert exc_info.value.result.reason_code == "wrong_branch"
 
 
 def test_startup_runs_doctor_after_successful_main_update(tmp_path: Path) -> None:

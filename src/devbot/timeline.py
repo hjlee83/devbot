@@ -582,10 +582,19 @@ class TimelineService:
                     tz=self.tz,
                 )
                 return TimelineOutcome(status_card=card, idempotent=True)
-            raise TimelineMissingStartError(
-                f"Issue #{issue_number} phase={phase} cycle={cycle}에 대응하는 "
-                "시작(start) 이벤트가 없어 종료를 기록할 수 없습니다"
-            )
+            if not self.dry_run:
+                raise TimelineMissingStartError(
+                    f"Issue #{issue_number} phase={phase} cycle={cycle}에 대응하는 "
+                    "시작(start) 이벤트가 없어 종료를 기록할 수 없습니다"
+                )
+            # CP-B0-1: under dry_run, start()'s own write is suppressed
+            # below (the `if not self.dry_run` gate ahead), so a "missing
+            # start" here reflects that suppression, not a genuine
+            # inconsistency - fall through and render a preview card as if
+            # the pairing were valid, instead of raising. The idempotent
+            # duplicate-end passthrough above this block is untouched, so a
+            # dry-run end() against an Issue with *real* prior history still
+            # honors it.
 
         new_event = TimelineEvent(
             issue=issue_number,

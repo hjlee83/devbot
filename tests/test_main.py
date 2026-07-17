@@ -7,7 +7,11 @@ import pytest
 from devbot.lock import ProcessLock
 from devbot.main import _run_startup_self_update, main
 from devbot.models import DevBotConfig
-from devbot.startup import STARTUP_SELF_UPDATE_ENV, StartupSelfUpdateResult
+from devbot.startup import (
+    STARTUP_SELF_UPDATE_ENV,
+    StartupSelfUpdateError,
+    StartupSelfUpdateResult,
+)
 
 
 def _config(tmp_path: Path) -> DevBotConfig:
@@ -140,6 +144,100 @@ def test_startup_update_does_not_restart_twice(
         assert _run_startup_self_update(_config(tmp_path), logging.getLogger("test")) is True
 
     mock_exec.assert_not_called()
+
+
+def test_dirty_checkout_is_bypassed_when_allow_dirty_skip_and_reason_is_dirty(
+    tmp_path: Path,
+) -> None:
+    """CP-B0-1: a dirty *operator checkout* is the one reason_code safe to
+    treat as non-fatal, and only when the caller explicitly opts in."""
+    result = StartupSelfUpdateResult(
+        repository=str(tmp_path),
+        current_sha="abc",
+        latest_sha="",
+        final_sha="abc",
+        result="failed",
+        skip_reason="operator checkout dirty",
+        reason_code="dirty_checkout",
+    )
+
+    with patch("devbot.main.run_startup_self_update", side_effect=StartupSelfUpdateError(result)):
+        outcome = _run_startup_self_update(
+            _config(tmp_path), logging.getLogger("test"), allow_dirty_skip=True
+        )
+
+    assert outcome is True
+
+
+def test_other_reason_codes_stay_fatal_even_with_allow_dirty_skip(tmp_path: Path) -> None:
+    """Only `dirty_checkout` is bypassable - a wrong-branch/fetch/pull
+    failure indicates a more serious problem and must still stop the run."""
+    result = StartupSelfUpdateResult(
+        repository=str(tmp_path),
+        current_sha="abc",
+        latest_sha="",
+        final_sha="abc",
+        result="failed",
+        skip_reason="current branch is not main: task/not-main",
+        reason_code="wrong_branch",
+    )
+
+    with patch("devbot.main.run_startup_self_update", side_effect=StartupSelfUpdateError(result)):
+        outcome = _run_startup_self_update(
+            _config(tmp_path), logging.getLogger("test"), allow_dirty_skip=True
+        )
+
+    assert outcome is False
+
+
+def test_dirty_checkout_stays_fatal_when_allow_dirty_skip_is_not_set(tmp_path: Path) -> None:
+    """Backward compatibility: omitting `allow_dirty_skip` (its default is
+    False) preserves the pre-CP-B0-1 strict behavior."""
+    result = StartupSelfUpdateResult(
+        repository=str(tmp_path),
+        current_sha="abc",
+        latest_sha="",
+        final_sha="abc",
+        result="failed",
+        skip_reason="operator checkout dirty",
+        reason_code="dirty_checkout",
+    )
+
+    with patch("devbot.main.run_startup_self_update", side_effect=StartupSelfUpdateError(result)):
+        outcome = _run_startup_self_update(_config(tmp_path), logging.getLogger("test"))
+
+    assert outcome is False
+
+
+def test_once_daemon_path_passes_dry_run_as_allow_dirty_skip(tmp_path: Path) -> None:
+    """CP-B0-1 wiring: the daemon/--once call site opts into the dirty-
+    checkout bypass exactly when the run itself is a dry-run (DRY_RUN
+    defaults to "true" - see devbot.config - so only deployments that
+    explicitly set DRY_RUN=false keep the strict gate unconditionally)."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True) as mock_update,
+        patch("devbot.polling.PollingService.run_cycle", return_value=()),
+    ):
+        exit_code = main(
+            ["--once", "--dry-run"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    assert mock_update.call_args.kwargs["allow_dirty_skip"] is True
 
 
 def test_doctor_ci_skips_startup_self_update(tmp_path: Path) -> None:

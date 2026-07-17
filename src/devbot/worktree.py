@@ -314,6 +314,11 @@ class WorktreeManager:
 
     workspace_root: Path
     is_dirty: Callable[[Path], bool] = field(default=_is_dirty)
+    # CP-B0-1: mirrors every sibling service's `dry_run` constructor kwarg
+    # (DeliveryService, ReworkService, ReviewService, ...). Guards
+    # `_sync_task_branch_with_main`'s rebase+force-push - previously the one
+    # write path in this codebase with no dry_run awareness at all.
+    dry_run: bool = False
 
     def worktree_path(self, repository: RepositoryConfig, issue_number: int) -> Path:
         return self.worktree_root(repository) / f"issue-{issue_number}"
@@ -479,6 +484,12 @@ class WorktreeManager:
                 f"prepared worktree at {target} has uncommitted or untracked changes; "
                 "refusing to rebase or overwrite",
             )
+        if self.dry_run:
+            # CP-B0-1: mirrors DeliveryService.deliver()'s dry_run precedent
+            # - the non-mutating checks above still ran for real, but stop
+            # here, before the first local mutation (rebase), let alone the
+            # remote one (force-push).
+            return
         before = _git_stdout(target, "rev-parse", "HEAD")
         completed = _run_git(target, "rebase", f"origin/{base_branch}")
         if completed.returncode != 0:

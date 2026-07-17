@@ -76,6 +76,11 @@ class StartupSelfUpdateResult:
     final_sha: str
     result: str
     skip_reason: str = ""
+    # CP-B0-1: a stable, machine-matchable code for why self-update failed
+    # (skip_reason is free text for logs/humans). Lets a caller decide
+    # per-reason whether a failure is safe to treat as non-fatal (e.g. a
+    # dirty operator checkout under --dry-run) without parsing prose.
+    reason_code: str = ""
 
 
 class StartupSelfUpdateError(RuntimeError):
@@ -135,10 +140,17 @@ def startup_self_update_operator(
             final_sha="",
             result="failed",
             skip_reason=f"current SHA 확인 실패: {exc}",
+            reason_code="current_sha_failed",
         )
         raise StartupSelfUpdateError(result) from exc
 
-    def _fail(reason: str, *, latest_sha: str = "", final_sha: str | None = None) -> None:
+    def _fail(
+        reason: str,
+        *,
+        reason_code: str,
+        latest_sha: str = "",
+        final_sha: str | None = None,
+    ) -> None:
         raise StartupSelfUpdateError(
             StartupSelfUpdateResult(
                 repository=repository_name,
@@ -147,34 +159,46 @@ def startup_self_update_operator(
                 final_sha=final_sha if final_sha is not None else current_sha,
                 result="failed",
                 skip_reason=reason,
+                reason_code=reason_code,
             )
         )
 
     status = _git(path, "status", "--porcelain")
     if status.returncode != 0:
-        _fail(f"status 확인 실패: {status.stderr or status.stdout}")
+        _fail(
+            f"status 확인 실패: {status.stderr or status.stdout}",
+            reason_code="status_check_failed",
+        )
     dirty_lines = [
         line for line in status.stdout.splitlines() if not line.startswith("?? .worktrees/")
     ]
     if dirty_lines:
-        _fail("operator checkout dirty")
+        _fail("operator checkout dirty", reason_code="dirty_checkout")
 
     branch = _git_text(path, "rev-parse", "--abbrev-ref", "HEAD")
     if branch != default_branch:
-        _fail(f"current branch is not {default_branch}: {branch}")
+        _fail(f"current branch is not {default_branch}: {branch}", reason_code="wrong_branch")
 
     fetch = _git(path, "fetch", "origin", default_branch)
     if fetch.returncode != 0:
-        _fail(f"fetch failed: {fetch.stderr or fetch.stdout}")
+        _fail(f"fetch failed: {fetch.stderr or fetch.stdout}", reason_code="fetch_failed")
     latest_sha = _git_text(path, "rev-parse", f"origin/{default_branch}")
 
     switch = _git(path, "switch", default_branch)
     if switch.returncode != 0:
-        _fail(f"switch main failed: {switch.stderr or switch.stdout}", latest_sha=latest_sha)
+        _fail(
+            f"switch main failed: {switch.stderr or switch.stdout}",
+            reason_code="switch_failed",
+            latest_sha=latest_sha,
+        )
 
     pull = _git(path, "pull", "--ff-only", "origin", default_branch)
     if pull.returncode != 0:
-        _fail(f"ff-only pull failed: {pull.stderr or pull.stdout}", latest_sha=latest_sha)
+        _fail(
+            f"ff-only pull failed: {pull.stderr or pull.stdout}",
+            reason_code="pull_failed",
+            latest_sha=latest_sha,
+        )
 
     final_sha = _git_text(path, "rev-parse", "HEAD")
     return StartupSelfUpdateResult(
