@@ -134,14 +134,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - os_name: macos
-            architecture: arm64
-          - os_name: macos
-            architecture: x86_64
-          - os_name: linux
-            architecture: x86_64
-          - os_name: linux
-            architecture: arm64
+          - os_name: portable
+            architecture: python
     steps:
       - uses: actions/checkout@v5
       - name: Install uv

@@ -27,6 +27,7 @@ def _build(args: argparse.Namespace) -> int:
         version=args.version,
         os_name=args.os_name,
         architecture=args.architecture,
+        project_root=args.project_root,
     )
     return 0
 
@@ -162,6 +163,7 @@ def main() -> int:
     build.add_argument("--os-name", required=True)
     build.add_argument("--architecture", required=True)
     build.add_argument("--output-dir", required=True)
+    build.add_argument("--project-root", default=".")
     build.set_defaults(func=_build)
 
     manifest = subparsers.add_parser("checksum-manifest")

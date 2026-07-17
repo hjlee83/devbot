@@ -6,7 +6,9 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import re
+import stat
 import tarfile
 import tomllib
 from collections.abc import Iterable
@@ -25,12 +27,7 @@ RELEASE_LABELS: dict[str, ReleaseIncrement] = {
     "release:major": "major",
     "release:none": "none",
 }
-SUPPORTED_PLATFORMS: tuple[tuple[str, str], ...] = (
-    ("macos", "arm64"),
-    ("macos", "x86_64"),
-    ("linux", "x86_64"),
-    ("linux", "arm64"),
-)
+SUPPORTED_PLATFORMS: tuple[tuple[str, str], ...] = (("portable", "python"),)
 _SEMVER_RE = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$")
 
 
@@ -130,6 +127,10 @@ class ReleasePlan:
 
 
 def authoritative_version(project_root: Path | str | None = None) -> str:
+    release_version = os.environ.get("DEVBOT_RELEASE_VERSION")
+    if release_version:
+        SemanticVersion.parse(release_version)
+        return release_version
     if project_root is None:
         return metadata.version(PRODUCT_NAME)
     pyproject = Path(project_root) / VERSION_SOURCE
@@ -187,9 +188,30 @@ def build_metadata(version: str, os_name: str, architecture: str) -> dict[str, s
     return {
         "product": PRODUCT_NAME,
         "version": version,
+        "package_version": version,
+        "artifact_contract": "portable-python-source",
         "os": os_name,
         "architecture": architecture,
     }
+
+
+def _launcher_script(version: str) -> bytes:
+    script = f"""#!/usr/bin/env sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+export DEVBOT_RELEASE_VERSION="{version}"
+export PYTHONPATH="$ROOT_DIR/lib${{PYTHONPATH:+:$PYTHONPATH}}"
+exec "${{PYTHON:-python3}}" -c 'from devbot.main import main; raise SystemExit(main())' "$@"
+"""
+    return script.encode()
+
+
+def _iter_package_files(project_root: Path) -> Iterable[tuple[Path, str]]:
+    package_root = project_root / "src" / "devbot"
+    for path in sorted(package_root.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            yield path, f"devbot-release/lib/devbot/{path.relative_to(package_root)}"
 
 
 def build_artifact(
@@ -198,8 +220,10 @@ def build_artifact(
     version: str,
     os_name: str,
     architecture: str,
+    project_root: Path | str = ".",
 ) -> Artifact:
     name = release_artifact_name(version, os_name, architecture)
+    project_root = Path(project_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / name
     metadata_bytes = json.dumps(
@@ -207,7 +231,6 @@ def build_artifact(
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    version_script = f"#!/usr/bin/env sh\nprintf 'devbot {version}\\n'\n".encode()
 
     with (
         path.open("wb") as raw,
@@ -221,7 +244,15 @@ def build_artifact(
         tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive,
     ):
         _add_bytes(archive, "devbot-release/metadata.json", metadata_bytes)
-        _add_bytes(archive, "devbot-release/bin/devbot", version_script, mode=0o755)
+        _add_bytes(archive, "devbot-release/bin/devbot", _launcher_script(version), mode=0o755)
+        _add_bytes(
+            archive,
+            "devbot-release/pyproject.toml",
+            (project_root / "pyproject.toml").read_bytes(),
+        )
+        for source, archive_name in _iter_package_files(project_root):
+            mode = stat.S_IMODE(source.stat().st_mode) or 0o644
+            _add_bytes(archive, archive_name, source.read_bytes(), mode=mode)
     return Artifact(name=name, path=path, os_name=os_name, architecture=architecture)
 
 

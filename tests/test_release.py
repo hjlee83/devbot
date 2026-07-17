@@ -56,7 +56,7 @@ def test_runtime_and_package_version_use_authoritative_version_source(
 
 def test_release_tag_and_embedded_version_must_match(tmp_path: Path) -> None:
     version = authoritative_version(Path.cwd())
-    artifact = build_artifact(tmp_path, version=version, os_name="linux", architecture="x86_64")
+    artifact = build_artifact(tmp_path, version=version, os_name="portable", architecture="python")
 
     assert SemanticVersion.parse_tag(f"v{version}") == SemanticVersion.parse(version)
     with tarfile.open(artifact.path) as archive:
@@ -151,16 +151,16 @@ def test_duplicate_tag_or_release_is_rejected_without_mutation() -> None:
 
 def test_release_artifact_names_are_deterministic() -> None:
     assert expected_artifact_names("0.2.0") == (
-        "devbot-0.2.0-macos-arm64.tar.gz",
-        "devbot-0.2.0-macos-x86_64.tar.gz",
-        "devbot-0.2.0-linux-x86_64.tar.gz",
-        "devbot-0.2.0-linux-arm64.tar.gz",
+        "devbot-0.2.0-portable-python.tar.gz",
     )
-    assert release_artifact_name("0.2.0", "linux", "arm64") == "devbot-0.2.0-linux-arm64.tar.gz"
+    assert (
+        release_artifact_name("0.2.0", "portable", "python")
+        == "devbot-0.2.0-portable-python.tar.gz"
+    )
 
 
 def test_packaged_cli_reports_release_version(tmp_path: Path) -> None:
-    artifact = build_artifact(tmp_path, version="0.2.0", os_name="linux", architecture="arm64")
+    artifact = build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
     extract_dir = tmp_path / "extract"
     with tarfile.open(artifact.path) as archive:
         archive.extractall(extract_dir, filter="data")
@@ -170,22 +170,47 @@ def test_packaged_cli_reports_release_version(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert completed.returncode == 0
+    assert completed.returncode == 0, completed.stderr
     assert completed.stdout == "devbot 0.2.0\n"
+    help_completed = subprocess.run(
+        [str(extract_dir / "devbot-release" / "bin" / "devbot"), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert help_completed.returncode == 0, help_completed.stderr
+    assert "--once" in help_completed.stdout
 
+
+
+def test_release_artifact_contains_real_package_code(tmp_path: Path) -> None:
+    artifact = build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
+
+    with tarfile.open(artifact.path) as archive:
+        names = set(archive.getnames())
+
+    assert "devbot-release/lib/devbot/main.py" in names
+    assert "devbot-release/lib/devbot/release.py" in names
+    assert "devbot-release/pyproject.toml" in names
+
+
+def test_release_version_override_unifies_runtime_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVBOT_RELEASE_VERSION", "0.2.0")
+
+    assert authoritative_version() == "0.2.0"
 
 def test_release_artifact_generation_is_reproducible(tmp_path: Path) -> None:
     first = build_artifact(
         tmp_path / "first",
         version="0.2.0",
-        os_name="linux",
-        architecture="x86_64",
+        os_name="portable",
+        architecture="python",
     )
     second = build_artifact(
         tmp_path / "second",
         version="0.2.0",
-        os_name="linux",
-        architecture="x86_64",
+        os_name="portable",
+        architecture="python",
     )
 
     assert first.path.read_bytes() == second.path.read_bytes()
@@ -193,13 +218,7 @@ def test_release_artifact_generation_is_reproducible(tmp_path: Path) -> None:
 
 def test_checksum_manifest_covers_every_release_artifact(tmp_path: Path) -> None:
     artifacts = [
-        build_artifact(tmp_path, version="0.2.0", os_name=os_name, architecture=arch)
-        for os_name, arch in (
-            ("macos", "arm64"),
-            ("macos", "x86_64"),
-            ("linux", "x86_64"),
-            ("linux", "arm64"),
-        )
+        build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
     ]
     manifest = checksum_manifest(artifacts, expected_names=expected_artifact_names("0.2.0"))
 
@@ -209,10 +228,7 @@ def test_checksum_manifest_covers_every_release_artifact(tmp_path: Path) -> None
 
 def test_checksum_manifest_is_deterministic(tmp_path: Path) -> None:
     artifacts = [
-        build_artifact(tmp_path, version="0.2.0", os_name="linux", architecture="arm64"),
-        build_artifact(tmp_path, version="0.2.0", os_name="macos", architecture="arm64"),
-        build_artifact(tmp_path, version="0.2.0", os_name="linux", architecture="x86_64"),
-        build_artifact(tmp_path, version="0.2.0", os_name="macos", architecture="x86_64"),
+        build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
     ]
     expected = expected_artifact_names("0.2.0")
 
@@ -268,8 +284,8 @@ def test_safe_summary_fixture_contains_audit_fields_without_credentials() -> Non
             increment="patch",
             new_version="0.1.1",
             tag="v0.1.1",
-            artifact_names=("devbot-0.1.1-linux-arm64.tar.gz",),
-            checksums=("abc  devbot-0.1.1-linux-arm64.tar.gz",),
+            artifact_names=("devbot-0.1.1-portable-python.tar.gz",),
+            checksums=("abc  devbot-0.1.1-portable-python.tar.gz",),
             release_url="https://github.com/hjlee83/devbot/releases/tag/v0.1.1",
         )
     )
@@ -303,10 +319,7 @@ def test_release_workflow_matrix_and_manual_dispatch_are_declared() -> None:
     matrix = workflow["jobs"]["build-artifacts"]["strategy"]["matrix"]["include"]
 
     assert matrix == [
-        {"os_name": "macos", "architecture": "arm64"},
-        {"os_name": "macos", "architecture": "x86_64"},
-        {"os_name": "linux", "architecture": "x86_64"},
-        {"os_name": "linux", "architecture": "arm64"},
+        {"os_name": "portable", "architecture": "python"},
     ]
     assert workflow[True]["workflow_dispatch"]["inputs"]["increment"]["options"] == [
         "patch",

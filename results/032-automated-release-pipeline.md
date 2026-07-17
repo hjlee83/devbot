@@ -13,7 +13,7 @@
 - 권위 버전 소스는 `pyproject.toml`의 `[project].version`이다. 설치된 CLI는 package metadata를 읽고, source-tree release tooling은 같은 값을 `pyproject.toml`에서 읽는다.
 - 릴리스 정책은 GitHub API 호출과 분리된 pure helper로 작성했다. tag 중복, release 중복, semantic version 계산, artifact naming, checksum manifest, release notes를 로컬 테스트로 검증할 수 있다.
 - `plan-release`는 merge commit에 연결된 PR metadata와 기존 stable Release 목록을 입력으로 사용한다. `release:none`은 publish=false로 종료하고, 누락/충돌 release label은 fail-closed로 처리한다.
-- Artifact naming contract는 `devbot-<version>-<os>-<architecture>.tar.gz`로 고정했다.
+- Artifact naming contract는 `devbot-<version>-portable-python.tar.gz`로 고정했다.
 - Artifact는 현재 Task 033의 launcher/updater가 소비할 metadata와 `bin/devbot --version` fixture를 포함하는 deterministic tarball로 구성했다. gzip/tar metadata 시간을 고정해 동일 입력의 artifact byte가 재현된다.
 
 ## 수정 파일
@@ -35,7 +35,7 @@
 | CP-032-3 next version | `test_next_semantic_version_is_calculated_from_latest_stable_tag`, `test_prerelease_draft_and_malformed_tags_are_ignored`, `test_release_plan_uses_pr_label_and_latest_stable_release` |
 | CP-032-4 validation gate | `test_release_workflow_structure_enforces_validation_before_publication`; workflow `publish-release` needs `validate-main` |
 | CP-032-5 safe tag/release | `test_release_tag_targets_validated_main_commit`, `test_duplicate_tag_or_release_is_rejected_without_mutation` |
-| CP-032-6 artifacts | `test_release_artifact_names_are_deterministic`, `test_release_artifact_generation_is_reproducible`; workflow matrix covers macOS/Linux arm64/x86_64 |
+| CP-032-6 artifacts | `test_release_artifact_names_are_deterministic`, `test_release_artifact_generation_is_reproducible`; workflow matrix covers portable Python |
 | CP-032-7 embedded metadata | `test_packaged_cli_reports_release_version` |
 | CP-032-8 checksum manifest | `test_checksum_manifest_covers_every_release_artifact`, `test_checksum_manifest_is_deterministic` |
 | CP-032-9 atomic publication | workflow verifies artifacts/checksums before `gh release create --draft`, then publishes with `gh release edit --draft=false` |
@@ -61,6 +61,26 @@ Regression evidence:
 - `tests/test_agent_execution.py::test_agent_execution_diagnostics_are_complete_and_redacted`
 - `tests/test_doctor.py::test_doctor_checks_claude_auth_with_launcher_environment`
 
+## Release Artifact Contract Rework
+
+재리뷰 Blocker 대응으로 Release asset 계약을 platform-specific native binary에서 portable Python artifact로 수정했다.
+
+- `SUPPORTED_PLATFORMS`는 `portable/python` 단일 artifact 계약으로 정리했다.
+- artifact 이름은 `devbot-<version>-portable-python.tar.gz`이다.
+- artifact 내부에는 실제 `src/devbot` package code, `pyproject.toml`, `metadata.json`, `bin/devbot` launcher가 포함된다.
+- launcher는 `DEVBOT_RELEASE_VERSION`과 `PYTHONPATH`를 설정한 뒤 `devbot.main.main()`을 실행하므로 `--version`뿐 아니라 실제 CLI parser/code path를 사용한다.
+- `authoritative_version()`은 release artifact 안에서는 `DEVBOT_RELEASE_VERSION`을 우선해 Release tag, artifact metadata, runtime `devbot --version`을 일치시킨다.
+- workflow는 가짜 portable Python matrix를 제거하고 portable artifact 1개를 build한다.
+- workflow build 단계는 artifact를 추출한 뒤 `bin/devbot --version`과 `bin/devbot --help` smoke를 실행한다.
+
+Evidence:
+
+- `test_release_artifact_names_are_deterministic`
+- `test_release_artifact_contains_real_package_code`
+- `test_release_version_override_unifies_runtime_version`
+- `test_packaged_cli_reports_release_version`
+- `test_release_workflow_matrix_and_manual_dispatch_are_declared`
+
 ## Validation 결과
 
 - `UV_CACHE_DIR=/tmp/devbot-uv-cache uv sync`: PASS
@@ -75,10 +95,8 @@ Regression evidence:
 - `scripts/release_pipeline.py plan` fixture: PASS
   - previous version `0.2.0`, `release:patch` PR metadata → new version `0.2.1`, tag `v0.2.1`
 - 대표 artifact 생성: PASS
-  - `devbot-0.2.0-macos-arm64.tar.gz`
-  - `devbot-0.2.0-macos-x86_64.tar.gz`
-  - `devbot-0.2.0-linux-x86_64.tar.gz`
-  - `devbot-0.2.0-linux-arm64.tar.gz`
+  - `devbot-0.2.0-portable-python.tar.gz`
+  - 추출 후 `bin/devbot --version` 및 `bin/devbot --help` smoke 검증
 - checksum manifest 생성: PASS
   - 모든 4개 artifact의 SHA-256 항목 생성 확인
 - release-note generation: PASS
