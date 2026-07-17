@@ -75,8 +75,7 @@
 - `uv run ruff check .` PASS
 - `uv run pytest` PASS: 461 passed
 - `uv run devbot doctor` PASS
-- `uv run devbot --once --dry-run` PASS: `NO_RUNNABLE_TASK` / `skipped_active_task` (Issue #62는 `devbot:rework` 상태였지만 처리 가능한 unprocessed rework 후보가 없어 dry-run으로 안전 종료)
-- Post-label `uv run devbot --once --dry-run` LIMITATION: Issue #62를 `devbot:review`로 전환한 뒤 현재 Codex 세션의 filesystem sandbox가 로컬 Git metadata 쓰기를 막아 로컬 HEAD를 원격 최종 commit으로 이동하지 못했고, 그 때문에 canonical worktree가 local dirty로 감지되어 review workspace preparation이 `workspace_dirty`로 중단되었다. 원격 PR #63 head는 최종 commit으로 갱신되었고 Issue label은 `devbot:review`다.
+- `uv run devbot --once --dry-run` PASS: `REVIEW`. REVIEW 준비에서 repository-local `.worktrees` PreparedWorkspace를 사용했고, `git merge-tree --write-tree origin/main HEAD` integration validation이 `mergeable=True`를 보고한 뒤 reviewer dry-run으로 안전 종료했다.
 
 ## 수동 검증 결과
 
