@@ -33,6 +33,7 @@
 
 - `UV_CACHE_DIR=/private/tmp/devbot-task035-uv-cache uv run ruff check .`: PASS
 - `UV_CACHE_DIR=/private/tmp/devbot-task035-uv-cache uv run pytest`: PASS, 562 passed in 166.12s
+- GitHub CI `verify`: PASS, run https://github.com/hjlee83/devbot/actions/runs/29632449387
 
 ## 수동 검증 결과
 
