@@ -272,3 +272,23 @@
       않는다. Issue 존재 여부로 멱등성을 보장해 부분 실패 후 재시도해도
       중복 생성하지 않는다(`src/devbot/goal_executor.py`,
       `results/040-goal-executor.md`).
+- [x] Task 041: role dispatch and agent registry. 직접 Agent 이름을
+      dispatch하던 방식을 Role 기반 dispatch로 바꾼다 - DevBot은
+      "implementer"/"reviewer" 같은 Role만 알고, 실제 Claude/Codex/GPT/
+      Gemini 이름은 절대 dispatch 호출부에 하드코딩하지 않는다. 새
+      `src/devbot/agent_registry.py`가 Role/Capability/Agent(레지스트리
+      항목)/Router(`resolve_agent`, priority routing만 구현, 동점은 id
+      오름차순으로 결정론적 처리)를 분리한다. 선택적
+      `config/agents.yaml`이 없으면 기존 `IMPLEMENTER_AGENT`/
+      `REVIEWER_AGENT`/`DEFAULT_AGENT` 설정에서 레지스트리를 그대로
+      합성해, 파일이 없는 모든 기존 배포는 이 Task 이전과 완전히 동일하게
+      dispatch된다(`test_daemon_dispatch_backend_unchanged_without_agents_
+      registry_file`로 고정). `devbot.agents.build_agent_runner`(실행
+      백엔드)는 전혀 변경하지 않았다. 읽기 전용 `devbot role list`/
+      `devbot role resolve <role>`/`devbot agent list`/`devbot goal
+      dispatch`(Task 040의 `goal execute`와 동일하지만 Role→Agent 해석을
+      함께 보여줌, Agent를 실제로 호출하지 않음)를 추가했다. Admin UI/
+      Auto routing/capability scoring/비용 최적화/부하 분산/다중 Agent
+      dispatch는 이번에 구현하지 않고, 나중에 API를 바꾸지 않고 추가할 수
+      있는 추상화만 만들었다(`src/devbot/agent_registry.py`,
+      `results/041-role-dispatch.md`).

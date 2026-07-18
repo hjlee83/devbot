@@ -24,6 +24,13 @@ from pathlib import Path
 
 from devbot.agent_execution import AgentExecutionContext
 from devbot.agent_outcome import AgentOutcomeError, classify_agent_outcome
+from devbot.agent_registry import (
+    AgentRegistryError,
+    RoutingError,
+    list_roles,
+    load_agent_registry,
+    resolve_agent,
+)
 from devbot.agents import build_agent_runner
 from devbot.agents.base import AgentRunner, AgentSessionLimitError
 from devbot.automerge import AutomergeService
@@ -226,17 +233,38 @@ def _build_goal_parser(subparsers: argparse._SubParsersAction) -> None:
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
 
-    execute_parser = goal_subparsers.add_parser(
+    _build_goal_execute_style_parser(
+        goal_subparsers,
         "execute",
         help=(
             "Task 038 계획에서 승인된 Task 하나만 Issue/Branch/초안 Contract로 "
             "구체화합니다. PR 생성이나 구현 Agent 호출은 하지 않습니다."
         ),
     )
-    execute_parser.add_argument(
+    # Task 041: identical behavior to `execute` (same underlying
+    # `execute_goal()` call, same Issue/Branch/Contract-only boundary) -
+    # "dispatch" additionally reports which Agent the Router would resolve
+    # for the "implementer" Role, so the Role-based routing this Task adds
+    # is visible end-to-end through the Goal Executor CLI without ever
+    # invoking that Agent.
+    _build_goal_execute_style_parser(
+        goal_subparsers,
+        "dispatch",
+        help=(
+            "goal execute와 동일하지만, 'implementer' Role이 어떤 Agent로 라우팅될지도 "
+            "함께 보여줍니다 (Agent를 실제로 호출하지는 않습니다)."
+        ),
+    )
+
+
+def _build_goal_execute_style_parser(
+    goal_subparsers: argparse._SubParsersAction, name: str, *, help: str
+) -> None:
+    parser = goal_subparsers.add_parser(name, help=help)
+    parser.add_argument(
         "goal", help='실행할 Goal 문장. devbot goal plan과 동일한 계획을 다시 계산합니다.'
     )
-    execute_parser.add_argument(
+    parser.add_argument(
         "--task",
         type=int,
         default=None,
@@ -245,7 +273,7 @@ def _build_goal_parser(subparsers: argparse._SubParsersAction) -> None:
             "생략하면 Task 1이 자동 선택됩니다."
         ),
     )
-    execute_parser.add_argument(
+    parser.add_argument(
         "--confirm",
         action="store_true",
         help="실제로 Issue/Branch/초안 Contract를 생성합니다. 생략하면 계획만 보여줍니다.",
@@ -254,14 +282,38 @@ def _build_goal_parser(subparsers: argparse._SubParsersAction) -> None:
     # `release publish --dry-run` (not an independent one): whichever
     # spelling is present forces read-only regardless of `--confirm` - if
     # both are given by mistake, the safe side (no write) wins.
-    execute_parser.add_argument(
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="계산된 계획만 출력하고 --confirm과 무관하게 아무것도 쓰지 않습니다.",
     )
-    execute_parser.add_argument(
+    parser.add_argument(
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
+
+
+def _build_role_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Task 041: read-only Role -> Agent routing. DevBot dispatches only
+    Roles ("implementer", "reviewer", ...); these commands let an operator
+    inspect what the Router would resolve, without dispatching anything."""
+    role_parser = subparsers.add_parser(
+        "role", help="Role -> Agent 라우팅을 조회합니다 (읽기 전용)."
+    )
+    role_subparsers = role_parser.add_subparsers(dest="role_command", required=True)
+    role_subparsers.add_parser("list", help="설정된 모든 Role을 나열합니다.")
+    resolve_parser = role_subparsers.add_parser(
+        "resolve", help="Role이 현재 어떤 Agent로 라우팅되는지 확인합니다."
+    )
+    resolve_parser.add_argument("role", help='조회할 Role 이름. 예: "implementer"')
+
+
+def _build_agent_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Task 041: read-only Agent Registry inspection."""
+    agent_parser = subparsers.add_parser(
+        "agent", help="Agent Registry를 조회합니다 (읽기 전용)."
+    )
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command", required=True)
+    agent_subparsers.add_parser("list", help="등록된 모든 Agent를 나열합니다.")
 
 
 def _render_goal_plan(plan: GoalPlan) -> str:
@@ -345,7 +397,9 @@ def _render_execution_report(report: ExecutionReport) -> str:
     return "\n".join(lines)
 
 
-def _run_goal_execute_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+def _run_goal_execute_command(
+    args: argparse.Namespace, config: DevBotConfig, *, show_role_resolution: bool = False
+) -> int:
     try:
         repository = _resolve_repository(config, args.repo)
     except ConfigError as exc:
@@ -370,6 +424,21 @@ def _run_goal_execute_command(args: argparse.Namespace, config: DevBotConfig) ->
         return 1
 
     print(_render_execution_report(report))
+    if show_role_resolution and report.execution_plan.selected_task is not None:
+        # Task 041: read-only Role -> Agent routing info only - never
+        # invokes the resolved Agent. Reported best-effort - a misconfigured
+        # or missing Agent Registry must not hide the execution report above
+        # (which may already have written the Issue/Branch/Contract), so any
+        # RoutingError/AgentRegistryError here is shown, not raised.
+        try:
+            agent_registry = load_agent_registry(config)
+            agent = resolve_agent(agent_registry, "implementer")
+            print(
+                f"resolved_role: implementer -> agent={agent.id} (backend={agent.backend}) "
+                "[not invoked]"
+            )
+        except (AgentRegistryError, RoutingError) as exc:
+            print(f"resolved_role: implementer -> 오류: {exc}")
     if not confirm and report.execution_plan.readiness.ready:
         print(
             "\n(--confirm 없이 실행되어 아무것도 생성되지 않았습니다. "
@@ -378,9 +447,55 @@ def _run_goal_execute_command(args: argparse.Namespace, config: DevBotConfig) ->
     return 0 if report.execution_plan.readiness.ready else 1
 
 
+def _run_role_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        agent_registry = load_agent_registry(config)
+    except AgentRegistryError as exc:
+        print(f"role 오류: {exc}", file=sys.stderr)
+        return 1
+
+    if args.role_command == "list":
+        for role in list_roles(agent_registry):
+            print(role)
+        return 0
+
+    try:
+        agent = resolve_agent(agent_registry, args.role)
+    except RoutingError as exc:
+        print(f"role resolve 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"role: {args.role}")
+    print(f"resolved_agent_id: {agent.id}")
+    print(f"backend: {agent.backend}")
+    print(f"priority: {agent.priority}")
+    print(f"capabilities: {', '.join(agent.capabilities) or 'none'}")
+    return 0
+
+
+def _run_agent_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        agent_registry = load_agent_registry(config)
+    except AgentRegistryError as exc:
+        print(f"agent 오류: {exc}", file=sys.stderr)
+        return 1
+
+    for agent in agent_registry.agents:
+        status = "enabled" if agent.enabled else "disabled"
+        roles = ", ".join(agent.supported_roles) or "none"
+        capabilities = ", ".join(agent.capabilities) or "none"
+        print(
+            f"{agent.id} [{status}] backend={agent.backend} priority={agent.priority} "
+            f"roles=[{roles}] capabilities=[{capabilities}]"
+        )
+    return 0
+
+
 def _run_goal_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     if args.goal_command == "execute":
         return _run_goal_execute_command(args, config)
+    if args.goal_command == "dispatch":
+        return _run_goal_execute_command(args, config, show_role_resolution=True)
     return _run_goal_plan_command(args, config)
 
 
@@ -606,6 +721,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     _build_worktree_parser(subparsers)
     _build_release_parser(subparsers)
     _build_goal_parser(subparsers)
+    _build_role_parser(subparsers)
+    _build_agent_parser(subparsers)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help=(
@@ -854,6 +971,12 @@ def main(
     if args.command == "goal":
         return _run_goal_command(args, config)
 
+    if args.command == "role":
+        return _run_role_command(args, config)
+
+    if args.command == "agent":
+        return _run_agent_command(args, config)
+
     if args.command == "doctor":
         if not args.ci and not _run_startup_self_update(config, logger):
             return 1
@@ -875,10 +998,23 @@ def main(
             log_startup_validation(logger, run_startup_checks(config))
             write_client = GitHubWriteClient(config.github_token)
             github_client = GitHubClient(config.github_token)
-            implementer_runner = build_agent_runner(
-                config.implementer_agent, dry_run=config.dry_run
-            )
-            reviewer_runner = build_agent_runner(config.reviewer_agent, dry_run=config.dry_run)
+            # Task 041: dispatch(role) instead of dispatch(agent) - main.py
+            # asks the Router which Agent backs the "implementer"/"reviewer"
+            # Role, rather than reading `config.implementer_agent`/
+            # `.reviewer_agent` directly. `build_agent_runner` (the
+            # execution backend) is unchanged; when no `config/agents.yaml`
+            # exists, `agent_registry` is synthesized from those same two
+            # config fields, so the resolved backend - and therefore
+            # dispatch behavior - is identical to before this Task.
+            try:
+                agent_registry = load_agent_registry(config)
+                implementer_backend = resolve_agent(agent_registry, "implementer").backend
+                reviewer_backend = resolve_agent(agent_registry, "reviewer").backend
+            except (AgentRegistryError, RoutingError) as exc:
+                print(f"agent registry 오류: {exc}", file=sys.stderr)
+                return 1
+            implementer_runner = build_agent_runner(implementer_backend, dry_run=config.dry_run)
+            reviewer_runner = build_agent_runner(reviewer_backend, dry_run=config.dry_run)
             state_writer = IssueStateWriter(
                 client=write_client, dry_run=config.dry_run, logger=logger
             )
