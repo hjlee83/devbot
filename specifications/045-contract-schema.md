@@ -77,18 +77,23 @@ Not specified in the Task Contract.
 
 ## Required Behaviour
 
-A Contract conforming to Schema v1 must define these areas:
+A Contract conforming to Schema v1 must define these required areas:
 
 1. Schema version
-2. Task identity
-3. Contract metadata
-4. Goal and context
-5. Scope and out-of-scope boundaries
-6. Deliverables
-7. Acceptance criteria
-8. Quality gates
-9. Handoff instructions
-10. References and provenance
+2. Provenance
+3. Task identity
+4. Contract metadata
+5. Goal and context
+6. Scope and out-of-scope boundaries
+7. Deliverables
+8. Acceptance criteria
+9. Quality gates
+10. Handoff instructions
+
+References is the only optional area (cardinality `0..1`) - see Technical
+Design > Architecture > Field Definitions and the Required and Optional
+Summary table for its exact definition. A Contract's Required Behaviour is
+satisfied whether or not References is present.
 
 ## Acceptance Criteria
 

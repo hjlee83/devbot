@@ -54,6 +54,29 @@ _NORMATIVE_AREAS_IN_ORDER = (
     "References",
 )
 
+# Maps each "Required and Optional Summary" table Area name to the phrase
+# `## Required Behaviour` uses for it (Required Behaviour paraphrases some
+# areas, e.g. "Contract metadata" for "Metadata"). `None` marks the one
+# optional area (References), which must never appear in the numbered
+# "must define" list itself. A PR review (2026-07-18, hjlee83) found these
+# two sections contradicting each other on References' requiredness; this
+# mapping pins them back together so that regression can't recur silently.
+_SUMMARY_AREA_TO_REQUIRED_BEHAVIOUR_PHRASE: dict[str, str | None] = {
+    "Contract Version": "schema version",
+    "Provenance": "provenance",
+    "Task Identity": "task identity",
+    "Metadata": "contract metadata",
+    "Goal": "goal",
+    "Context": "context",
+    "Scope": "scope",
+    "Out of Scope": "out-of-scope",
+    "Deliverables": "deliverables",
+    "Acceptance Criteria": "acceptance criteria",
+    "Quality Gates": "quality gates",
+    "Handoff": "handoff",
+    "References": None,
+}
+
 
 def _read(relative_path: str) -> str:
     return (_REPO_ROOT / relative_path).read_text(encoding="utf-8")
@@ -120,6 +143,51 @@ def test_normative_example_includes_all_required_areas() -> None:
         if area == "References":
             continue  # optional; the Normative Example omits it.
         assert f"## {area}" in example, f"Normative Example is missing '## {area}'"
+
+
+def test_required_behaviour_is_consistent_with_required_optional_summary() -> None:
+    spec = _read("specifications/045-contract-schema.md")
+
+    summary_match = re.search(
+        r"\| Area \| Required \| Cardinality \|\n\|[-:| ]+\|\n((?:\|.+\|\n)+)", spec
+    )
+    assert summary_match is not None
+    summary = {
+        area: (required == "yes")
+        for area, required in re.findall(r"\| (.+?) \| (yes|no) \| .+? \|", summary_match.group(1))
+    }
+    assert set(summary) == set(_SUMMARY_AREA_TO_REQUIRED_BEHAVIOUR_PHRASE)
+
+    behaviour_match = re.search(
+        r"## Required Behaviour\n\n(.*?)\n\n## Acceptance Criteria", spec, re.DOTALL
+    )
+    assert behaviour_match is not None
+    behaviour_section = behaviour_match.group(1)
+    behaviour_text = behaviour_section.lower()
+
+    numbered_items_match = re.search(r"required areas:\n\n((?:\d+\. .*\n)+)", behaviour_section)
+    assert numbered_items_match is not None
+    numbered_items_text = numbered_items_match.group(1).lower()
+
+    for area, is_required in summary.items():
+        phrase = _SUMMARY_AREA_TO_REQUIRED_BEHAVIOUR_PHRASE[area]
+        if is_required:
+            assert phrase is not None
+            assert phrase in behaviour_text, (
+                f"required area '{area}' is not mentioned in Required Behaviour"
+            )
+            assert phrase in numbered_items_text, (
+                f"required area '{area}' must appear in the numbered 'must define' list"
+            )
+        else:
+            assert "optional" in behaviour_text and area.lower() in behaviour_text, (
+                f"optional area '{area}' must be explicitly called out as optional in "
+                "Required Behaviour, not silently omitted"
+            )
+            assert area.lower() not in numbered_items_text, (
+                f"optional area '{area}' must not be listed among the numbered "
+                "'must define' required items"
+            )
 
 
 def test_canonical_metadata_representation_block_uses_only_canonical_values() -> None:

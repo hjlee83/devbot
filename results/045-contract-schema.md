@@ -1,5 +1,45 @@
 # Task 045 Result: Contract Schema
 
+## 리뷰 반영 (PR #95, hjlee83)
+
+아키텍처 리뷰에서 blocking 지적을 받았다: `# Functional Requirements >
+Required Behaviour`가 "A Contract conforming to Schema v1 must define
+these areas"라며 10번 항목으로 "References and provenance"를 나열해
+References도 필수인 것처럼 읽혔는데, `# Technical Design > Field
+Definitions`와 Required and Optional Summary 표는 References를 선택
+(`0..1`)으로 정의하고 있었고 Normative Example도 References 없이
+conforming example로 취급하고 있어 서로 모순이었다.
+
+반영 내용:
+
+- `Required Behaviour`를 Provenance(필수)와 References(선택)를 분리하는
+  방향으로 수정했다 - 번호 목록 10개를 Schema Version/Provenance/Task
+  Identity/Metadata/Goal and context/Scope and out-of-scope
+  boundaries/Deliverables/Acceptance criteria/Quality gates/Handoff
+  instructions로 재구성하고(Provenance를 목록에 명시적으로 추가),
+  References는 목록에서 완전히 빼고 별도 문장으로 "선택 사항이며
+  Field Definitions/Summary 표를 참고하라"고 명시했다. 리뷰가 제시한
+  두 방향(Provenance만 필수로 분리 vs References를 진짜 필수로 승격)
+  중 전자를 택했다 - Field Definitions/Summary 표/Normative Example이
+  이미 일관되게 References를 선택으로 정의하고 있었으므로, 그쪽을
+  기준점으로 Required Behaviour만 맞추는 것이 더 작고 안전한 수정이었다.
+- 회귀 테스트 1개 추가:
+  `test_required_behaviour_is_consistent_with_required_optional_summary`
+  - Required and Optional Summary 표를 파싱해 각 영역의 필수/선택
+    여부를 확인하고, Required Behaviour의 번호 목록에 선택 영역
+    (References)이 나타나지 않는지, 필수 영역 12개가 전부 Required
+    Behaviour 어딘가에 언급되는지 정규식으로 직접 검증한다. 수정 전
+    원문으로 되돌려 이 테스트가 실제로 실패하는지 확인한 뒤(라이브로
+    직접 재현), 수정된 버전으로 다시 통과하는지 재확인했다.
+- `tasks/045-contract-schema.md`(원본 Contract, Full Task Contract
+  Reference에 그대로 인용된 부분)는 건드리지 않았다 - 이 모순은
+  Specification이 Contract 내용을 재서술하는 과정에서 생긴 것이지,
+  원본 Contract 자체의 문제가 아니었다.
+- `devbot specification validate --task 45`는 수정 전후 모두 PASS였다
+  (Task 043 Validator는 required/optional **의미**의 모순까지는 검사하지
+  않고 구조만 검사하므로, 이번 리뷰 지적은 Validator가 잡을 수 있는
+  종류의 문제가 아니었다 - 새 회귀 테스트가 이 구조적 공백을 메운다).
+
 ## 완료 내용
 
 Contract Schema v1을 DevBot의 권위 있고 버전 관리되는 Task Contract
@@ -29,8 +69,8 @@ Review Loop/Workflow Engine/Release Automation은 전혀 구현하지 않았다.
   `contract_version`과 마이그레이션 안내 필요)을 구분했다.
 - **기존 DevBot 문서 구조와의 호환성 검증**: 아래 "호환성 검증 결과"
   절 참고 - 실제로 실행해서 확인했다.
-- **필요한 테스트**: `tests/test_contract_schema_045.py`(9개) - 아래
-  "테스트" 절 참고.
+- **필요한 테스트**: `tests/test_contract_schema_045.py`(10개, 리뷰 반영
+  포함) - 아래 "테스트" 절 참고.
 - **`results/045-contract-schema.md` 작성**: 본 문서.
 
 ## 권위 있는 문서 처리에 대한 결정 - Specification 재구성
@@ -93,9 +133,9 @@ Identity/Metadata)을 새로 형식화하고, `docs/09`는 운영 완성도
 
 ## 테스트
 
-`tests/test_contract_schema_045.py`(신규, 9개) - Task 045는 파서/CLI를
-추가하지 않으므로, 재사용 가능한 파싱 로직을 `src/devbot/`에 새로 두지
-않고 두 종류로 나눠 작성했다:
+`tests/test_contract_schema_045.py`(신규, 10개 - 리뷰 반영으로 1개
+추가) - Task 045는 파서/CLI를 추가하지 않으므로, 재사용 가능한 파싱
+로직을 `src/devbot/`에 새로 두지 않고 세 종류로 나눠 작성했다:
 
 1. **기존 Task 043 Validator 재사용** (새 파서 아님): `devbot.
    specification_validation.validate_specification_file`을 그대로 호출해
@@ -107,16 +147,25 @@ Identity/Metadata)을 새로 형식화하고, `docs/09`는 운영 완성도
    canonical enum 값만 쓰는지, 13개 normative 영역이 전부 있는지, 5개
    역사적 Contract와 Task 045 자신의 Contract가 legacy로 남아 있는지,
    `docs/09`의 필수 항목 목록이 그대로인지를 정규식으로 직접 확인한다.
+3. **리뷰 반영 회귀**
+   (`test_required_behaviour_is_consistent_with_required_optional_summary`):
+   위 "리뷰 반영" 절 참고 - Required and Optional Summary 표와 Required
+   Behaviour의 번호 목록을 정규식으로 직접 비교해, References(유일한
+   선택 영역)가 필수 목록에 나타나지 않고 별도로 선택으로 명시되는지,
+   나머지 12개 필수 영역이 전부 Required Behaviour에 언급되는지
+   검증한다.
 
 ## 수정 파일
 
 - `specifications/045-contract-schema.md` (재구성 - Task 042/043
   canonical Specification 스키마를 만족하도록 최상위 8섹션으로
-  재편, 내용은 보존)
+  재편, 내용은 보존; 리뷰 반영으로 Required Behaviour의 References/
+  Provenance 필수 여부 모순도 수정)
 - `docs/09-task-contract-standard.md` (Schema v1과의 관계를 설명하는
   상호 참조 2문단 추가 - 기존 필수 항목 14개는 무변경)
 - `docs/00-roadmap.md` (Task 045 항목 추가)
-- `tests/test_contract_schema_045.py` (신규, 9개 테스트)
+- `tests/test_contract_schema_045.py` (신규, 10개 테스트 - 리뷰 반영
+  회귀 1개 포함)
 - `results/045-contract-schema.md` (본 문서)
 
 `tasks/045-contract-schema.md`는 수정하지 않았다(이미 브랜치에 존재하던
@@ -141,8 +190,8 @@ Identity/Metadata)을 새로 형식화하고, `docs/09`는 운영 완성도
 
 - `uv run ruff check .`: PASS
 - `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS,
-  856 passed (Task 044 병합 후 기준 847개 + `tests/test_contract_schema_045.py`
-  9개)
+  857 passed (Task 044 병합 후 기준 847개 + `tests/test_contract_schema_045.py`
+  10개, 리뷰 반영 회귀 1개 포함)
 
 ## 수동 검증 결과 (읽기 전용)
 
