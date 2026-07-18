@@ -28,10 +28,15 @@ No new Issue may start.
 - `MERGE READY` keeps the Issue in `review`; if the result belongs to the
   current head and no safety gate fails, the linked PR receives the exclusive
   `devbot:ready-to-merge` label.
+- If automatic merge is enabled, the repository is allowlisted, the repository
+  is not marked as DevBot's self repository, and GitHub check-runs for the PR
+  head are green, DevBot merges the PR and moves the Issue to `done`.
+- If any automatic merge gate fails, DevBot logs/comments the reason, keeps
+  `devbot:ready-to-merge`, and leaves the Issue in `review` for human merge.
 - Stale, contradictory, exhausted, metadata-only, external-verification, or
   otherwise unsafe review-loop outcomes move to `manual-action` without
   deleting the branch, PR, or worktree.
-- Merge: move to `done`.
+- Human merge of a ready PR also moves the Issue to `done` once recorded.
 
 ## BLOCKED
 No automated retry unless explicitly returned to `ready`.

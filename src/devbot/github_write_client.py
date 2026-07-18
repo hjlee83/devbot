@@ -34,6 +34,15 @@ class PullRequestInfo:
     html_url: str
 
 
+@dataclass(frozen=True, slots=True)
+class MergePullRequestResult:
+    """A successful pull request merge result."""
+
+    sha: str
+    merged: bool
+    message: str
+
+
 class GitHubWriteClient:
     """Minimal authenticated GitHub REST API write client."""
 
@@ -151,5 +160,32 @@ class GitHubWriteClient:
         ).json()
         return PullRequestInfo(number=payload["number"], html_url=payload["html_url"])
 
+    def merge_pull_request(
+        self,
+        repository: RepositoryConfig,
+        pull_request_number: int,
+        *,
+        commit_title: str,
+        commit_message: str = "",
+        merge_method: str = "merge",
+    ) -> MergePullRequestResult:
+        """Merge an eligible pull request."""
+        payload = self._put(
+            f"/repos/{repository.owner}/{repository.repo}/pulls/{pull_request_number}/merge",
+            json={
+                "commit_title": commit_title,
+                "commit_message": commit_message,
+                "merge_method": merge_method,
+            },
+        ).json()
+        return MergePullRequestResult(
+            sha=payload["sha"], merged=payload["merged"], message=payload["message"]
+        )
 
-__all__ = ["GitHubClientError", "GitHubWriteClient", "PullRequestInfo"]
+
+__all__ = [
+    "GitHubClientError",
+    "GitHubWriteClient",
+    "MergePullRequestResult",
+    "PullRequestInfo",
+]

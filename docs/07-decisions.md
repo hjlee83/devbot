@@ -1,5 +1,26 @@
 # Architecture Decision Log
 
+## 2026-07-18 — Automatic merge is policy-gated and self-modification stays manual
+B2 changes the old "merge is always manual" boundary into a policy gate, not
+an unconditional automation step. A `MERGE READY` review may mark a PR with
+`devbot:ready-to-merge`, but DevBot may merge it only when all of these are
+true for the same PR head:
+
+- **Global kill-switch is on.** `AUTOMERGE_ENABLED` defaults to `false`, so a
+  new deployment cannot merge by accident.
+- **Repository allowlist is explicit.** `automerge_allowed` defaults to
+  `false` per repository.
+- **Self-modification is excluded.** `is_self_repo: true` means DevBot is
+  changing itself, and the PR always remains on the human approval rail.
+- **CI is API-backed.** The gate uses GitHub check-runs for the PR head; review
+  text mentioning "CI" is not evidence.
+
+When any gate fails, the ready-to-merge PR is left in `devbot:review` with its
+`devbot:ready-to-merge` PR label intact and a clear log/comment reason. That
+preserves the existing human merge workflow instead of converting a policy
+block into `manual-action` or deleting work. Only a successful GitHub merge API
+call may move the Task Issue to `devbot:done`.
+
 ## 2026-07-13 — GitHub as the queue
 Use GitHub Issues, labels, comments, and PRs as the initial state store.
 Do not introduce SQLite in the MVP.

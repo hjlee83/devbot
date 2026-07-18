@@ -46,11 +46,40 @@ def test_load_valid_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert config.default_agent == "codex"
     assert config.max_concurrent_jobs == 1  # default
     assert config.dry_run is True  # default
+    assert config.automerge_enabled is False  # default
     assert config.lock_file == Path("/tmp/devbot.lock")  # default
     assert len(config.repositories) == 1
     assert config.repositories[0].owner == "someone"
     assert config.repositories[0].repo == "myrepo"
     assert config.repositories[0].enabled is True
+    assert config.repositories[0].automerge_allowed is False
+    assert config.repositories[0].is_self_repo is False
+
+
+def test_automerge_config_is_explicit_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root, AUTOMERGE_ENABLED="true")
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        """
+repositories:
+  - owner: someone
+    repo: myrepo
+    enabled: true
+    automerge_allowed: true
+    is_self_repo: true
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.automerge_enabled is True
+    assert config.repositories[0].automerge_allowed is True
+    assert config.repositories[0].is_self_repo is True
 
 
 def test_repositories_path_can_come_from_environment(

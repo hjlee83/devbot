@@ -172,6 +172,11 @@
       `devbot:ready-to-merge`로 독점 갱신하며, 미처리 피드백이나 안전하지 않은
       metadata 상태는 ready 표시 대신 manual-action 진단을 남긴다
       (`results/027-autonomous-review-loop.md`).
+- [x] B2: automatic merge safety gate. `devbot:ready-to-merge` PR은
+      `AUTOMERGE_ENABLED`, repository allowlist, self-repo 제외, GitHub
+      check-runs green gate를 모두 통과할 때만 GitHub merge API로 병합하고
+      Issue를 `devbot:done`으로 전이한다. gate 실패는 라벨을 유지하고
+      로그/댓글로 이유를 남겨 사람 머지 경로를 보존한다.
 - [x] Task 028: CLI version command. `devbot --version`이 패키지
       metadata의 단일 버전 소스에서 값을 읽고, `.env`/repository config,
       daemon lock, GitHub client, polling service, Agent runner 초기화 없이

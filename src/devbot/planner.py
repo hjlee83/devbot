@@ -52,7 +52,7 @@ REVIEWER_RESPONSIBILITIES: tuple[str, ...] = (
 )
 
 OPERATOR_RESPONSIBILITIES: tuple[str, ...] = (
-    "perform_final_merge",
+    "perform_policy_required_manual_merge",
     "resolve_manual_action_states",
 )
 
