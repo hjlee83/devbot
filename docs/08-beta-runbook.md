@@ -11,8 +11,11 @@ step except the final Merge. Task 013 adds structured operational
 logging (`src/devbot/observability.py`) so an operator can answer "why did
 (or didn't) the daemon pick up this Issue" from logs alone. Task 014 adds
 the explicit `devbot:rework` state and hardens failure recovery so no
-failure path should leave an Issue permanently stuck in `devbot:working`.
-This is a
+in-process failure path should leave an Issue permanently stuck in
+`devbot:working` - a crashed *process* (killed, OOM, host reboot) still
+could, until CP-B1 (2026-07-18) added a startup sweep that self-heals this
+on the next daemon restart (`docs/03-state-machine.md`'s "Startup
+Recovery"). This is a
 manual walkthrough for confirming the flow against a real target
 repository, plus the operational checklist for running DevBot beyond a
 single smoke test.
@@ -188,13 +191,18 @@ repo's Git history.
 - [ ] If an Issue is `devbot:manual-action`, the latest review/rework
       comment asked for GitHub metadata work, external verification, or
       human approval that DevBot intentionally did not route through
-      commit/push. Complete the named action, then move the Issue back to
-      the appropriate stable state (`devbot:review`, `devbot:rework`, or
-      `devbot:ready`).
+      commit/push - or (CP-B1) DevBot could not resolve the Issue's linked
+      PR (closed/merged outside DevBot, or the Issue was reopened after its
+      PR was already resolved). Complete the named action or re-link/verify
+      the PR, then move the Issue back to the appropriate stable state
+      (`devbot:review`, `devbot:rework`, or `devbot:ready`).
 - [ ] If an Issue is `devbot:blocked`, read the blocking comment first.
       After manual remediation, remove `devbot:blocked` and add the
       appropriate stable label (`devbot:ready`, `devbot:review`, or
       `devbot:rework`) based on the point where the workflow should resume.
+      A `devbot:working` Issue left behind by a crashed process is also
+      swept to `devbot:blocked` automatically on the next daemon startup
+      (CP-B1) - not the next poll cycle of an already-running daemon.
 
 ## 운영 진단 절차 (Task 013)
 

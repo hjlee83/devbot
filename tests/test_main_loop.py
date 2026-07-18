@@ -11,8 +11,10 @@ import pytest
 from devbot.agent_outcome import AgentOutcomeError
 from devbot.agents.base import AgentRunResult
 from devbot.github_client import GitHubIssue, PullRequestComment
+from devbot.github_write_client import GitHubWriteClient
+from devbot.issue_state import IssueStateWriter
 from devbot.lock import ProcessLock
-from devbot.main import _apply_rework_changes, main
+from devbot.main import _apply_rework_changes, _sweep_stuck_working_issues, main
 from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.polling import PollingResult, PollingService, PollingStatus, run_forever
 
@@ -61,6 +63,120 @@ def _write_fixture(tmp_path: Path, *, lock_file: Path | None = None) -> tuple[Pa
         encoding="utf-8",
     )
     return env_path, repositories_path
+
+
+def _stuck_issue(repo: RepositoryConfig, number: int) -> GitHubIssue:
+    return GitHubIssue(
+        repository=repo.full_name,
+        number=number,
+        title="stuck",
+        body="",
+        state="open",
+        labels=("devbot:working",),
+        created_at=datetime(2026, 1, 1),
+    )
+
+
+def test_sweep_stuck_working_issues_blocks_stuck_issue() -> None:
+    """CP-B1: any devbot:working Issue found at daemon startup - after
+    successfully acquiring ProcessLock, so no other process sharing this
+    lock file can be mid-job - must be a crash remnant. Move it to
+    devbot:blocked so it stops stalling the whole repository's queue."""
+    repo = _repo("myrepo")
+    issue = _stuck_issue(repo, 5)
+    github_client = MagicMock()
+    github_client.list_issues.return_value = [issue]
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    logger = logging.getLogger("test-sweep")
+
+    _sweep_stuck_working_issues(_config([repo]), github_client, state_writer, logger)
+
+    github_client.list_issues.assert_called_once_with(
+        repo, state="open", labels=["devbot:working"]
+    )
+    write_client.set_labels.assert_called_once_with(repo, 5, ["devbot:blocked"])
+    write_client.create_comment.assert_called_once()
+
+
+def test_sweep_stuck_working_issues_continues_after_one_block_failure() -> None:
+    repo = _repo("myrepo")
+    stuck_a, stuck_b = _stuck_issue(repo, 5), _stuck_issue(repo, 6)
+    github_client = MagicMock()
+    github_client.list_issues.return_value = [stuck_a, stuck_b]
+    write_client = MagicMock(spec=GitHubWriteClient)
+    write_client.set_labels.side_effect = [RuntimeError("boom"), None]
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    logger = logging.getLogger("test-sweep")
+
+    _sweep_stuck_working_issues(_config([repo]), github_client, state_writer, logger)
+
+    assert write_client.set_labels.call_count == 2
+
+
+def test_sweep_stuck_working_issues_continues_after_list_issues_failure() -> None:
+    repo_a, repo_b = _repo("repo-a"), _repo("repo-b")
+    stuck_b = _stuck_issue(repo_b, 9)
+    github_client = MagicMock()
+    github_client.list_issues.side_effect = [RuntimeError("boom"), [stuck_b]]
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    logger = logging.getLogger("test-sweep")
+
+    _sweep_stuck_working_issues(_config([repo_a, repo_b]), github_client, state_writer, logger)
+
+    write_client.set_labels.assert_called_once_with(repo_b, 9, ["devbot:blocked"])
+
+
+def test_once_daemon_path_sweeps_stuck_working_before_polling(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\nDRY_RUN=false\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        encoding="utf-8",
+    )
+    stuck = GitHubIssue(
+        repository="someone/myrepo",
+        number=3,
+        title="stuck",
+        body="",
+        state="open",
+        labels=("devbot:working",),
+        created_at=datetime(2026, 1, 1),
+    )
+
+    def _fake_list_issues(repository, *, state="open", labels=None, **_kwargs):
+        if labels == ["devbot:working"]:
+            return [stuck]
+        return []
+
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch(
+            "devbot.github_client.GitHubClient.list_issues", side_effect=_fake_list_issues
+        ),
+        patch("devbot.github_write_client.GitHubWriteClient.set_labels") as mock_set_labels,
+        patch("devbot.github_write_client.GitHubWriteClient.create_comment"),
+        patch("devbot.polling.PollingService.run_cycle", return_value=()) as mock_run_cycle,
+    ):
+        exit_code = main(["--once"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 0
+    mock_set_labels.assert_called_once_with(
+        RepositoryConfig(
+            owner="someone", repo="myrepo", enabled=True, local_path=workspace_root / "myrepo"
+        ),
+        3,
+        ["devbot:blocked"],
+    )
+    mock_run_cycle.assert_called_once()
 
 
 def test_run_once_exits_after_single_iteration(tmp_path: Path) -> None:

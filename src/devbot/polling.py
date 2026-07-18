@@ -603,8 +603,53 @@ class PollingService:
                 issues_by_key[(issue.repository, issue.number)] = issue
         return tasks, issues_by_key
 
+    def _escalate_missing_linked_pr(
+        self,
+        repository: RepositoryConfig,
+        selected: IssueTask,
+        issue: GitHubIssue,
+        job_type: JobType,
+        reason: str,
+        fallback_status: PollingStatus,
+    ) -> PollingResult:
+        """CP-B1: a REVIEW/REWORK Issue whose linked PR cannot be resolved
+        can never become a valid candidate again on its own - the PR is
+        simply gone (closed/merged outside DevBot, or the Issue was
+        reopened after its PR was already resolved) and nothing changes
+        that on the next cycle. Escalate to `devbot:manual-action` instead
+        of repeating the same hard error forever. `claim()` first is
+        required - `review`/`rework` -> `manual-action` is not itself a
+        legal direct transition (`issue_state._ALLOWED_TRANSITIONS`), only
+        `working` -> `manual-action` is - mirroring the same claim-then-
+        escalate idiom already used by `review.py`'s review-loop-limit path
+        and `rework.py`'s non-repository-change path. Unlike those two,
+        this call site has no enclosing try/except upstream (candidate
+        collection, not job execution), so the local try/except here is
+        required, not just extra caution.
+        """
+        try:
+            working_issue = self.state_writer.claim(repository, issue, job_type=job_type)
+            self.state_writer.require_manual_action(
+                repository, working_issue, reason, job_type=job_type
+            )
+        except Exception as exc:  # noqa: BLE001 - must not crash candidate collection
+            self.logger.error(
+                "linked PR 유실 이슈 manual-action 전환 실패 (%s #%d): %s",
+                selected.repository,
+                selected.number,
+                exc,
+            )
+            return PollingResult(status=fallback_status, task=selected, message=reason)
+        return PollingResult(status=PollingStatus.BLOCKED, task=selected, message=reason)
+
     def _fetch_linked_pull_request_and_comments(
-        self, repository: RepositoryConfig, selected: IssueTask, issue: GitHubIssue, cycle_id: str
+        self,
+        repository: RepositoryConfig,
+        selected: IssueTask,
+        issue: GitHubIssue,
+        cycle_id: str,
+        *,
+        job_type: JobType,
     ) -> tuple[PullRequest | None, list[PullRequestComment], PollingResult | None]:
         """Resolve `issue`'s linked PR and that PR's own conversation
         comments (not `issue`'s comments - see the module docstring: both
@@ -634,13 +679,17 @@ class PollingService:
                     selected.number,
                     resolution_failure,
                 )
+                reason = f"{resolution_failure.category.value}: {resolution_failure}"
                 return (
                     None,
                     [],
-                    PollingResult(
-                        status=PollingStatus.WORKSPACE_PREPARATION_FAILED,
-                        task=selected,
-                        message=f"{resolution_failure.category.value}: {resolution_failure}",
+                    self._escalate_missing_linked_pr(
+                        repository,
+                        selected,
+                        issue,
+                        job_type,
+                        reason,
+                        PollingStatus.WORKSPACE_PREPARATION_FAILED,
                     ),
                 )
             self.logger.error(
@@ -658,13 +707,12 @@ class PollingService:
                     detail=f"Issue #{issue.number}에 연결된 열린 PR을 찾지 못함",
                 ),
             )
+            reason = f"No linked pull request found for Issue #{issue.number}"
             return (
                 None,
                 [],
-                PollingResult(
-                    status=PollingStatus.ITERATION_ERROR,
-                    task=selected,
-                    message=f"No linked pull request found for Issue #{issue.number}",
+                self._escalate_missing_linked_pr(
+                    repository, selected, issue, job_type, reason, PollingStatus.ITERATION_ERROR
                 ),
             )
 
@@ -726,7 +774,7 @@ class PollingService:
             return None, None, None
 
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, rework_task, issue, cycle_id
+            repository, rework_task, issue, cycle_id, job_type=JobType.REWORK
         )
         if error is not None:
             return None, None, error
@@ -770,7 +818,7 @@ class PollingService:
             return None, None, None
 
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, review_task, issue, cycle_id
+            repository, review_task, issue, cycle_id, job_type=JobType.REVIEW
         )
         if error is not None:
             return None, None, error
@@ -2368,7 +2416,7 @@ class PollingService:
 
         issue = issues_by_key[(selected.repository, selected.number)]
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, selected, issue, cycle_id
+            repository, selected, issue, cycle_id, job_type=JobType.REWORK
         )
         if error is not None:
             return error
@@ -2493,7 +2541,7 @@ class PollingService:
 
         issue = issues_by_key[(selected.repository, selected.number)]
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, selected, issue, cycle_id
+            repository, selected, issue, cycle_id, job_type=JobType.REVIEW
         )
         if error is not None:
             return error

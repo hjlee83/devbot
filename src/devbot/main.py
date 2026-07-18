@@ -352,6 +352,53 @@ def _run_doctor_command(config: DevBotConfig, *, ci: bool = False) -> int:
     return 0 if report.safe_to_start else 1
 
 
+def _sweep_stuck_working_issues(
+    config: DevBotConfig,
+    github_client: GitHubClient,
+    state_writer: IssueStateWriter,
+    logger: logging.Logger,
+) -> None:
+    """CP-B1: successfully acquiring `ProcessLock` (the caller's `with`
+    block) guarantees no other process sharing this deployment's lock file
+    can be mid-job right now - so any Issue still labeled `devbot:working`
+    at this exact moment must be a crash remnant (the kernel releases
+    `flock` on an unclean exit, but nothing else ever re-evaluates the
+    label). Left alone, `polling.PollingService._collect_job_candidates`
+    treats ANY `devbot:working` Issue as reason to exclude every other
+    Issue in that repository too (`REPOSITORY_BUSY`), stalling the whole
+    repository's queue indefinitely. Must live here, inside the daemon's
+    `ProcessLock` block - not in `devbot.startup`, which `devbot doctor`
+    also calls without ever holding the lock.
+    """
+    for repository in config.enabled_repositories:
+        try:
+            stuck = github_client.list_issues(
+                repository, state="open", labels=["devbot:working"]
+            )
+        except Exception as exc:  # noqa: BLE001 - must never abort startup
+            logger.error(
+                "stuck-working sweep: 이슈 조회 실패 (%s): %s", repository.full_name, exc
+            )
+            continue
+        for issue in stuck:
+            try:
+                state_writer.block(
+                    repository,
+                    issue,
+                    "daemon 재시작 사이 devbot:working 상태로 남아있었습니다 "
+                    "(이전 프로세스 크래시로 추정). 운영자 검토 후 devbot:ready로 "
+                    "되돌리세요.",
+                    job_type=None,
+                )
+            except Exception as exc:  # noqa: BLE001 - one failure must not abort the sweep
+                logger.error(
+                    "stuck-working sweep: %s #%d block 실패: %s",
+                    repository.full_name,
+                    issue.number,
+                    exc,
+                )
+
+
 def _restart_after_startup_update(final_sha: str) -> None:
     if os.environ.get(STARTUP_SELF_UPDATE_ENV) == final_sha:
         return
@@ -468,6 +515,7 @@ def main(
             state_writer = IssueStateWriter(
                 client=write_client, dry_run=config.dry_run, logger=logger
             )
+            _sweep_stuck_working_issues(config, github_client, state_writer, logger)
             # Task 023: host-managed workspace preparation - every IMPLEMENT/
             # REWORK Job runs in its own isolated Git worktree under
             # `config.workspace_root`, resolved and synchronized by DevBot

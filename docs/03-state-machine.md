@@ -1,5 +1,18 @@
 # State Machine
 
+## Startup Recovery (CP-B1, 2026-07-18)
+
+Right after acquiring `ProcessLock` (guaranteeing no other process sharing
+this deployment's lock file can be mid-job), the daemon sweeps every
+managed repository for Issues still labeled `devbot:working` and moves each
+to `blocked` (`main.py:_sweep_stuck_working_issues`). A crashed process
+(killed, OOM, host reboot) leaves the label behind - the kernel releases
+`flock` on crash, but nothing else ever re-evaluates it - and a single
+stuck `working` Issue otherwise excludes every other Issue in that
+repository from every future poll cycle (`REPOSITORY_BUSY`). This only
+self-heals on the next daemon **restart**, not the next poll cycle. See
+`docs/07-decisions.md`.
+
 ## IDLE
 No Issue is `working` or `review`.
 
@@ -36,9 +49,11 @@ No new Issue may start.
 - `MERGE READY` keeps the Issue in `review`; if the result belongs to the
   current head and no safety gate fails, the linked PR receives the exclusive
   `devbot:ready-to-merge` label.
-- Stale, contradictory, exhausted, metadata-only, external-verification, or
-  otherwise unsafe review-loop outcomes move to `manual-action` without
-  deleting the branch, PR, or worktree.
+- Stale, contradictory, exhausted, metadata-only, external-verification,
+  unresolvable-linked-PR (CP-B1: closed/merged outside DevBot, or the Issue
+  was reopened after its PR was already resolved - retrying can never fix
+  this on its own), or otherwise unsafe review-loop outcomes move to
+  `manual-action` without deleting the branch, PR, or worktree.
 - Merge: move to `done`.
 
 ## BLOCKED

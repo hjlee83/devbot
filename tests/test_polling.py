@@ -20,7 +20,7 @@ from devbot.polling import (
     PollingStatus,
     find_linked_pull_request,
 )
-from devbot.review import build_review_marker
+from devbot.review import ReviewService, build_review_marker
 from devbot.rework import ReworkService
 from devbot.timeline import TimelineService, parse_events
 from devbot.validation import ValidationFailureCategory
@@ -689,12 +689,15 @@ def test_failed_polled_rework_moves_to_blocked_with_reason() -> None:
     assert result.message == "blocked: branch mismatch"
 
 
-def test_review_issue_without_linked_pull_request_is_reported_as_error() -> None:
-    """A `review` Issue with an unprocessed `@devbot` comment but no PR
-    whose body references it (an anomalous data-integrity state - a real
-    `review` Issue should always have one, opened by `DeliveryService`)
-    must not silently guess a branch name; it's reported as a structured
-    failure instead."""
+def test_rework_issue_without_linked_pull_request_escalates_to_manual_action() -> None:
+    """CP-B1: a `rework` Issue with an unprocessed `@devbot` comment but no
+    PR whose body references it (an anomalous data-integrity state - the
+    PR may have been closed/merged outside DevBot, or this Issue was
+    reopened after its PR was already resolved) can never resolve on its
+    own - nothing changes between cycles. Escalate to `devbot:manual-action`
+    (via claim() then require_manual_action(), since rework->manual-action
+    is not itself a legal direct transition) instead of repeating the same
+    hard error forever."""
     repo = _repo("myrepo")
     config = _config([repo])
     review_issue = _issue(repo.full_name, 7, labels=["devbot:rework"], title="Fix bug")
@@ -705,19 +708,88 @@ def test_review_issue_without_linked_pull_request_is_reported_as_error() -> None
         comments_by_issue={(repo.full_name, 101): [comment]},
         pull_requests_by_repo={repo.full_name: [unrelated_pr]},
     )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
     rework_service = MagicMock(spec=ReworkService)
     service = PollingService(
         config=config,
         github_client=github_client,
         implementer_runner=MagicMock(),
         ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
         rework_service=rework_service,
     )
 
     result = service.run_once()
 
-    assert result.status is PollingStatus.ITERATION_ERROR
+    assert result.status is PollingStatus.BLOCKED
     rework_service.process.assert_not_called()
+    assert write_client.set_labels.call_args_list[0].args == (repo, 7, ["devbot:working"])
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 7, ["devbot:manual-action"])
+
+
+def test_review_issue_without_linked_pull_request_escalates_to_manual_action() -> None:
+    """Same as the rework case above, for a `devbot:review` Issue."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue = _issue(repo.full_name, 8, labels=["devbot:review"], title="Fix bug")
+    unrelated_pr = _pull_request(101, issue_number=999)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue]},
+        pull_requests_by_repo={repo.full_name: [unrelated_pr]},
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    review_service = MagicMock(spec=ReviewService)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    review_service.process.assert_not_called()
+    assert write_client.set_labels.call_args_list[0].args == (repo, 8, ["devbot:working"])
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 8, ["devbot:manual-action"])
+
+
+def test_planner_issue_unresolved_pr_escalates_to_manual_action() -> None:
+    """CP-B1: a Planner Issue's explicitly-declared PR that can't be
+    resolved (`_planner_pr_resolution_failure`) is the same class of
+    structurally-unresolvable state as a plain missing linked PR - also
+    escalates instead of looping forever."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    planner_issue = _issue(
+        repo.full_name,
+        9,
+        labels=["devbot:rework"],
+        title="Fix bug",
+        body=_planner_issue_body(branch="devbot/planner-branch", pr_number=42),
+    )
+    github_client = FakeGitHubClient({repo.full_name: [planner_issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    rework_service = MagicMock(spec=ReworkService)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        rework_service=rework_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.BLOCKED
+    rework_service.process.assert_not_called()
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 9, ["devbot:manual-action"])
 
 
 def test_working_issue_blocks_rework_even_when_review_exists() -> None:

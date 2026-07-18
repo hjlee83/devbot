@@ -72,13 +72,19 @@
 - **Timeline dev:start/dev:end 정합성**: `raise TimelineMissingStartError(...)`만 `if not self.dry_run`으로 가드(블록 전체 아님) — 실제 이전 이벤트 이력이 있는 이슈의 idempotent 중복-end 체크는 그대로 유지.
 - **검증**: 이 세션 자체의 미커밋 변경(12개 파일)이 있는 상태에서 `--once --dry-run --verbose`가 실제로 정상 진행되는 것을 실측 확인(`git stash` 불필요해짐). 전체 테스트 535 passed, ruff clean.
 
-### B1. 라벨/상태기 정리
+### B1. 라벨/상태기 정리 *(핵심 2건 완료, 2026-07-18)*
 
-"라벨이 이상해서 루프가 막힌다"는 초기 가정이었으나 Phase A 실측(단순 ready/blocked 케이스)에서는 재현되지 않았다. B0 이후 rework·PR-연결·동시 이슈 시나리오로 재관찰하며 착수한다.
+"라벨이 이상해서 루프가 막힌다"는 초기 가정이었으나 Phase A 실측(단순 ready/blocked 케이스)에서는 재현되지 않았다. 대신 실제 GitHub 라이브 상태 확인(닫힌 이슈들이 옛 라벨을 그대로 달고 있음)을 계기로 재조사해서 **진짜 루프-정지 버그 2건**을 발견·수정. 결정 기록은 `docs/07-decisions.md`의 "2026-07-18 — Startup sweep..." 항목.
 
-- 대상: `issue_state`(devbot:* 라벨 상태기), 참조 `docs/03-state-machine.md`
-- 목표: 상태·전이를 명확히, 애매한 라벨 조합은 **자가 복구**되게. 루프가 "stuck weird state"에 빠지지 않게.
-- 완료 기준: 장난감 이슈를 여러 번 돌려도 사람이 라벨을 손으로 고칠 일이 없다.
+- ✅ **크래시 잔재 `devbot:working` 자가복구**: 데몬 시작 시(락 획득 직후) `devbot:working` 이슈를 전부 `blocked`로 스윕. 크래시 하나가 저장소 전체 큐를 영구히 막던 문제 해소(`main.py:_sweep_stuck_working_issues`).
+- ✅ **연결된 PR 유실 시 manual-action 에스컬레이션**: review/rework 이슈가 PR을 못 찾으면(devbot 밖에서 닫힘/머지됨, 또는 재오픈) 무한 에러 대신 `manual-action`으로 전환(`polling.py:_fetch_linked_pull_request_and_comments`).
+- **완료 기준 충족**: 두 버그 다 "사람이 매번 라벨을 손으로 고쳐야 하는" 케이스였고, 이제 자가복구/에스컬레이션됨.
+
+**백로그로 미룸** (별도 스코프):
+- `devbot:done`이 코드 어디에도 안 쓰임 — 머지 감지 인프라가 필요해서 의도적으로 보류(닫힌 이슈들의 스테일 라벨 잔존의 근본 원인, `docs/03-state-machine.md`가 "머지되면 done"이라 써있지만 미구현).
+- 사이클 시작 시점 라벨 스냅샷 기준 쓰기라, 사람이 작업 중간에 라벨을 수동으로 고쳐도 devbot이 조용히 덮어쓰는 좁은 레이스 컨디션.
+- `_run_review_job`/`_run_rework_job`이 `MANUAL_ACTION`을 실패로 안 잡아서, review.py/rework.py 자체의 manual-action 경로(리뷰 루프 한도 등)가 cycle 실패로 안 잡히는 인접 버그.
+- IMPLEMENT 잡의 동일 계열 버그(Planner PR 해석 실패 시 `ready`로 무한 재시도, 에스컬레이션 없음) — 다른 코드 경로라 별도.
 
 ### B2. 자동 머지 (안전 게이트)
 
