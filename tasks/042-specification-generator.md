@@ -290,5 +290,6 @@ existing module's behavior changes.
 
 - Task Issue: #89
 - Branch: `task/042-specification-generator`
+- Pull Request: #90
 - Result: `results/042-specification-generator.md`
 - Do not create another Issue, Branch, or Pull Request for this Task.
