@@ -652,6 +652,164 @@ def test_once_daemon_path_passes_dry_run_as_allow_dirty_skip(tmp_path: Path) -> 
     assert mock_update.call_args.kwargs["allow_dirty_skip"] is True
 
 
+def test_daemon_dispatch_backend_unchanged_without_agents_registry_file(
+    tmp_path: Path,
+) -> None:
+    """Task 041 CP: with no `config/agents.yaml`, the Router synthesizes a
+    registry from `IMPLEMENTER_AGENT`/`REVIEWER_AGENT`, so the resolved
+    backend passed to `build_agent_runner` (the unchanged execution
+    backend) is byte-for-byte what pre-Task-041 code passed directly."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n"
+        "IMPLEMENTER_AGENT=claude\nREVIEWER_AGENT=codex\n"
+        f"DEVBOT_AGENTS_PATH={tmp_path / 'no-such-agents.yaml'}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.main.build_agent_runner") as mock_build_runner,
+    ):
+        exit_code = main(
+            ["--once", "--dry-run"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    backends_used = [call.args[0] for call in mock_build_runner.call_args_list]
+    assert backends_used == ["claude", "codex"]
+
+
+def test_daemon_dispatch_uses_router_resolved_role(tmp_path: Path) -> None:
+    """Task 041 CP: the daemon asks the Router for the "implementer"/
+    "reviewer" Role's Agent - a `config/agents.yaml` that resolves to a
+    *different* backend than `IMPLEMENTER_AGENT`/`REVIEWER_AGENT` proves the
+    call site no longer reads those fields directly."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    agents_path = tmp_path / "agents.yaml"
+    agents_path.write_text(
+        "agents:\n"
+        "  - id: routed-implementer\n"
+        "    backend: claude\n"
+        "    priority: 100\n"
+        "    supported_roles: [implementer]\n"
+        "  - id: routed-reviewer\n"
+        "    backend: codex\n"
+        "    priority: 100\n"
+        "    supported_roles: [reviewer]\n",
+        encoding="utf-8",
+    )
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n"
+        # Deliberately the *opposite* backends of agents.yaml above - if the
+        # daemon still resolved these directly, backends_used would be
+        # ["codex", "claude"] instead of ["claude", "codex"].
+        "IMPLEMENTER_AGENT=codex\nREVIEWER_AGENT=claude\n"
+        f"DEVBOT_AGENTS_PATH={agents_path}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.main.build_agent_runner") as mock_build_runner,
+    ):
+        exit_code = main(
+            ["--once", "--dry-run"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    backends_used = [call.args[0] for call in mock_build_runner.call_args_list]
+    assert backends_used == ["claude", "codex"]
+
+
+def test_role_list_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with patch("devbot.main.ProcessLock") as mock_lock:
+        exit_code = main(["role", "list"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+    out = capsys.readouterr().out
+    assert "implementer" in out
+    assert "reviewer" in out
+
+
+def test_role_resolve_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        ["role", "resolve", "implementer"], env_path=env_path, repositories_path=repositories_path
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "role: implementer" in out
+    assert "resolved_agent_id:" in out
+
+
+def test_role_resolve_unconfigured_role_returns_failure_exit_code(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        ["role", "resolve", "nonexistent-role"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+
+
+def test_agent_list_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(["agent", "list"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "backend=" in out
+    assert "priority=" in out
+
+
+def test_goal_dispatch_shows_role_resolution_without_invoking_agent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report = _execution_report(ready=True, executed=False)
+
+    with (
+        patch("devbot.main.execute_goal", return_value=report),
+        patch("devbot.main.build_agent_runner") as mock_build_runner,
+    ):
+        exit_code = main(
+            ["goal", "dispatch", "Add a global PATH launcher.", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_build_runner.assert_not_called()
+    out = capsys.readouterr().out
+    assert "resolved_role: implementer ->" in out
+    assert "[not invoked]" in out
+
+
 def test_doctor_ci_skips_startup_self_update(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
