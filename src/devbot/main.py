@@ -30,7 +30,7 @@ from devbot.automerge import AutomergeService
 from devbot.config import ConfigError, load_config
 from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
-from devbot.github_client import GitHubClient, GitHubIssue, PullRequestComment
+from devbot.github_client import GitHubClient, GitHubClientError, GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
@@ -43,6 +43,14 @@ from devbot.observability import (
 )
 from devbot.polling import PollingService, PollingStatus, run_forever
 from devbot.release import authoritative_version
+from devbot.release_ops import (
+    ReleaseOpsError,
+    ReleasePreview,
+    ReleaseStatus,
+    build_release_status,
+    fetch_release_preview,
+    publish_release,
+)
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
 from devbot.startup import (
@@ -186,6 +194,166 @@ def _build_worktree_parser(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Task 037: DevBot's own stable Release lifecycle. The operator's
+    entire interaction is meant to be "publish the next stable release" -
+    DevBot determines the version, commit, and Release notes; it never runs
+    automatically as part of a polling cycle."""
+    release_parser = subparsers.add_parser(
+        "release", help="DevBot 자체 stable Release를 조회/게시합니다."
+    )
+    release_subparsers = release_parser.add_subparsers(dest="release_command", required=True)
+
+    preview_parser = release_subparsers.add_parser(
+        "preview",
+        help="다음 stable Release 계획을 계산만 하고 GitHub에 쓰지 않습니다 (읽기 전용).",
+    )
+    preview_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
+    publish_parser = release_subparsers.add_parser(
+        "publish",
+        help=(
+            "다음 stable Release를 게시합니다: 버전/커밋/Release Notes를 자동 결정하고 "
+            "기존 Release 워크플로(.github/workflows/release.yml)를 dispatch합니다."
+        ),
+    )
+    publish_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+    # Deliberately the same `dry_run` dest as the top-level `--dry-run`
+    # (unlike `_add_timeline_write_args`'s independent one): both spellings
+    # - `devbot --dry-run release publish` and `devbot release publish
+    # --dry-run` - mean the same thing here ("compute the plan, dispatch
+    # nothing"), so one flag is enough.
+    publish_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="계산된 계획만 출력하고 워크플로를 dispatch하지 않습니다.",
+    )
+    publish_parser.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=15.0,
+        help="워크플로 실행 상태를 폴링하는 간격(초). 기본값 15초.",
+    )
+    publish_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=1800.0,
+        help="워크플로 완료를 기다리는 최대 시간(초). 기본값 1800초.",
+    )
+
+    status_parser = release_subparsers.add_parser(
+        "status", help="최근 stable Release와 Release 워크플로 상태를 조회합니다 (읽기 전용)."
+    )
+    status_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
+
+def _render_release_preview(preview: ReleasePreview) -> str:
+    lines = [
+        f"previous_version: {preview.previous_version}",
+        f"next_version: {preview.next_version}",
+        f"increment: {preview.increment or 'none'}",
+        f"target_commit: {preview.target_commit}",
+        f"target_commit_validated: {'yes' if preview.target_commit_validated else 'no'}",
+        f"previous_release_commit: {preview.previous_release_commit or 'none'}",
+        f"ready: {'yes' if preview.readiness.ready else 'no'}",
+    ]
+    for blocker in preview.readiness.blockers:
+        lines.append(f"  blocker: {blocker}")
+    lines.append(f"expected_assets ({len(preview.expected_assets)}):")
+    lines.extend(f"  - {asset}" for asset in preview.expected_assets)
+    lines.append(f"merged_prs ({len(preview.changes)}):")
+    lines.extend(
+        f"  - #{change.pr.number} [{change.increment}] {change.pr.title}"
+        for change in preview.changes
+    )
+    lines.append("")
+    lines.append("release_notes:")
+    lines.append(preview.notes if preview.notes else "(none)")
+    return "\n".join(lines)
+
+
+def _render_release_status(status: ReleaseStatus) -> str:
+    run = status.latest_workflow_run
+    published_at = (
+        status.latest_release_published_at.isoformat()
+        if status.latest_release_published_at
+        else "none"
+    )
+    lines = [
+        f"latest_stable_version: {status.latest_stable_version or 'none'}",
+        f"latest_release_url: {status.latest_release_url or 'none'}",
+        f"latest_release_published_at: {published_at}",
+        f"last_published_commit: {status.last_published_commit or 'none'}",
+        (
+            f"latest_workflow_run: {run.html_url} status={run.status} "
+            f"conclusion={run.conclusion or 'none'}"
+            if run is not None
+            else "latest_workflow_run: none"
+        ),
+        f"publication_state: {status.publication_state}",
+    ]
+    return "\n".join(lines)
+
+
+def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    github_client = GitHubClient(config.github_token)
+
+    try:
+        if args.release_command == "status":
+            print(_render_release_status(build_release_status(github_client, repository)))
+            return 0
+
+        preview = fetch_release_preview(github_client, repository)
+    except GitHubClientError as exc:
+        print(f"release {args.release_command} 오류: GitHub 요청 실패: {exc}", file=sys.stderr)
+        return 1
+
+    print(_render_release_preview(preview))
+
+    if args.release_command == "preview":
+        return 0 if preview.readiness.ready else 1
+
+    # publish
+    if not preview.readiness.ready:
+        print("release publish 오류: 릴리스 준비가 되지 않았습니다.", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        print("dry-run: 워크플로를 dispatch하지 않았습니다.")
+        return 0
+
+    write_client = GitHubWriteClient(config.github_token)
+    try:
+        outcome = publish_release(
+            github_client,
+            write_client,
+            repository,
+            preview=preview,
+            poll_interval_seconds=args.poll_interval_seconds,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except (ReleaseOpsError, GitHubClientError) as exc:
+        print(f"release publish 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"tag: {outcome.tag}")
+    print(f"release_url: {outcome.release_url}")
+    print(f"workflow_run: {outcome.workflow_run.html_url}")
+    print(f"validated_assets: {', '.join(outcome.validated_assets)}")
+    return 0
+
+
 def _run_worktree_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     try:
         repository = _resolve_repository(config, args.repo)
@@ -246,6 +414,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command")
     _build_timeline_parser(subparsers)
     _build_worktree_parser(subparsers)
+    _build_release_parser(subparsers)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help=(
@@ -487,6 +656,9 @@ def main(
 
     if args.command == "worktree":
         return _run_worktree_command(args, config)
+
+    if args.command == "release":
+        return _run_release_command(args, config)
 
     if args.command == "doctor":
         if not args.ci and not _run_startup_self_update(config, logger):

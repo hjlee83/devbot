@@ -14,6 +14,10 @@ on:
         description: "Validated main commit SHA to release"
         type: string
         required: true
+      notes:
+        description: "Pre-generated Release Notes (optional; used verbatim when non-empty, e.g. from `devbot release publish`)"
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -105,6 +109,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}
+          MANUAL_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.notes || '' }}
         run: |
           git rev-list origin/main > main-commits.txt
           jq -R -s -c 'split("\n") | map(select(length > 0))' main-commits.txt > main-commits.json
@@ -119,9 +124,14 @@ jobs:
               --jq '.[0]' > pull-request.json
             jq -c -n --slurpfile pr pull-request.json '{pull_request: $pr[0]}' > release-event.json
           fi
+          printf '%s' "$MANUAL_NOTES" > release-notes-override.md
       - name: Plan release
         id: plan
         run: |
+          NOTES_FILE_ARGS=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -s release-notes-override.md ]; then
+            NOTES_FILE_ARGS=(--notes-file release-notes-override.md)
+          fi
           uv run python scripts/release_pipeline.py plan \
             --event-name "${{ github.event_name }}" \
             --event-json release-event.json \
@@ -131,7 +141,8 @@ jobs:
             --target-commit "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}" \
             --output release-plan.json \
             --github-output "$GITHUB_OUTPUT" \
-            ${{ github.event_name == 'workflow_dispatch' && format('--increment {0}', inputs.increment) || '' }}
+            ${{ github.event_name == 'workflow_dispatch' && format('--increment {0}', inputs.increment) || '' }} \
+            "${NOTES_FILE_ARGS[@]}"
 
   build-artifacts:
     needs: plan-release

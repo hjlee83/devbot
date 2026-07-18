@@ -160,6 +160,25 @@ class GitHubWriteClient:
         ).json()
         return PullRequestInfo(number=payload["number"], html_url=payload["html_url"])
 
+    def dispatch_workflow(
+        self,
+        repository: RepositoryConfig,
+        workflow_file: str,
+        *,
+        ref: str,
+        inputs: dict[str, str],
+    ) -> None:
+        """Trigger a `workflow_dispatch` event for `workflow_file` (e.g.
+        `release.yml`) on `ref`, with `inputs` as the workflow's declared
+        `workflow_dispatch.inputs` (Task 037). This is the only way DevBot
+        drives release publication - it never creates tags or Releases
+        directly."""
+        self._post(
+            f"/repos/{repository.owner}/{repository.repo}/actions/workflows/"
+            f"{workflow_file}/dispatches",
+            json={"ref": ref, "inputs": inputs},
+        )
+
     def merge_pull_request(
         self,
         repository: RepositoryConfig,

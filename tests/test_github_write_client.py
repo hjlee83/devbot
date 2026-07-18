@@ -146,6 +146,9 @@ def test_write_client_exposes_write_operations_only() -> None:
         "set_labels",
         "set_pull_request_labels",
         "update_comment",
+        # Task 037: dispatches the existing Release workflow; never creates
+        # a tag or Release directly.
+        "dispatch_workflow",
     }
 
     public_attrs = {

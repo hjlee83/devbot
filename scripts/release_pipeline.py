@@ -129,12 +129,18 @@ def _plan(args: argparse.Namespace) -> int:
     main_commits = {str(commit) for commit in main_commits_payload}
 
     if args.event_name == "workflow_dispatch":
+        notes_override = None
+        if args.notes_file:
+            notes_text = Path(args.notes_file).read_text(encoding="utf-8")
+            if notes_text.strip():
+                notes_override = notes_text
         plan = manual_release_plan(
             increment=args.increment,
             releases=releases,
             main_commits=main_commits,
             initial_version=args.initial_version,
             target_commit=args.target_commit,
+            notes_override=notes_override,
         )
     else:
         event_payload = _load_json(args.event_json)
@@ -183,6 +189,15 @@ def main() -> int:
     plan.add_argument("--output", required=True)
     plan.add_argument("--github-output")
     plan.add_argument("--increment", choices=["patch", "minor", "major"])
+    plan.add_argument(
+        "--notes-file",
+        default=None,
+        help=(
+            "Path to pre-generated Release Notes text (workflow_dispatch only). "
+            "Used verbatim when the file is non-empty; ignored (falls back to the "
+            "trivial default notes) when absent or empty."
+        ),
+    )
     plan.set_defaults(func=_plan)
 
     args = parser.parse_args()

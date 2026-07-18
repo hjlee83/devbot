@@ -349,3 +349,64 @@ The fix (`main.py:_sweep_stuck_working_issues`) exploits a fact that was already
 The fix escalates both branches to `manual-action` via the same `claim()`-then-`require_manual_action()` idiom already used twice elsewhere for structurally-unresolvable states (`review.py`'s review-loop-attempt-limit-exceeded path, `rework.py`'s non-repository-change-scope path) - `review`/`rework` cannot transition directly to `manual-action` (`issue_state._ALLOWED_TRANSITIONS` only allows it from `working`), so claiming first is required, not optional. This needed its own local `try/except` around the write, unlike its two precedents - both of those already run inside `_execute_job`'s outer catch-all, while this fires during candidate *collection*, which has no equivalent enclosing net. A transient `list_pull_requests` API failure (the third, pre-existing branch of the same function) is deliberately left unescalated - that's a legitimately retryable condition, not a structural one.
 
 **Deliberately deferred, not fixed in this pass** (tracked in `docs/14-autonomy-first-roadmap.md`'s B1 backlog): `devbot:done` is still never written (merge detection remains explicitly out of scope, per the 2026-07-15 "Host-managed worktrees" entry above); a narrow race where a human's mid-job manual label fix can be silently clobbered by DevBot's own stale-snapshot write; `_run_review_job`/`_run_rework_job` only checking `TaskState.BLOCKED` (not `MANUAL_ACTION`) when deciding whether a cycle counts as a failure, so `review.py`'s/`rework.py`'s own service-level manual-action paths still don't surface as `PollingStatus` failures; and IMPLEMENT jobs hitting the identical "Planner PR unresolvable" condition still loop back to `ready` forever rather than escalating (a structurally identical gap, but a different code path, out of scope here).
+
+## 2026-07-18 — Operator release publishing dispatches the existing workflow and never builds Releases itself (Task 037)
+
+Task 032's `.github/workflows/release.yml` already supports `workflow_dispatch` for
+manual/recovery releases, but the operator still has to know the exact validated `main`
+commit SHA, pick `patch`/`minor`/`major` from a dropdown, and accepts whatever
+`manual_release_plan()` generates as notes - a single line, e.g. `v0.1.0`'s real
+published body is literally `- patch: manual release`. `devbot release preview|publish|
+status` (`src/devbot/release_ops.py`) removes all three manual inputs without adding a
+second way to create a Release.
+
+**`release_ops.py` only ever calls `GitHubWriteClient.dispatch_workflow` - no
+`create_release`/`create_tag` method exists.** `publish_release()`'s only write is a
+`workflow_dispatch` POST with computed `increment`/`commit_sha`/`notes` inputs; it then
+polls the run to completion and validates the *result* (tag, Release, assets,
+`SHA256SUMS`) against the plan it computed beforehand. A workflow failure or timeout is
+reported (with the run URL) and raises `ReleaseOpsError` - there is no local fallback
+path that creates a tag or Release directly, by construction, not just by convention.
+
+**The next version is computed by aggregating every merged main PR since the last
+stable Release, not just the one PR a push event carries.** The existing push-triggered
+path (`release_plan_for_pr`) only ever sees the single PR that triggered it. An
+operator-invoked "publish the next stable release" instead walks every commit between
+the last stable Release's target commit and the latest CI-validated `main` commit
+(`GitHubClient.compare_commits`, falling back to full history via `list_commits` when
+no prior stable Release exists), resolves each commit's merged PR
+(`get_commit_pull_request_metadata`), and takes the maximum `release:*` increment
+(`major` > `minor` > `patch`) as the overall bump - reusing `release_increment_for_pr`'s
+existing "exactly one label or fail closed" rule per PR, so an unlabeled or
+multiply-labeled PR blocks readiness instead of being silently skipped.
+
+**Release Notes are generated from structured PR data only, never invented prose.**
+`release.aggregate_release_notes()` buckets each `ChangeEntry` into one of the six
+standard sections purely by its `release:*` label (`major`/`minor` -> What's New,
+`patch` -> Fixes, `none` -> Operational Changes) and renders `- <label>: #<PR number>
+<PR title>` under both a Korean and an English heading - the same literal PR data in
+both halves, so the two languages are guaranteed to describe identical changes without
+attempting machine translation of prose. This is intentionally coarser than
+hand-written notes (there is no `Improvements` section content, for example) in
+exchange for being fully deterministic and auditable back to `merged PRs, Task
+contracts, Result documents`.
+
+**`release.yml` gained one new optional `workflow_dispatch` input, `notes`, rather than
+a second workflow or a post-hoc `gh release edit`.** The existing manual dispatch path
+(`manual_release_plan`) still defaults to its one-line notes when `notes` is absent or
+blank (`scripts/release_pipeline.py plan --notes-file`, gated on `[ -s
+release-notes-override.md ]`), so an operator recovering a release by hand through the
+GitHub Actions UI is unaffected. `devbot release publish` always supplies the full
+bilingual body it generated, so the created Release never has a placeholder body even
+transiently - avoiding a second write (edit-after-publish) that would have to be its
+own safety-gated operation.
+
+**Publish refuses, without touching GitHub, on any of: a dirty local checkout
+(`git status --porcelain` on the resolved operator checkout, `devbot.startup
+.resolve_operator_checkout`), the latest `main` commit missing an all-success
+check-run set, a stable Release already existing for that commit, any commit in range
+without a resolvable single-label merged PR, or generated notes that are empty.** All
+of `ReleaseReadiness.blockers` is computed by the pure `build_release_preview()` before
+`dispatch_release()` ever runs, and `devbot release preview` renders the identical
+computation read-only - so "what would publish do" and "what does it actually check
+before publishing" can never drift apart.

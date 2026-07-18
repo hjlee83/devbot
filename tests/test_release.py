@@ -13,13 +13,16 @@ import pytest
 import yaml
 
 from devbot.release import (
+    KO_RELEASE_NOTE_SECTIONS,
     RELEASE_NOTE_SECTIONS,
     Artifact,
+    ChangeEntry,
     PullRequestMetadata,
     ReleasePolicyError,
     ReleaseRecord,
     ReleaseSummary,
     SemanticVersion,
+    aggregate_release_notes,
     assert_tag_and_release_can_be_created,
     authoritative_version,
     build_artifact,
@@ -396,6 +399,145 @@ def test_release_note_generation_is_deterministic() -> None:
     assert "No additional improvements recorded for this release." in notes
 
 
+def _change(number: int, title: str, increment: str) -> ChangeEntry:
+    return ChangeEntry(
+        pr=PullRequestMetadata(
+            number=number,
+            title=title,
+            labels=(f"release:{increment}",),
+            merged=True,
+            base_ref="main",
+            merge_commit_sha=f"sha-{number}",
+        ),
+        increment=increment,
+    )
+
+
+def test_aggregate_release_notes_requires_at_least_one_entry() -> None:
+    with pytest.raises(ReleasePolicyError, match="zero merged PRs"):
+        aggregate_release_notes((), version="0.2.0", previous_version="0.1.0", source_commit="sha")
+
+
+def test_aggregate_release_notes_is_deterministic() -> None:
+    entries = (
+        _change(80, "Task 037: Release Operator UX", "minor"),
+        _change(78, "Task 036: Release Tag Git Identity", "patch"),
+    )
+
+    first = aggregate_release_notes(
+        entries, version="0.2.0", previous_version="0.1.0", source_commit="deadbeef"
+    )
+    second = aggregate_release_notes(
+        entries, version="0.2.0", previous_version="0.1.0", source_commit="deadbeef"
+    )
+
+    assert first == second
+
+
+def test_aggregate_release_notes_has_korean_then_english_sections_in_the_same_order() -> None:
+    entries = (
+        _change(80, "Task 037: Release Operator UX", "minor"),
+        _change(78, "Task 036: Release Tag Git Identity", "patch"),
+        _change(81, "Task 038: internal cleanup", "none"),
+    )
+
+    notes = aggregate_release_notes(
+        entries, version="0.2.0", previous_version="0.1.0", source_commit="deadbeef"
+    )
+
+    assert notes.startswith("## devbot 0.2.0\n")
+    assert "Source commit: `deadbeef`" in notes
+    ko_index = notes.index("# 한국어")
+    en_index = notes.index("# English")
+    assert ko_index < en_index
+
+    ko_positions = [
+        notes.index(f"### {KO_RELEASE_NOTE_SECTIONS[s]}") for s in RELEASE_NOTE_SECTIONS
+    ]
+    en_positions = [notes.index(f"### {s}", en_index) for s in RELEASE_NOTE_SECTIONS]
+    assert all(ko_index < pos < en_index for pos in ko_positions)
+    assert ko_positions == sorted(ko_positions)
+    assert en_positions == sorted(en_positions)
+
+
+def test_aggregate_release_notes_korean_and_english_describe_the_same_prs() -> None:
+    entries = (
+        _change(80, "Task 037: Release Operator UX", "minor"),
+        _change(78, "Task 036: Release Tag Git Identity", "patch"),
+    )
+
+    notes = aggregate_release_notes(
+        entries, version="0.2.0", previous_version="0.1.0", source_commit="deadbeef"
+    )
+    korean_half, english_half = notes.split("# English", 1)
+
+    for pr_number in (80, 78):
+        assert f"#{pr_number}" in korean_half
+        assert f"#{pr_number}" in english_half
+    assert korean_half.count("#80") == english_half.count("#80")
+    assert korean_half.count("#78") == english_half.count("#78")
+
+
+def test_aggregate_release_notes_sections_are_deterministic_by_increment() -> None:
+    entries = (
+        _change(1, "Task A", "major"),
+        _change(2, "Task B", "minor"),
+        _change(3, "Task C", "patch"),
+        _change(4, "Task D", "none"),
+    )
+
+    notes = aggregate_release_notes(
+        entries, version="1.0.0", previous_version="0.9.0", source_commit="sha"
+    )
+    english_half = notes.split("# English", 1)[1]
+    whats_new = english_half.split("### What's New", 1)[1].split("### Improvements", 1)[0]
+    fixes = english_half.split("### Fixes", 1)[1].split("### Operational Changes", 1)[0]
+    operational = english_half.split("### Operational Changes", 1)[1].split(
+        "### Upgrade Notes", 1
+    )[0]
+
+    assert "#1" in whats_new and "#2" in whats_new
+    assert "#3" in fixes
+    assert "#4" in operational
+
+
+def test_manual_release_plan_notes_override_is_used_verbatim() -> None:
+    plan = manual_release_plan(
+        increment="minor",
+        releases=(ReleaseRecord("v0.1.0", "commit-a"),),
+        main_commits={"commit-a", "commit-b"},
+        initial_version="0.1.0",
+        target_commit="commit-b",
+        notes_override="## devbot 0.2.0\n\n# 한국어\n...\n\n# English\n...\n",
+    )
+
+    assert plan.notes == "## devbot 0.2.0\n\n# 한국어\n...\n\n# English\n...\n"
+
+
+def test_manual_release_plan_rejects_blank_notes_override() -> None:
+    with pytest.raises(ReleasePolicyError, match="cannot be empty"):
+        manual_release_plan(
+            increment="minor",
+            releases=(),
+            main_commits={"commit-a"},
+            initial_version="0.1.0",
+            target_commit="commit-a",
+            notes_override="   \n  ",
+        )
+
+
+def test_manual_release_plan_without_override_keeps_trivial_notes() -> None:
+    plan = manual_release_plan(
+        increment="patch",
+        releases=(),
+        main_commits={"commit-a"},
+        initial_version="0.1.0",
+        target_commit="commit-a",
+    )
+
+    assert plan.notes == "## devbot 0.1.0\n\n- patch: manual release\n"
+
+
 def test_release_plan_uses_pr_label_and_latest_stable_release() -> None:
     plan = release_plan_for_pr(
         _pr(labels=("release:minor",)),
@@ -690,6 +832,30 @@ def test_release_workflow_uses_platform_artifact_matrix_and_manual_dispatch() ->
     ]
 
 
+def test_release_workflow_supports_optional_manual_notes_override() -> None:
+    """Task 037: `devbot release publish` dispatches this workflow with a
+    pre-generated bilingual `notes` input; the workflow must thread it into
+    `scripts/release_pipeline.py plan` when non-empty and leave the existing
+    trivial-notes fallback intact when it is not provided (recovery/manual
+    dispatch without the CLI)."""
+    workflow = yaml.safe_load(Path(".github/workflows/release.yml").read_text(encoding="utf-8"))
+    workflow_text = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    notes_input = workflow[True]["workflow_dispatch"]["inputs"]["notes"]
+    assert notes_input["required"] is False
+    assert notes_input["type"] == "string"
+
+    plan_steps = "\n".join(
+        step.get("run", "") for step in workflow["jobs"]["plan-release"]["steps"]
+    )
+    assert "MANUAL_NOTES" in workflow_text
+    assert "inputs.notes" in workflow_text
+    assert "release-notes-override.md" in plan_steps
+    assert "--notes-file" in plan_steps
+    # Only threaded for workflow_dispatch, and only when the file is non-empty.
+    assert "[ -s release-notes-override.md ]" in plan_steps
+
+
 def test_release_pipeline_plan_command_writes_github_outputs(tmp_path: Path) -> None:
     event = tmp_path / "event.json"
     releases = tmp_path / "releases.json"
@@ -752,6 +918,96 @@ def test_release_pipeline_plan_command_writes_github_outputs(tmp_path: Path) -> 
     assert plan["version"] == "0.2.1"
     assert plan["tag"] == "v0.2.1"
     assert "publish=true" in github_output.read_text(encoding="utf-8")
+
+
+def test_release_pipeline_plan_command_uses_notes_file_override(tmp_path: Path) -> None:
+    releases = tmp_path / "releases.json"
+    main_commits = tmp_path / "main-commits.json"
+    output = tmp_path / "plan.json"
+    notes_file = tmp_path / "notes.md"
+    releases.write_text(
+        json.dumps([{"tag_name": "v0.1.0", "target_commitish": "old"}]), encoding="utf-8"
+    )
+    main_commits.write_text(json.dumps(["old", "new"]), encoding="utf-8")
+    notes_file.write_text("## devbot 0.2.0\n\n# 한국어\n...\n\n# English\n...\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/release_pipeline.py",
+            "plan",
+            "--event-name",
+            "workflow_dispatch",
+            "--event-json",
+            str(tmp_path / "missing-event.json"),
+            "--releases-json",
+            str(releases),
+            "--main-commits-json",
+            str(main_commits),
+            "--initial-version",
+            "0.1.0",
+            "--target-commit",
+            "new",
+            "--output",
+            str(output),
+            "--increment",
+            "minor",
+            "--notes-file",
+            str(notes_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    plan = json.loads(output.read_text(encoding="utf-8"))
+    assert plan["notes"] == notes_file.read_text(encoding="utf-8")
+
+
+def test_release_pipeline_plan_command_ignores_empty_notes_file(tmp_path: Path) -> None:
+    releases = tmp_path / "releases.json"
+    main_commits = tmp_path / "main-commits.json"
+    output = tmp_path / "plan.json"
+    notes_file = tmp_path / "notes.md"
+    releases.write_text(
+        json.dumps([{"tag_name": "v0.1.0", "target_commitish": "old"}]), encoding="utf-8"
+    )
+    main_commits.write_text(json.dumps(["old", "new"]), encoding="utf-8")
+    notes_file.write_text("", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/release_pipeline.py",
+            "plan",
+            "--event-name",
+            "workflow_dispatch",
+            "--event-json",
+            str(tmp_path / "missing-event.json"),
+            "--releases-json",
+            str(releases),
+            "--main-commits-json",
+            str(main_commits),
+            "--initial-version",
+            "0.1.0",
+            "--target-commit",
+            "new",
+            "--output",
+            str(output),
+            "--increment",
+            "minor",
+            "--notes-file",
+            str(notes_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    plan = json.loads(output.read_text(encoding="utf-8"))
+    assert plan["notes"] == "## devbot 0.2.0\n\n- minor: manual release\n"
 
 
 def test_release_pipeline_plan_command_bootstraps_first_stable_release(tmp_path: Path) -> None:
