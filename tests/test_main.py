@@ -1,12 +1,15 @@
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from devbot.github_client import WorkflowRun
 from devbot.lock import ProcessLock
 from devbot.main import _run_startup_self_update, main
 from devbot.models import DevBotConfig
+from devbot.release_ops import PublishOutcome, ReleasePreview, ReleaseReadiness, ReleaseStatus
 from devbot.startup import (
     STARTUP_SELF_UPDATE_ENV,
     StartupSelfUpdateError,
@@ -27,6 +30,210 @@ def _config(tmp_path: Path) -> DevBotConfig:
         github_token="token",
         repositories=(),
     )
+
+
+def _release_env(tmp_path: Path) -> tuple[Path, Path]:
+    """`env_path`/`repositories_path` for a full `main()` call with exactly
+    one enabled repository (`_resolve_repository`'s implicit-target case),
+    matching the `--once`/`doctor` test fixtures above."""
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"WORKSPACE_ROOT={workspace_root}\nGITHUB_TOKEN=test-token\n"
+        f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n",
+        encoding="utf-8",
+    )
+    repositories_path = tmp_path / "repositories.yaml"
+    repositories_path.write_text(
+        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        encoding="utf-8",
+    )
+    return env_path, repositories_path
+
+
+def _ready_preview(**overrides: object) -> ReleasePreview:
+    defaults: dict[object, object] = dict(
+        previous_version="0.1.0",
+        next_version="0.2.0",
+        increment="minor",
+        target_commit="deadbeef",
+        target_commit_validated=True,
+        previous_release_commit="cafef00d",
+        readiness=ReleaseReadiness(ready=True, blockers=()),
+        expected_assets=("devbot-0.2.0-linux-x86_64.tar.gz",),
+        changes=(),
+        notes="## devbot 0.2.0\n",
+    )
+    defaults.update(overrides)
+    return ReleasePreview(**defaults)  # type: ignore[arg-type]
+
+
+def test_release_preview_command_is_wired(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    preview = _ready_preview()
+
+    with (
+        patch("devbot.main.fetch_release_preview", return_value=preview) as mock_preview,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["release", "preview"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_preview.assert_called_once()
+    mock_write_client.assert_not_called()
+    out = capsys.readouterr().out
+    assert "next_version: 0.2.0" in out
+    assert "ready: yes" in out
+
+
+def test_release_preview_reports_not_ready_as_failure(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    preview = _ready_preview(
+        readiness=ReleaseReadiness(ready=False, blockers=("main is dirty",))
+    )
+
+    with patch("devbot.main.fetch_release_preview", return_value=preview):
+        exit_code = main(
+            ["release", "preview"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 1
+
+
+def test_release_status_is_read_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    status = ReleaseStatus(
+        latest_stable_version="0.1.0",
+        latest_release_url="https://github.com/someone/myrepo/releases/tag/v0.1.0",
+        latest_release_published_at=datetime(2026, 7, 18, 6, 26, 19, tzinfo=UTC),
+        last_published_commit="deadbeef",
+        latest_workflow_run=WorkflowRun(
+            id=1,
+            name="Release",
+            status="completed",
+            conclusion="success",
+            html_url="https://github.com/someone/myrepo/actions/runs/1",
+            created_at=datetime(2026, 7, 18, 6, 0, 0, tzinfo=UTC),
+            head_sha="deadbeef",
+            event="workflow_dispatch",
+        ),
+        publication_state="up-to-date",
+    )
+
+    with (
+        patch("devbot.main.build_release_status", return_value=status) as mock_status,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["release", "status"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_status.assert_called_once()
+    mock_write_client.assert_not_called()
+    out = capsys.readouterr().out
+    assert "publication_state: up-to-date" in out
+    assert "latest_stable_version: 0.1.0" in out
+
+
+def test_release_publish_dry_run_never_dispatches(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    preview = _ready_preview()
+
+    with (
+        patch("devbot.main.fetch_release_preview", return_value=preview),
+        patch("devbot.main.publish_release") as mock_publish,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["release", "publish", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_publish.assert_not_called()
+    mock_write_client.assert_not_called()
+    assert "dry-run" in capsys.readouterr().out
+
+
+def test_release_publish_refuses_when_not_ready(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    preview = _ready_preview(
+        readiness=ReleaseReadiness(ready=False, blockers=("CI not validated",))
+    )
+
+    with (
+        patch("devbot.main.fetch_release_preview", return_value=preview),
+        patch("devbot.main.publish_release") as mock_publish,
+    ):
+        exit_code = main(
+            ["release", "publish"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 1
+    mock_publish.assert_not_called()
+
+
+def test_release_publish_dispatches_when_ready(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    preview = _ready_preview()
+    outcome = PublishOutcome(
+        preview=preview,
+        workflow_run=WorkflowRun(
+            id=2,
+            name="Release",
+            status="completed",
+            conclusion="success",
+            html_url="https://github.com/someone/myrepo/actions/runs/2",
+            created_at=datetime(2026, 7, 18, 7, 0, 0, tzinfo=UTC),
+            head_sha="deadbeef",
+            event="workflow_dispatch",
+        ),
+        release_url="https://github.com/someone/myrepo/releases/tag/v0.2.0",
+        tag="v0.2.0",
+        validated_assets=("SHA256SUMS", "devbot-0.2.0-linux-x86_64.tar.gz"),
+    )
+
+    with (
+        patch("devbot.main.fetch_release_preview", return_value=preview),
+        patch("devbot.main.publish_release", return_value=outcome) as mock_publish,
+    ):
+        exit_code = main(
+            ["release", "publish"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_publish.assert_called_once()
+    assert mock_publish.call_args.kwargs["preview"] is preview
+    out = capsys.readouterr().out
+    assert "tag: v0.2.0" in out
+    assert "release_url: https://github.com/someone/myrepo/releases/tag/v0.2.0" in out
+
+
+def test_release_command_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    preview = _ready_preview()
+
+    with (
+        patch("devbot.main.fetch_release_preview", return_value=preview),
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["release", "preview"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
 
 
 def test_cli_version_prints_package_version(capsys: pytest.CaptureFixture[str]) -> None:

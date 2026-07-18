@@ -35,6 +35,38 @@ RELEASE_NOTE_SECTIONS: tuple[str, ...] = (
     "Upgrade Notes",
     "Known Limitations",
 )
+# Task 037: Korean section headers, in the same order as `RELEASE_NOTE_SECTIONS`,
+# so a bilingual release body can render both languages from one section walk.
+KO_RELEASE_NOTE_SECTIONS: dict[str, str] = {
+    "What's New": "새로운 기능",
+    "Improvements": "개선 사항",
+    "Fixes": "수정 사항",
+    "Operational Changes": "운영 변경",
+    "Upgrade Notes": "업그레이드 안내",
+    "Known Limitations": "알려진 제한 사항",
+}
+# Which release note section a merged PR's change lands in, keyed by its
+# `release:*` label. Deliberately coarse (3 of 6 sections) rather than
+# inferring intent from PR titles - inferring "improvement" vs "new feature"
+# from free text would risk describing a change that was not actually made.
+_INCREMENT_SECTION: dict[ReleaseIncrement, str] = {
+    "major": "What's New",
+    "minor": "What's New",
+    "patch": "Fixes",
+    "none": "Operational Changes",
+}
+_INCREMENT_LABEL_EN: dict[ReleaseIncrement, str] = {
+    "major": "major",
+    "minor": "minor",
+    "patch": "patch",
+    "none": "internal",
+}
+_INCREMENT_LABEL_KO: dict[ReleaseIncrement, str] = {
+    "major": "주요 변경",
+    "minor": "기능 추가",
+    "patch": "수정",
+    "none": "내부 변경",
+}
 _SEMVER_RE = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$")
 
 
@@ -92,6 +124,15 @@ class PullRequestMetadata:
     merged: bool
     base_ref: str
     merge_commit_sha: str
+
+
+@dataclass(frozen=True)
+class ChangeEntry:
+    """One merged main PR folded into an aggregate (multi-PR) release, paired
+    with the release increment its `release:*` label selects (Task 037)."""
+
+    pr: PullRequestMetadata
+    increment: ReleaseIncrement
 
 
 @dataclass(frozen=True)
@@ -451,6 +492,82 @@ def initial_release_notes(*, version: str, source_commit: str) -> str:
     return "\n".join(lines)
 
 
+def aggregate_release_notes(
+    entries: Iterable[ChangeEntry],
+    *,
+    version: str,
+    previous_version: str,
+    source_commit: str,
+) -> str:
+    """Deterministic bilingual (Korean + English) Release body for an
+    operator-triggered "publish the next stable release" (Task 037).
+
+    Source of truth is exactly `entries` - each merged main PR's real number,
+    title, and `release:*` label. No section is populated from anything else,
+    so the two language halves necessarily describe the identical set of
+    changes and nothing is invented.
+    """
+    entries_tuple = tuple(entries)
+    if not entries_tuple:
+        raise ReleasePolicyError("cannot generate release notes from zero merged PRs")
+
+    by_section: dict[str, list[ChangeEntry]] = {section: [] for section in RELEASE_NOTE_SECTIONS}
+    for entry in entries_tuple:
+        by_section[_INCREMENT_SECTION[entry.increment]].append(entry)
+
+    def render(*, korean: bool) -> list[str]:
+        lines: list[str] = []
+        for section in RELEASE_NOTE_SECTIONS:
+            lines.extend([f"### {KO_RELEASE_NOTE_SECTIONS[section] if korean else section}", ""])
+            if section == "Upgrade Notes":
+                lines.append(
+                    f"- `{previous_version}` 에서 `{version}` 으로 "
+                    "업그레이드하고, 다운로드한 "
+                    "아티팩트를 `SHA256SUMS` 로 검증하세요."
+                    if korean
+                    else f"- Upgrade from `{previous_version}` to `{version}`. Verify "
+                    "downloaded artifacts against `SHA256SUMS`."
+                )
+            elif section == "Known Limitations":
+                lines.append(
+                    "- 이번 릴리스에 새로 기록된 알려진 "
+                    "제한 사항이 없습니다."
+                    if korean
+                    else "- No new known limitations recorded for this release."
+                )
+            elif by_section[section]:
+                for entry in by_section[section]:
+                    safe_title = entry.pr.title.replace("\r", " ").replace("\n", " ").strip()
+                    label = (
+                        _INCREMENT_LABEL_KO[entry.increment]
+                        if korean
+                        else _INCREMENT_LABEL_EN[entry.increment]
+                    )
+                    lines.append(f"- {label}: #{entry.pr.number} {safe_title}")
+            else:
+                lines.append(
+                    "- 이번 릴리스에 기록된 변경 사항이 "
+                    "없습니다."
+                    if korean
+                    else "- No changes recorded for this release."
+                )
+            lines.append("")
+        return lines
+
+    lines = [
+        f"## {PRODUCT_NAME} {version}",
+        "",
+        f"Source commit: `{source_commit}`",
+        "",
+        "# 한국어",
+        "",
+    ]
+    lines.extend(render(korean=True))
+    lines.extend(["---", "", "# English", ""])
+    lines.extend(render(korean=False))
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def release_for_target_commit(
     releases: Iterable[ReleaseRecord], target_commit: str
 ) -> ReleaseRecord | None:
@@ -535,9 +652,12 @@ def manual_release_plan(
     main_commits: set[str],
     initial_version: str,
     target_commit: str | None = None,
+    notes_override: str | None = None,
 ) -> ReleasePlan:
     if increment == "none":
         raise ReleasePolicyError("manual release increment cannot be none")
+    if notes_override is not None and not notes_override.strip():
+        raise ReleasePolicyError("manual release notes override cannot be empty")
     releases_tuple = tuple(releases)
     existing_for_target = (
         release_for_target_commit(releases_tuple, target_commit)
@@ -565,7 +685,9 @@ def manual_release_plan(
         if not has_stable_release(releases_tuple, main_commits=main_commits)
         else next_version(base, increment)
     )
-    notes = "\n".join([f"## {PRODUCT_NAME} {version}", "", f"- {increment}: manual release", ""])
+    notes = notes_override if notes_override is not None else "\n".join(
+        [f"## {PRODUCT_NAME} {version}", "", f"- {increment}: manual release", ""]
+    )
     return ReleasePlan(
         publish=True,
         previous_version=str(base),

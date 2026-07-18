@@ -308,3 +308,52 @@ Agent 세션/사용량 제한으로 실패한 경우, 블로킹 댓글에
 `[failure_category=agent_session_limit]`와 함께 "제한 해제 후 이전
 상태로 되돌리라"는 안내가 붙는다 - 자동 재시도를 하지 않으므로 반드시
 사람이 확인 후 Issue를 되돌려야 한다.
+
+## 릴리스 운영 절차 (Task 037)
+
+DevBot 자체 stable Release를 다루는 운영자의 전체 상호작용은 다음 한
+문장으로 줄어든다: "다음 stable release를 게시해줘." 버전 번호, 커밋
+SHA, Release Notes를 사람이 직접 정하지 않는다 - `devbot release`
+하위 명령이 GitHub 상태에서 전부 계산한다. 세 명령 모두
+`config/repositories.yaml`의 단일 enabled 저장소를 기본 대상으로
+하며, 여러 저장소를 관리하는 배포에서는 `--repo owner/repo`로 대상을
+지정한다. 세 명령 모두 daemon lock을 잡지 않으므로 실행 중인 데몬
+옆에서 안전하게 실행할 수 있다(`doctor`/`timeline`/`worktree`와 동일한
+정책).
+
+```bash
+# 1. 무엇이 게시될지 미리 본다 (GitHub에 아무것도 쓰지 않는다).
+uv run devbot release preview
+
+# 2. 준비됐으면 실제로 게시한다: 버전/커밋/Release Notes를 자동으로
+#    결정하고 기존 .github/workflows/release.yml을 workflow_dispatch로
+#    실행한 뒤 완료까지 기다리고 결과를 검증한다.
+uv run devbot release publish
+
+# 계산된 계획만 보고 워크플로는 실행하지 않으려면:
+uv run devbot release publish --dry-run
+
+# 3. 최근 게시 상태를 확인한다 (읽기 전용).
+uv run devbot release status
+```
+
+`release preview`는 다음을 보여준다: 최신 stable 버전, 다음 버전,
+최신 검증된 `main` 커밋(해당 커밋의 CI check-run이 모두 성공일 때만
+"검증됨"으로 표시), 게시 준비 여부와 막고 있는 이유, 생성될 아티팩트
+이름, 마지막 stable Release 이후 병합된 Pull Request 목록, 생성된
+Release Notes 전문(한국어 섹션 다음 영어 섹션, 동일한 변경 사항을
+설명). Release Notes는 오직 병합된 PR 번호/제목/`release:*` 라벨에서만
+생성되며, 존재하지 않는 기능을 지어내지 않는다.
+
+`release publish`는 다음 중 하나라도 해당하면 아무것도 쓰지 않고
+실패한다: 로컬 checkout이 dirty함, 최신 `main` 커밋이 CI 검증되지
+않음, 대상 커밋에 이미 stable Release가 존재함, 병합된 PR에
+`release:*` 라벨이 없거나 둘 이상임, 게시 후 태그/Release/자산/
+`SHA256SUMS`가 기대와 다름, 생성된 Release Notes가 비어 있음. 태그를
+직접 옮기거나 만들지 않고, 기존 Release 워크플로를 우회하지도 않는다
+- 실패하거나 시간 초과되면 워크플로 실행 URL과 함께 보고할 뿐, 로컬에서
+대신 Release를 만들지 않는다.
+
+`release status`는 최신 stable 버전, 최신 Release 워크플로 실행
+상태, 마지막으로 게시된 커밋, 현재 게시 상태
+(`never-run`/`in-progress`/`up-to-date`/`failed`)를 보여준다.

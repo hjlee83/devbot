@@ -187,10 +187,47 @@
       제거한다. command/workspace/exit code evidence와 환경 준비, dependency
       network, command, forbidden fallback failure category를 기록한다
       (`results/029-prepared-workspace-validation.md`).
-
+- [x] Task 030: external dependency reliability. GitHub API 일시적 실패
+      (5xx/429/네트워크 오류)와 Agent 대화형 승인 요구가 Task 상태를 잘못
+      전이시키지 않도록 분류별 재시도(`github_retry.py`)와 명시적 예외
+      처리를 도입한다(`results/030-github-api-transient-retry.md`).
+- [x] Task 031: agent execution environment. implementer/reviewer 역할이
+      Local과 VPS 환경 모두에서 동일하게 명시적이고 관찰 가능한 실행
+      Context를 받도록 표준화한다(`src/devbot/agent_execution.py`,
+      `results/031-agent-execution-environment.md`).
+- [x] Task 032: automated release pipeline. `main`에 도달한 자격 있는
+      변경 이후 검증된 stable GitHub Release를 자동 생성한다. 단일
+      버전 소스, merged PR `release:*` 라벨 기반 버전 정책, 플랫폼별
+      아티팩트, SHA-256 체크섬 매니페스트, draft-first 원자적 게시,
+      재실행 멱등성, 최소 권한, 수동 `workflow_dispatch` 복구 경로를
+      포함한다(`src/devbot/release.py`, `.github/workflows/release.yml`,
+      `results/032-automated-release-pipeline.md`).
+- [x] Task 033: bootstrap initial release and project history. 검증된
+      `main` 커밋에서 최초 stable Release(`v0.1.0`)를 부트스트랩하고,
+      `docs/history.md`에 Release Notes 형식과 Task 000-032 개발
+      마일스톤을 기록한다(`results/033-bootstrap-initial-release-and-project-history.md`).
+- [x] Task 034: self-contained portable release artifact. 패키징된 CLI가
+      호스트에 이미 설치된 Python 패키지에 의존하지 않도록, 아티팩트에
+      잠긴(uv.lock) 런타임 의존성을 vendoring한다
+      (`results/034-self-contained-portable-artifact.md`).
+- [x] Task 035: release smoke uses managed Python path. Release smoke
+      단계가 `astral-sh/setup-uv`가 설치한 Python 3.13 실행 파일을
+      사용하도록 고쳐, 호스트 Python 유무와 무관하게 아티팩트를
+      검증한다(`results/035-release-smoke-managed-python-path.md`).
 - [x] Task 036: release tag Git identity. v0.1.0 Release workflow가
       `Create immutable tag` 단계에서 Git committer identity 부재로 실패한
       문제를 닫는다. Annotated tag 생성 전에 `github-actions[bot]` identity를
       local Git config로 설정하고, `git tag --annotate`보다 먼저 실행되는지
       workflow regression test로 고정했다
       (`results/036-release-tag-git-identity.md`).
+- [x] Task 037: release operator UX. 운영자의 개입을 "다음 stable
+      release를 게시해줘" 한 문장으로 줄인다. `devbot release
+      preview|publish|status` CLI가 최신 검증된 `main` 커밋과 다음
+      semantic version을 자동 결정하고, merged PR/Task 계약/Result
+      문서만을 근거로 한국어+영어 병기 Release Notes를 생성하며,
+      기존 `.github/workflows/release.yml`을 `workflow_dispatch`로
+      dispatch하고 완료까지 기다린 뒤 tag/Release/자산/`SHA256SUMS`를
+      검증한다. main dirty, CI 미검증, 기존 Release 존재, 라벨 누락,
+      자산/체크섬 불일치, 빈 Release Notes 중 하나라도 있으면 게시를
+      거부하며, 태그를 직접 옮기거나 워크플로를 우회하지 않는다
+      (`src/devbot/release_ops.py`, `results/037-release-operator-ux.md`).

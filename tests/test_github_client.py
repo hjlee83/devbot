@@ -385,6 +385,16 @@ def test_client_exposes_read_operations_only() -> None:
         "list_issues",
         "list_issue_comments",
         "list_pull_requests",
+        # Task 037: release preview/publish/status reads.
+        "list_releases",
+        "get_release_by_tag",
+        "get_commit_sha",
+        "list_commits",
+        "compare_commits",
+        "get_commit_pull_request_metadata",
+        "list_workflow_runs",
+        "get_workflow_run",
+        "download_release_asset",
     }
     forbidden_names = {
         "create_issue",
