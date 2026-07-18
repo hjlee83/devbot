@@ -1,7 +1,7 @@
 # DevBot Project Constitution
 
-Version: 1.0.0
-Last Updated: 2026-07-16
+Version: 1.1.0
+Last Updated: 2026-07-18
 
 This document defines the stable operating principles of the DevBot project.
 When implementation details, task documents, or agent instructions conflict with
@@ -101,9 +101,20 @@ A review outcome is either:
 - `REQUEST CHANGES`.
 
 `REQUEST CHANGES` returns the same Task and Pull Request to rework.
-`MERGE READY` means the change is ready for the operator's merge decision.
+`MERGE READY` means the change is eligible for the merge gate.
 
-Merge remains manual unless the project owner explicitly changes this policy.
+Merge is manual by default. Automatic merge is allowed only when the project
+owner enables the explicit policy flag and every merge gate passes:
+
+- the current PR head has a valid `MERGE READY` review and the
+  `devbot:ready-to-merge` label;
+- GitHub check-runs for that exact head are complete and green;
+- the global kill-switch is enabled;
+- the repository is explicitly allowlisted;
+- the PR is not a DevBot self-modification PR.
+
+DevBot self-modification PRs always require human merge approval, regardless of
+the global kill-switch or repository allowlist.
 
 ---
 
@@ -136,7 +147,9 @@ DevBot prioritizes:
 - explicit manual-action states instead of unsafe guessing.
 
 No automation may silently discard work, create duplicate workspaces, or merge
-an unverified change.
+an unverified change. A change is verified for automatic merge only after the
+review, CI, kill-switch, allowlist, and self-modification gates in Section 6 all
+pass for the same PR head.
 
 ---
 

@@ -61,6 +61,7 @@ from devbot import observability
 from devbot.agent_execution import AgentExecutionContext, AgentRole
 from devbot.agent_outcome import classify_agent_outcome
 from devbot.agents.base import AgentRunner, is_session_limit_output
+from devbot.automerge import READY_TO_MERGE_LABEL, AutomergeDecision, AutomergeService
 from devbot.delivery import DeliveryService, branch_has_implementation_evidence
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_retry import GitHubTransientError
@@ -233,6 +234,8 @@ class PollingStatus(Enum):
     DELIVERED = "delivered"
     REWORKED = "reworked"
     REVIEWED = "reviewed"
+    MERGED = "merged"
+    MERGE_BLOCKED = "merge_blocked"
     BLOCKED = "blocked"
     ITERATION_ERROR = "iteration_error"
 
@@ -506,6 +509,7 @@ class PollingService:
     delivery: DeliveryService | None = None
     rework_service: ReworkService | None = None
     review_service: ReviewService | None = None
+    automerge_service: AutomergeService | None = None
     # Task 024: automatic `ready`/`dev:start`/`dev:end` recording for
     # IMPLEMENT Jobs (REWORK/REVIEW record their own via `rework_service`/
     # `review_service`). `None` (every existing caller/test that doesn't set
@@ -900,6 +904,80 @@ class PollingService:
 
         return candidates, hard_errors, candidate_pr_numbers
 
+    def _process_ready_to_merge_candidates(
+        self,
+        repositories: Sequence[RepositoryConfig],
+        tasks: Sequence[IssueTask],
+        issues_by_key: IssuesByKey,
+        cycle_id: str,
+    ) -> list[PollingResult]:
+        if self.automerge_service is None:
+            return []
+
+        results: list[PollingResult] = []
+        pull_requests_by_repo: dict[str, list[PullRequest]] = {}
+        closed_pull_requests_by_repo: dict[str, list[PullRequest]] = {}
+        for repository in repositories:
+            pull_requests_by_repo[repository.full_name] = self.github_client.list_pull_requests(
+                repository
+            )
+            closed_pull_requests_by_repo[repository.full_name] = (
+                self.github_client.list_pull_requests(repository, state="closed")
+            )
+
+        for task in tasks:
+            if task.state is not TaskState.REVIEW:
+                continue
+            repository = next(
+                repo for repo in repositories if repo.full_name == task.repository
+            )
+            issue = issues_by_key[(task.repository, task.number)]
+            pull_request = find_linked_pull_request(
+                issue, pull_requests_by_repo[repository.full_name]
+            )
+            if pull_request is None:
+                closed_pull_request = find_linked_pull_request(
+                    issue, closed_pull_requests_by_repo[repository.full_name]
+                )
+                if closed_pull_request is not None and closed_pull_request.merged:
+                    self.state_writer.mark_done(
+                        repository,
+                        issue,
+                        reason=(
+                            f"PR #{closed_pull_request.number} 자동 머지 상태 정합화 완료"
+                        ),
+                    )
+                    message = (
+                        f"PR #{closed_pull_request.number} merged 상태를 확인해 "
+                        "Issue를 done으로 정합화했습니다"
+                    )
+                    results.append(
+                        PollingResult(status=PollingStatus.MERGED, task=task, message=message)
+                    )
+                continue
+            if pull_request is None or READY_TO_MERGE_LABEL not in pull_request.labels:
+                continue
+
+            result = self.automerge_service.process(repository, issue, pull_request)
+            if result.decision is AutomergeDecision.NOT_CANDIDATE:
+                continue
+            status = (
+                PollingStatus.MERGED
+                if result.decision is AutomergeDecision.MERGED
+                else PollingStatus.MERGE_BLOCKED
+            )
+            results.append(PollingResult(status=status, task=task, message=result.message))
+            observability.log_stage(
+                self.logger,
+                cycle_id,
+                repository=task.repository,
+                issue_number=task.number,
+                stage="automerge_gate",
+                start=time.monotonic(),
+            )
+
+        return results
+
     _ROLE_BY_JOB_TYPE = {
         JobType.IMPLEMENT: "implementer",
         JobType.REWORK: "implementer",
@@ -1071,6 +1149,19 @@ class PollingService:
             self.logger, observability.build_queue_summary(cycle_id, tasks)
         )
 
+        automerge_results = self._process_ready_to_merge_candidates(
+            repositories, tasks, issues_by_key, cycle_id
+        )
+        merged_keys = {
+            (result.task.repository, result.task.number)
+            for result in automerge_results
+            if result.task is not None and result.status is PollingStatus.MERGED
+        }
+        if merged_keys:
+            tasks = [
+                task for task in tasks if (task.repository, task.number) not in merged_keys
+            ]
+
         candidates, hard_errors, candidate_pr_numbers = self._collect_job_candidates(
             repositories, tasks, issues_by_key, cycle_id
         )
@@ -1087,7 +1178,7 @@ class PollingService:
             )
         job_results = self._execute_jobs(selection.selected, repositories, issues_by_key, cycle_id)
 
-        results = [*hard_errors, *job_results]
+        results = [*automerge_results, *hard_errors, *job_results]
         if not results:
             # CP-020-3: no separate free-form "no work" narration - the
             # normalized `NO_RUNNABLE_TASK` cycle result below covers both

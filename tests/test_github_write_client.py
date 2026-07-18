@@ -105,6 +105,58 @@ def test_create_pull_request_sends_post_and_parses_response() -> None:
     }
 
 
+def test_merge_pull_request_sends_put_and_parses_response() -> None:
+    session = MagicMock()
+    session.put.return_value = _mock_response(
+        json_data={
+            "sha": "merge-sha",
+            "merged": True,
+            "message": "Pull Request successfully merged",
+        }
+    )
+    client = GitHubWriteClient("token123", session=session)
+
+    result = client.merge_pull_request(
+        _repository(),
+        99,
+        expected_head_sha="head-sha",
+        commit_title="Merge PR #99: Add feature X",
+        commit_message="Merged automatically by DevBot.",
+    )
+
+    assert result.sha == "merge-sha"
+    assert result.merged is True
+    assert result.message == "Pull Request successfully merged"
+    args, kwargs = session.put.call_args
+    assert args[0].endswith("/repos/someone/myrepo/pulls/99/merge")
+    assert kwargs["json"] == {
+        "sha": "head-sha",
+        "commit_title": "Merge PR #99: Add feature X",
+        "commit_message": "Merged automatically by DevBot.",
+        "merge_method": "merge",
+    }
+
+
+def test_write_client_exposes_write_operations_only() -> None:
+    allowed_public_methods = {
+        "add_reaction_to_comment",
+        "create_comment",
+        "create_pull_request",
+        "merge_pull_request",
+        "set_labels",
+        "set_pull_request_labels",
+        "update_comment",
+    }
+
+    public_attrs = {
+        name
+        for name in dir(GitHubWriteClient)
+        if not name.startswith("_") and callable(getattr(GitHubWriteClient, name))
+    }
+
+    assert public_attrs == allowed_public_methods
+
+
 def test_write_not_found_error_is_translated() -> None:
     session = MagicMock()
     session.put.return_value = _mock_response(status_code=404, json_data={"message": "Not Found"})

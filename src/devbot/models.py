@@ -120,6 +120,8 @@ class RepositoryConfig:
     local_path: Path
     default_branch: str = "main"
     host_checkout_path: Path | None = None
+    automerge_allowed: bool = False
+    is_self_repo: bool = False
 
     @property
     def full_name(self) -> str:
@@ -140,6 +142,7 @@ class DevBotConfig:
     dry_run: bool
     github_token: str
     repositories: tuple[RepositoryConfig, ...]
+    automerge_enabled: bool = False
     log_level: str = "INFO"
 
     @property

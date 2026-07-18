@@ -25,6 +25,7 @@ from pathlib import Path
 from devbot.agent_execution import AgentExecutionContext
 from devbot.agents import build_agent_runner
 from devbot.agents.base import AgentRunner, AgentSessionLimitError, is_session_limit_output
+from devbot.automerge import AutomergeService
 from devbot.config import ConfigError, load_config
 from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
@@ -485,6 +486,13 @@ def main(
                         for candidate in github_client.list_pull_requests(repository)
                         if candidate.number == pull_request.number
                     ),
+                ),
+                automerge_service=AutomergeService(
+                    config=config,
+                    write_client=write_client,
+                    state_writer=state_writer,
+                    list_check_runs_for_ref=github_client.list_check_runs_for_ref,
+                    logger=logger,
                 ),
                 timeline=timeline_service,
                 logger=logger,

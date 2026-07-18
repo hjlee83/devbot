@@ -74,7 +74,7 @@ Reviewer는 다음을 수행한다 (`devbot.planner.REVIEWER_RESPONSIBILITIES`).
 
 Operator는 다음을 수행한다 (`devbot.planner.OPERATOR_RESPONSIBILITIES`).
 
-- 최종 Merge를 수행한다.
+- 정책상 사람 승인이 필요한 최종 Merge를 수행한다.
 - `devbot:manual-action` 등 자동화가 처리하지 못하는 상태를 사람이
   해결한다.
 

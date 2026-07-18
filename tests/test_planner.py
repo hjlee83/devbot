@@ -68,7 +68,7 @@ def test_planner_role_contract() -> None:
     assert "cross_linking" in PLANNER_RESPONSIBILITIES
     assert "continue_on_existing_branch_and_pr" in IMPLEMENTER_RESPONSIBILITIES
     assert "return_merge_ready_or_request_changes" in REVIEWER_RESPONSIBILITIES
-    assert "perform_final_merge" in OPERATOR_RESPONSIBILITIES
+    assert "perform_policy_required_manual_merge" in OPERATOR_RESPONSIBILITIES
 
     # Documentation side: docs/12 documents all four roles' responsibilities.
     text = PLANNER_DOC.read_text(encoding="utf-8")
@@ -81,7 +81,7 @@ def test_planner_role_contract() -> None:
         "Pull Request 생성",
         "Task Issue 생성",
         "코드를 수정하거나 Merge하지 않는다",
-        "최종 Merge를 수행한다",
+        "정책상 사람 승인이 필요한 최종 Merge를 수행한다",
     ]:
         assert phrase in text, f"'{phrase}' 가 {PLANNER_DOC} 에 정의되어야 한다"
 

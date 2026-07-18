@@ -270,6 +270,17 @@ class IssueStateWriter:
             repository, issue, TaskState.REVIEW, job_type=job_type, reason=reason
         )
 
+    def mark_done(
+        self,
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        *,
+        job_type: JobType | None = None,
+        reason: str = "pull request merged",
+    ) -> GitHubIssue:
+        """Move a reviewed Issue to the terminal `done` state."""
+        return self._transition(repository, issue, TaskState.DONE, job_type=job_type, reason=reason)
+
     def send_to_rework(
         self,
         repository: RepositoryConfig,
