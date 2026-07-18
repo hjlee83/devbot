@@ -77,6 +77,6 @@ Required commands:
 
 - Task Issue: #75
 - Branch: `task/035-release-smoke-managed-python-path`
-- Pull Request: TBD
+- Pull Request: #76
 - Result: `results/035-release-smoke-managed-python-path.md`
 - Do not create another Issue, Branch, or Pull Request for this task.

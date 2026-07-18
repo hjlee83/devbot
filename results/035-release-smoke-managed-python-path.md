@@ -36,7 +36,7 @@
 
 ## 수동 검증 결과
 
-- PR 생성 후 GitHub 링크 확인: Pending
+- PR 생성 후 GitHub 링크 확인: https://github.com/hjlee83/devbot/pull/76
 - `git ls-remote --tags origin refs/tags/v0.1.0 refs/tags/v0.1.0^{}`: no output, tag absent
 - `gh release view v0.1.0 --json tagName,url,isDraft,isPrerelease,targetCommitish`: `release not found`
 
