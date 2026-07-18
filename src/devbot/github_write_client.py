@@ -10,6 +10,7 @@ has been validated.
 
 from __future__ import annotations
 
+import base64
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -41,6 +42,14 @@ class MergePullRequestResult:
     sha: str
     merged: bool
     message: str
+
+
+@dataclass(frozen=True, slots=True)
+class IssueInfo:
+    """A created Issue, per `POST /repos/{owner}/{repo}/issues` (Task 040)."""
+
+    number: int
+    html_url: str
 
 
 class GitHubWriteClient:
@@ -160,6 +169,41 @@ class GitHubWriteClient:
         ).json()
         return PullRequestInfo(number=payload["number"], html_url=payload["html_url"])
 
+    def create_issue(self, repository: RepositoryConfig, *, title: str, body: str) -> IssueInfo:
+        """Create a new Issue (Task 040 - the Goal Executor's Task Issue)."""
+        payload = self._post(
+            f"/repos/{repository.owner}/{repository.repo}/issues",
+            json={"title": title, "body": body},
+        ).json()
+        return IssueInfo(number=payload["number"], html_url=payload["html_url"])
+
+    def create_branch(self, repository: RepositoryConfig, *, branch: str, base_sha: str) -> None:
+        """Create a new branch ref pointing at `base_sha`
+        (`POST /repos/{owner}/{repo}/git/refs`, Task 040)."""
+        self._post(
+            f"/repos/{repository.owner}/{repository.repo}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+        )
+
+    def create_file(
+        self,
+        repository: RepositoryConfig,
+        *,
+        branch: str,
+        path: str,
+        content: str,
+        message: str,
+    ) -> None:
+        """Create a new file at `path` on `branch` as a single commit
+        (`PUT /repos/{owner}/{repo}/contents/{path}`, Task 040 - used for the
+        Goal Executor's draft Task contract, so no local git checkout
+        manipulation is needed to write it)."""
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        self._put(
+            f"/repos/{repository.owner}/{repository.repo}/contents/{path}",
+            json={"message": message, "content": encoded, "branch": branch},
+        )
+
     def dispatch_workflow(
         self,
         repository: RepositoryConfig,
@@ -207,6 +251,7 @@ class GitHubWriteClient:
 __all__ = [
     "GitHubClientError",
     "GitHubWriteClient",
+    "IssueInfo",
     "MergePullRequestResult",
     "PullRequestInfo",
 ]

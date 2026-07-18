@@ -32,6 +32,12 @@ from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
 from devbot.github_client import GitHubClient, GitHubClientError, GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
+from devbot.goal_executor import (
+    ExecutionPlan,
+    ExecutionReport,
+    GoalExecutorError,
+    execute_goal,
+)
 from devbot.goal_planner import GoalPlan, fetch_goal_plan
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
@@ -220,6 +226,43 @@ def _build_goal_parser(subparsers: argparse._SubParsersAction) -> None:
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
 
+    execute_parser = goal_subparsers.add_parser(
+        "execute",
+        help=(
+            "Task 038 계획에서 승인된 Task 하나만 Issue/Branch/초안 Contract로 "
+            "구체화합니다. PR 생성이나 구현 Agent 호출은 하지 않습니다."
+        ),
+    )
+    execute_parser.add_argument(
+        "goal", help='실행할 Goal 문장. devbot goal plan과 동일한 계획을 다시 계산합니다.'
+    )
+    execute_parser.add_argument(
+        "--task",
+        type=int,
+        default=None,
+        help=(
+            "multi_task 계획에서 구체화할 Task의 order (필수). single_task 계획에서는 "
+            "생략하면 Task 1이 자동 선택됩니다."
+        ),
+    )
+    execute_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="실제로 Issue/Branch/초안 Contract를 생성합니다. 생략하면 계획만 보여줍니다.",
+    )
+    # Deliberately the same `dry_run` dest as the top-level `--dry-run` and
+    # `release publish --dry-run` (not an independent one): whichever
+    # spelling is present forces read-only regardless of `--confirm` - if
+    # both are given by mistake, the safe side (no write) wins.
+    execute_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="계산된 계획만 출력하고 --confirm과 무관하게 아무것도 쓰지 않습니다.",
+    )
+    execute_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
 
 def _render_goal_plan(plan: GoalPlan) -> str:
     lines = [f"goal: {plan.goal}", f"decision: {plan.decision}", "reasons:"]
@@ -238,7 +281,7 @@ def _render_goal_plan(plan: GoalPlan) -> str:
     return "\n".join(lines)
 
 
-def _run_goal_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+def _run_goal_plan_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     try:
         repository = _resolve_repository(config, args.repo)
     except ConfigError as exc:
@@ -254,6 +297,91 @@ def _run_goal_command(args: argparse.Namespace, config: DevBotConfig) -> int:
 
     print(_render_goal_plan(plan))
     return 1 if plan.decision == "ambiguous" else 0
+
+
+def _render_execution_plan(execution_plan: ExecutionPlan) -> str:
+    lines = [f"goal: {execution_plan.goal}", f"decision: {execution_plan.plan.decision}"]
+    task = execution_plan.selected_task
+    if task is not None:
+        lines.append(f"selected_task: [{task.order}] {task.title}")
+        lines.append(f"dependencies: {', '.join(task.dependencies) or 'none'}")
+        already = "yes" if execution_plan.already_materialized else "no"
+        lines.append(f"already_materialized: {already}")
+        if execution_plan.already_materialized:
+            lines.append(f"existing_issue: {execution_plan.existing_issue_url}")
+        lines.append(f"next_task_number: {execution_plan.task_number}")
+        lines.append(f"proposed_branch: {execution_plan.branch}")
+        lines.append(f"proposed_contract_path: {execution_plan.contract_path}")
+        lines.append(f"proposed_result_path: {execution_plan.result_path}")
+        lines.append(f"proposed_issue_title: {execution_plan.issue_title}")
+        lines.append("proposed_issue_body:")
+        lines.extend(f"  {line}" for line in (execution_plan.issue_body or "").splitlines())
+        content_lines = (execution_plan.contract_content or "").splitlines()
+        summary_limit = 14
+        lines.append("proposed_contract_summary:")
+        lines.extend(f"  {line}" for line in content_lines[:summary_limit])
+        if len(content_lines) > summary_limit:
+            lines.append(f"  ... ({len(content_lines) - summary_limit} more lines)")
+    lines.append(f"ready: {'yes' if execution_plan.readiness.ready else 'no'}")
+    lines.extend(f"  blocker: {blocker}" for blocker in execution_plan.readiness.blockers)
+    return "\n".join(lines)
+
+
+def _render_execution_report(report: ExecutionReport) -> str:
+    executed = "yes" if report.executed else "no"
+    lines = [_render_execution_plan(report.execution_plan), f"executed: {executed}"]
+    result = report.materialize_result
+    if result is not None:
+        lines.append(f"issue_url: {result.issue_url}")
+        lines.append(f"issue_status: {'created' if result.issue_created else 'reused'}")
+        lines.append(f"branch: {result.branch}")
+        lines.append(f"branch_status: {'created' if result.branch_created else 'reused'}")
+        lines.append(f"contract_path: {result.contract_path}")
+        lines.append(f"contract_status: {'created' if result.contract_created else 'reused'}")
+    elif report.execution_plan.already_materialized and report.execution_plan.existing_issue_url:
+        lines.append(f"issue_url: {report.execution_plan.existing_issue_url}")
+        lines.append("issue_status: reused")
+    lines.append(f"next_operator_action: {report.next_operator_action}")
+    return "\n".join(lines)
+
+
+def _run_goal_execute_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    confirm = args.confirm and not args.dry_run
+    github_client = GitHubClient(config.github_token)
+    write_client = GitHubWriteClient(config.github_token) if confirm else None
+
+    try:
+        report = execute_goal(
+            github_client,
+            write_client,
+            repository,
+            args.goal,
+            task_order=args.task,
+            confirm=confirm,
+        )
+    except (GoalExecutorError, GitHubClientError) as exc:
+        print(f"goal execute 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(_render_execution_report(report))
+    if not confirm and report.execution_plan.readiness.ready:
+        print(
+            "\n(--confirm 없이 실행되어 아무것도 생성되지 않았습니다. "
+            "위 계획을 확인한 뒤 --confirm으로 다시 실행하세요.)"
+        )
+    return 0 if report.execution_plan.readiness.ready else 1
+
+
+def _run_goal_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    if args.goal_command == "execute":
+        return _run_goal_execute_command(args, config)
+    return _run_goal_plan_command(args, config)
 
 
 def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:

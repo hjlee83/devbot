@@ -395,6 +395,9 @@ def test_client_exposes_read_operations_only() -> None:
         "list_workflow_runs",
         "get_workflow_run",
         "download_release_asset",
+        # Task 040: goal executor idempotent-write-detection reads.
+        "get_branch_ref",
+        "get_file_content",
     }
     forbidden_names = {
         "create_issue",

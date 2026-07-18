@@ -149,6 +149,11 @@ def test_write_client_exposes_write_operations_only() -> None:
         # Task 037: dispatches the existing Release workflow; never creates
         # a tag or Release directly.
         "dispatch_workflow",
+        # Task 040: goal executor's only writes - one Issue, one branch ref,
+        # one file commit. Never opens a Pull Request or merges anything.
+        "create_issue",
+        "create_branch",
+        "create_file",
     }
 
     public_attrs = {

@@ -445,3 +445,83 @@ planned_tasks (<N>):
   catalog나 로드맵 어디에도 없는 한국어 Goal은 영어와 마찬가지로 항상
   `ambiguous`다 - 언어를 더 많이 인식한다고 해서 "지어내지 않는다"는
   기본 원칙이 약해지지 않는다.
+
+## Goal 실행 절차 (Task 040)
+
+`devbot goal plan`(Task 038)이 계산한 계획에서, 승인된 Task 하나를 실제
+DevBot 워크플로(Issue + Branch + 초안 Contract)로 구체화한다. **구현을
+시작하거나, Agent를 호출하거나, PR을 만들거나, 머지하거나, Release를
+게시하거나, 다중 Task 계획을 한 번에 전부 실행하지 않는다** - 이 Task는
+Issue+Branch+Contract 생성에서 끝난다.
+
+```bash
+# 1. 무엇이 만들어질지 미리 본다 (읽기 전용, 아무것도 쓰지 않는다).
+uv run devbot goal execute "Add a global PATH launcher." --dry-run
+
+# 2. 준비됐으면 실제로 구체화한다.
+#    single_task 계획은 --task를 생략하면 Task 1이 자동 선택된다.
+uv run devbot goal execute "Add a global PATH launcher." --confirm
+
+# multi_task 계획은 --task가 필수다.
+uv run devbot goal execute "Implement Self Update." --task 1 --confirm
+```
+
+`--confirm` 없이 실행하면(--task/--dry-run 조합과 무관하게) 절대 아무것도
+쓰지 않고, 계산된 계획과 "--confirm으로 다시 실행하세요"라는 안내만
+출력한다. `--dry-run`이 있으면 `--confirm`이 있어도 항상 읽기 전용이다
+(`release publish --dry-run`과 같은 관례 - 실수로 두 플래그를 함께 줘도
+안전한 쪽이 이긴다). 세 형태 모두 daemon lock을 잡지 않는다.
+
+### 승인 경계 (Approval Boundary)
+
+- `devbot goal plan`이 계산한 계획을 그대로 쓴다 - 실행 시점에 계획을 다시
+  계산하거나 다르게 해석하지 않는다.
+- 실행 가능한 decision은 `single_task`/`multi_task`뿐이다.
+  `already_completed`/`duplicate_open_work`/`ambiguous`는 항상 거부한다.
+- `--confirm`으로 생성되는 것은 정확히 GitHub Issue 1개, 최신 CI 검증된
+  `origin/main`에서 분기한 Branch 1개, 초안 Contract 파일 1개뿐이다. **PR은
+  만들지 않는다** - 생성된 초안 Contract는 사람 Planner가 Context/Quality
+  Gates/필수 테스트 이름/Validation Gate를 채우고 Task Contract Standard
+  (`docs/09-task-contract-standard.md`)를 통과시킨 뒤, 그 사람이 직접 PR을
+  열어야 한다. `devbot:ready` 라벨도 붙이지 않는다.
+- Claude/Codex/GPT 등 구현 Agent를 절대 호출하지 않는다.
+
+### 의존성 처리
+
+`multi_task` 계획은 `--task <order>`가 필수다. 각 Task는 정확히 하나의
+순서(order)를 가지며, **아직 구체화되지 않은 Task 중 가장 앞선 순서만
+선택할 수 있다.** 예를 들어 "Implement Self Update."는 Discovery(1) → Fetch
+and Verify(2) → Apply(3) 순서인데, Discovery의 Task Issue가 아직 없으면
+`--task 2`나 `--task 3`은 "unmet dependencies"로 거부된다. Discovery가
+구체화된 뒤에만 `--task 2`를 실행할 수 있다. "구체화됨"은 정확한 제목
+(`Task NNN: <계획된 Task 제목>`)을 가진 Issue가 (열림/닫힘 상관없이)
+존재하는지로 판정하며, 실제 구현 완료나 머지 여부는 보지 않는다.
+
+### 멱등성과 재시도
+
+Issue/Branch/Contract 각각을 독립적으로 존재 확인한 뒤 없는 것만 만든다 -
+Issue 생성 후 네트워크 문제 등으로 Branch/Contract 생성이 실패했다면,
+동일한 명령을 그대로 재시도하면 된다: 이미 만든 Issue는 재사용하고, 아직
+없는 Branch/Contract만 마저 만든다. 중복 Issue/Branch/Contract는 절대
+생성하지 않는다.
+
+방어 장치 하나: 방금 새 Issue를 만들었는데 그 Task의 canonical Branch
+이름이 (매칭되는 Issue 없이) 이미 존재한다면 - 우연한 이름 충돌 가능성으로
+보고 실행을 멈춘다. 이 경우 운영자가 직접 그 Branch를 확인하고 정리해야
+한다.
+
+### 실행 거부 사유와 복구 절차
+
+| 거부 사유 | 복구 방법 |
+| --- | --- |
+| `already_completed`/`duplicate_open_work`/`ambiguous` | 이 Goal은 실행 대상이 아니다 - `devbot goal plan`으로 이유를 다시 확인한다. |
+| 잘못된 `--task` 값 | `devbot goal plan`으로 유효한 order 목록을 확인한다. |
+| 아직 구체화되지 않은 이전 Task | 먼저 그 이전 Task를 `--task <이전 order> --confirm`으로 구체화한다. |
+| 로컬 checkout이 dirty함 | 변경사항을 커밋하거나 stash한다. |
+| local main이 origin/main과 다름 | `git fetch origin main && git switch main && git pull --ff-only`로 동기화한다. |
+| 대상 커밋이 CI 검증되지 않음 | `origin/main`의 CI(Task 039 기준)가 통과할 때까지 기다린다. |
+| GitHub API/인증 실패 | 토큰 권한과 네트워크 상태를 확인한 뒤 재시도한다(멱등적이므로 안전하다). |
+
+`devbot goal execute`가 성공적으로 Issue/Branch/초안 Contract를 만들면,
+다음 운영자 행동은 항상 출력의 `next_operator_action`에 표시된다 - 보통
+"초안 Contract를 완성하고 PR을 열라"는 안내다.

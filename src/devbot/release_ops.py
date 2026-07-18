@@ -153,7 +153,7 @@ def _previous_release_commit(
     return None
 
 
-def _target_commit_is_ci_validated(
+def target_commit_is_ci_validated(
     github_client: GitHubClient,
     repository: RepositoryConfig,
     target_commit: str,
@@ -201,7 +201,7 @@ def gather_release_context(
     target_commit = github_client.get_commit_sha(repository, repository.default_branch)
     target_commit_validation_error: str | None = None
     try:
-        target_commit_validated = _target_commit_is_ci_validated(
+        target_commit_validated = target_commit_is_ci_validated(
             github_client, repository, target_commit, workflow_file=ci_workflow_file
         )
     except GitHubClientError as exc:
