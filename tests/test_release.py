@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tarfile
+import venv
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,25 @@ from devbot.release import (
     release_rerun_result,
     validate_release_summary,
 )
+
+
+def _clean_python_env(*, path: str | None = None, pythonpath: str | None = None) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env["PYTHONNOUSERSITE"] = "1"
+    if path is not None:
+        env["PATH"] = path
+    if pythonpath is not None:
+        env["PYTHONPATH"] = pythonpath
+    return env
+
+
+def _venv_python(environment: Path) -> Path:
+    return environment / ("Scripts" if sys.platform == "win32" else "bin") / "python"
+
+
+def _venv_path(environment: Path) -> str:
+    bin_dir = environment / ("Scripts" if sys.platform == "win32" else "bin")
+    return f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
 def _pr(
@@ -202,8 +223,84 @@ def test_packaged_cli_reports_release_version(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
+        env=_clean_python_env(),
     )
     assert completed.returncode == 0
+    assert completed.stdout == "devbot 0.2.0\n"
+
+
+def test_release_artifact_vendors_locked_runtime_dependencies(tmp_path: Path) -> None:
+    artifact = build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
+
+    with tarfile.open(artifact.path) as archive:
+        names = set(archive.getnames())
+
+    assert "devbot-release/vendor/dotenv/__init__.py" in names
+    assert "devbot-release/vendor/python_dotenv-1.2.2.dist-info/METADATA" in names
+    assert "devbot-release/vendor/requests/__init__.py" in names
+    assert "devbot-release/vendor/requests-2.34.2.dist-info/METADATA" in names
+    assert "devbot-release/vendor/yaml/__init__.py" in names
+    assert "devbot-release/vendor/pyyaml-6.0.3.dist-info/METADATA" in names
+
+
+def test_packaged_cli_runs_in_clean_virtualenv_without_runtime_dependencies(tmp_path: Path) -> None:
+    artifact = build_artifact(tmp_path, version="0.1.0", os_name="portable", architecture="python")
+    extract_dir = tmp_path / "extract-clean"
+    environment = tmp_path / "clean-venv"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    python = _venv_python(environment)
+
+    missing = subprocess.run(
+        [
+            str(python),
+            "-S",
+            "-c",
+            (
+                "import importlib.util; "
+                "raise SystemExit(importlib.util.find_spec('dotenv') is not None)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_clean_python_env(path=_venv_path(environment)),
+    )
+    assert missing.returncode == 0
+
+    with tarfile.open(artifact.path) as archive:
+        archive.extractall(extract_dir, filter="data")
+    completed = subprocess.run(
+        [str(extract_dir / "devbot-release" / "bin" / "devbot"), "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_clean_python_env(path=_venv_path(environment)),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "devbot 0.1.0\n"
+
+
+def test_packaged_cli_uses_artifact_vendor_before_host_packages(tmp_path: Path) -> None:
+    artifact = build_artifact(tmp_path, version="0.2.0", os_name="portable", architecture="python")
+    extract_dir = tmp_path / "extract-vendor-first"
+    fake_host = tmp_path / "fake-host"
+    fake_host.mkdir()
+    (fake_host / "dotenv.py").write_text(
+        "raise RuntimeError('host dotenv used')\n", encoding="utf-8"
+    )
+
+    with tarfile.open(artifact.path) as archive:
+        archive.extractall(extract_dir, filter="data")
+    completed = subprocess.run(
+        [str(extract_dir / "devbot-release" / "bin" / "devbot"), "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_clean_python_env(pythonpath=str(fake_host)),
+    )
+
+    assert completed.returncode == 0, completed.stderr
     assert completed.stdout == "devbot 0.2.0\n"
 
 
@@ -223,6 +320,7 @@ def test_release_artifact_contains_real_package_code_and_version_metadata(tmp_pa
         capture_output=True,
         text=True,
         check=False,
+        env=_clean_python_env(),
     )
     assert completed.returncode == 0
     assert completed.stdout == "devbot 0.2.0\n"

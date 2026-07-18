@@ -231,9 +231,24 @@ def build_artifact(
         "#!/usr/bin/env sh\n"
         "set -eu\n"
         "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd)\n"
+        "PYTHON_BIN=\n"
+        "for candidate in python3.13 python3 python; do\n"
+        "  if command -v \"$candidate\" >/dev/null 2>&1 "
+        "&& \"$candidate\" -c 'import sys; "
+        "raise SystemExit(sys.version_info[:2] != (3, 13))'; then\n"
+        "    PYTHON_BIN=$candidate\n"
+        "    break\n"
+        "  fi\n"
+        "done\n"
+        "if [ -z \"$PYTHON_BIN\" ]; then\n"
+        "  echo 'devbot requires Python 3.13 on PATH' >&2\n"
+        "  exit 127\n"
+        "fi\n"
         "DEVBOT_PROJECT_ROOT=\"$ROOT\" "
-        "PYTHONPATH=\"$ROOT/src${PYTHONPATH:+:$PYTHONPATH}\" "
-        "python -c 'from devbot.main import main; raise SystemExit(main())' \"$@\"\n"
+        "PYTHONNOUSERSITE=1 "
+        "PYTHONPATH=\"$ROOT/vendor:$ROOT/src\" "
+        "exec \"$PYTHON_BIN\" -S -c 'from devbot.main import main; "
+        "raise SystemExit(main())' \"$@\"\n"
     )
     launcher = launcher_text.encode()
 
@@ -258,7 +273,76 @@ def build_artifact(
             _add_project_file(archive, lockfile, "devbot-release/uv.lock")
         for source in sorted((root / "src").rglob("*.py")):
             _add_project_file(archive, source, "devbot-release" / source.relative_to(root))
+        _add_locked_runtime_dependencies(archive, root)
     return Artifact(name=name, path=path, os_name=os_name, architecture=architecture)
+
+
+def _normalize_package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _locked_runtime_dependencies(project_root: Path) -> dict[str, str]:
+    lock_path = project_root / "uv.lock"
+    if not lock_path.exists():
+        raise ReleasePolicyError("portable artifact requires uv.lock for locked dependencies")
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    packages = {
+        _normalize_package_name(str(package["name"])): package
+        for package in lock.get("package", [])
+        if isinstance(package, dict) and "name" in package
+    }
+    root_package = packages.get(PRODUCT_NAME)
+    if root_package is None:
+        raise ReleasePolicyError("uv.lock does not contain the devbot package")
+
+    pending = [
+        _normalize_package_name(str(dependency["name"]))
+        for dependency in root_package.get("dependencies", [])
+        if isinstance(dependency, dict) and "name" in dependency
+    ]
+    locked: dict[str, str] = {}
+    while pending:
+        name = pending.pop(0)
+        if name in locked:
+            continue
+        package = packages.get(name)
+        if package is None:
+            raise ReleasePolicyError(f"uv.lock missing runtime dependency: {name}")
+        locked[name] = str(package["version"])
+        for dependency in package.get("dependencies", []):
+            if isinstance(dependency, dict) and "name" in dependency:
+                pending.append(_normalize_package_name(str(dependency["name"])))
+    return dict(sorted(locked.items()))
+
+
+def _add_locked_runtime_dependencies(archive: tarfile.TarFile, project_root: Path) -> None:
+    for package_name, locked_version in _locked_runtime_dependencies(project_root).items():
+        try:
+            distribution = metadata.distribution(package_name)
+        except metadata.PackageNotFoundError as exc:
+            raise ReleasePolicyError(
+                f"locked runtime dependency is not installed: {package_name}=={locked_version}"
+            ) from exc
+        if distribution.version != locked_version:
+            raise ReleasePolicyError(
+                f"installed runtime dependency {package_name}=={distribution.version} "
+                f"does not match uv.lock {locked_version}"
+            )
+        if distribution.files is None:
+            raise ReleasePolicyError(f"runtime dependency has no file manifest: {package_name}")
+        for relative in sorted(distribution.files, key=lambda path: str(path)):
+            relative_text = str(relative)
+            if (
+                ".." in relative.parts
+                or "__pycache__" in relative.parts
+                or relative_text.endswith((".pyc", ".pyo"))
+            ):
+                continue
+            source = Path(distribution.locate_file(relative))
+            if not source.is_file():
+                continue
+            _add_project_file(archive, source, Path("devbot-release/vendor") / relative_text)
+
 
 def _add_bytes(
     archive: tarfile.TarFile, name: str | Path, data: bytes, *, mode: int = 0o644
