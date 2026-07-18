@@ -358,3 +358,29 @@
       `devbot specification template show --template <id>`는 read-only
       inspection command로 제공된다. 여섯 template 출력 모두 Task 043
       Validator를 통과했다(`results/044-specification-template-engine.md`).
+- [x] Task 045: contract schema. Task Contract가 관례가 아니라 형식적으로
+      정의된 스키마를 갖도록 **Contract Schema v1**을 확정한다 - 향후
+      Metadata Parser/정책 엔진/워크플로 소비자가 의존할 안정된 경계다.
+      13개 normative 영역(Contract Version/Provenance/Task Identity/
+      Metadata/Goal/Context/Scope/Out of Scope/Deliverables/Acceptance
+      Criteria/Quality Gates/Handoff/References, References만 선택)의
+      필수 여부·cardinality·의미를 명시하고, Metadata의 5개 필드
+      (`specification_type`/`release_impact`/`risk_level`/`compatibility`/
+      `migration`, Task 044의 `specification_type` 여섯 값과 일치)에
+      canonical lowercase enum 값을 고정한다. `contract_version` 기반
+      버전 관리 규칙(하위 호환 변경은 버전을 올리지 않고, 필수 필드
+      추가·필드 제거/재정의·enum 값 제거/재정의·cardinality 변경·
+      canonical 표현 변경은 breaking으로 새 정수 버전을 요구)을
+      정의한다. `Contract Version`을 선언하지 않은 기존 44개 Task
+      Contract 전부(001/022/037/042/044로 실제 확인)는 강제 마이그레이션
+      없이 legacy로 분류된다. `docs/09-task-contract-standard.md`의 기존
+      필수 항목 14개(Risk/Rollback Strategy/Reviewer Focus/Definition of
+      Done 등)와 Schema v1의 13개 영역이 서로 다른 관심사(운영 완성도 대
+      정체성·메타데이터·버전)를 다루는 상호 보완 관계임을 검증하고 양쪽
+      문서에 상호 참조를 추가했다. `specifications/045-contract-schema.md`
+      자신도 Task 042/043의 canonical Specification 스키마를 만족하도록
+      재구성해 `devbot specification validate --task 45`를 통과한다.
+      Metadata Parser/Domain Object/Release Recommendation/CLI/Review
+      Loop/Workflow Engine/Release Automation은 이번에 전혀 구현하지
+      않았다(`specifications/045-contract-schema.md`,
+      `results/045-contract-schema.md`).

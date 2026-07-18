@@ -13,6 +13,18 @@ Issue/PR 템플릿, 최소 리뷰 진입 계약(`Review PR #<number>.`), Planner
 계속 정의하고, `docs/12-planner-workflow.md`는 그 위에 역할 경계와
 기계 검증 가능한 워크플로 계약을 추가한다.
 
+Contract의 정체성/메타데이터/버전 관리를 다루는 형식 스키마(Contract
+Version/Provenance/Task Identity/Metadata 등 13개 normative 영역과 5개
+canonical enum)는 `specifications/045-contract-schema.md`(Task 045,
+Contract Schema v1)에 정의되어 있다. 이 문서의 "필수 항목" 14개(Risk/
+Rollback Strategy/Reviewer Focus/Definition of Done/필수 테스트 이름/
+검증 명령 등 운영 완성도 항목)와 Schema v1의 13개 normative 영역은
+서로 다른 관심사를 다루는 상호 보완 관계다 - 하나가 다른 하나를
+대체하지 않으며, 실제 Task 계약서는 두 표준을 동시에 만족해야 한다.
+Schema v1은 아직 코드로 구현되지 않았다(Task 045는 스키마 정의와 문서화만
+다루고, 파서/CLI/정책 코드는 후속 Task로 남긴다) - 이 문서의 필수 항목
+검증은 지금도 그대로 적용된다.
+
 ## 핵심 원칙
 
 - Task는 실행 가능한 완성형 계약서여야 한다.
