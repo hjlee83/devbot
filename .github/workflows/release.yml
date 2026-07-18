@@ -253,6 +253,8 @@ jobs:
       - name: Create immutable tag
         if: env.release_state == 'create'
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag --annotate "${{ needs.plan-release.outputs.tag }}" \
             --message "Release ${{ needs.plan-release.outputs.tag }}" \
             "${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.sha }}"
