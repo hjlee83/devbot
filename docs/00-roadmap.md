@@ -231,3 +231,18 @@
       자산/체크섬 불일치, 빈 Release Notes 중 하나라도 있으면 게시를
       거부하며, 태그를 직접 옮기거나 워크플로를 우회하지 않는다
       (`src/devbot/release_ops.py`, `results/037-release-operator-ux.md`).
+- [x] Task 038: goal-based planning (Operator Planner). 운영자가 매 Task를
+      직접 결정하지 않아도 되도록, "Publish the next stable release." 같은
+      상위 Goal 문장을 받아 `devbot goal plan "<goal>"`이 로드맵/완료된
+      Task/열린 Issue-PR과 비교해 작업이 필요 없는지, Task 하나로
+      충분한지, 순차적인 여러 Task가 필요한지를 결정론적으로 계산한다.
+      계획은 오직 손으로 정리한 근거 기반 capability catalog
+      (`src/devbot/goal_planner.py`)와 실제 로드맵/Issue/PR 텍스트에서만
+      나오며, 지어낸 기능을 만들지 않는다. Goal이 안전하게 계획할 만큼
+      명확하지 않으면 `ambiguous`로 fail closed하고, 이미 끝났거나
+      진행 중인 작업은 새로 계획하지 않는다. 계획된 Task의 Issue/Branch/
+      Contract/PR을 직접 생성하거나 실행하지 않는다(읽기 전용). 영어와
+      한국어 Goal을 모두 1급 입력으로 지원하며(예: "셀프 업데이트 기능을
+      구현해"), 한국어도 동일한 고정 catalog/문자열 매칭 방식만 쓰고 번역이나
+      자유 생성은 하지 않는다(PR #82 리뷰 반영)
+      (`results/038-goal-based-planning.md`).

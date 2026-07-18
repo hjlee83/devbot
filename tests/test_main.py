@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from devbot.github_client import WorkflowRun
+from devbot.goal_planner import GoalPlan
 from devbot.lock import ProcessLock
 from devbot.main import _run_startup_self_update, main
 from devbot.models import DevBotConfig
@@ -230,6 +231,68 @@ def test_release_command_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
     ):
         exit_code = main(
             ["release", "preview"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
+def test_goal_plan_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    plan = GoalPlan(
+        goal="Publish the next stable release.",
+        decision="already_completed",
+        reasons=("capability domain 'release_publish' is already implemented",),
+        evidence=("Task 037",),
+    )
+
+    with (
+        patch("devbot.main.fetch_goal_plan", return_value=plan) as mock_plan,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["goal", "plan", "Publish the next stable release."],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_plan.assert_called_once()
+    mock_write_client.assert_not_called()
+    out = capsys.readouterr().out
+    assert "decision: already_completed" in out
+    assert "Task 037" in out
+
+
+def test_goal_plan_ambiguous_goal_returns_failure_exit_code(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    plan = GoalPlan(
+        goal="xyz",
+        decision="ambiguous",
+        reasons=("the Goal has too few significant, actionable words to plan safely",),
+        evidence=(),
+    )
+
+    with patch("devbot.main.fetch_goal_plan", return_value=plan):
+        exit_code = main(
+            ["goal", "plan", "xyz"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 1
+
+
+def test_goal_plan_command_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    plan = GoalPlan(goal="g", decision="already_completed", reasons=(), evidence=())
+
+    with (
+        patch("devbot.main.fetch_goal_plan", return_value=plan),
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["goal", "plan", "Publish the next stable release."],
+            env_path=env_path,
+            repositories_path=repositories_path,
         )
 
     assert exit_code == 0

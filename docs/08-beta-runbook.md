@@ -357,3 +357,91 @@ Release Notes 전문(한국어 섹션 다음 영어 섹션, 동일한 변경 사
 `release status`는 최신 stable 버전, 최신 Release 워크플로 실행
 상태, 마지막으로 게시된 커밋, 현재 게시 상태
 (`never-run`/`in-progress`/`up-to-date`/`failed`)를 보여준다.
+
+## Goal 기반 계획 절차 (Task 038)
+
+운영자가 매 Task를 직접 결정하지 않아도 되도록, 상위 목표(Goal) 한 문장을
+주면 DevBot이 로드맵/완료된 Task/열린 Issue-PR과 비교해 무엇이 필요한지
+계산해 준다.
+
+```bash
+uv run devbot goal plan "Publish the next stable release."
+```
+
+daemon lock을 잡지 않고 GitHub에 아무것도 쓰지 않는(읽기 전용) 명령이므로
+실행 중인 데몬 옆에서 안전하게 실행할 수 있다.
+
+### 입력
+
+- 위치 인자 하나: 분석할 Goal 문장(자유 텍스트). **한국어와 영어를 모두
+  1급 입력으로 지원한다** (PR #82 리뷰로 추가). 예:
+  `"Publish the next stable release."`, `"Improve Release UX."`,
+  `"Implement Self Update."`, `"Reduce GitHub API failures."`,
+  `"다음 안정 릴리스를 발행해"`, `"셀프 업데이트 기능을 구현해"`.
+  입력 텍스트는 Unicode NFC로 정규화한 뒤 처리하므로 한글이 NFC/NFD 중
+  어느 형태로 들어와도(예: macOS 일부 입력 경로에서 발생하는 자모 분리형)
+  동일하게 인식한다.
+- `--repo owner/repo` (선택): 생략하면 `config/repositories.yaml`의 단일
+  enabled 저장소를 쓴다.
+
+### 출력 스키마
+
+```
+goal: <입력한 Goal 원문>
+decision: already_completed | duplicate_open_work | single_task | multi_task | ambiguous
+reasons:
+  - <결정을 내린 이유, 최소 1개>
+evidence:
+  - <근거: Task 번호/파일, 또는 Issue/PR 참조>
+planned_tasks (<N>):
+  [<순서>] <Task 제목>
+      objective: <목표>
+      dependencies: <의존하는 다른 계획된 Task 제목, 없으면 none>
+      expected_deliverables:
+        - <산출물>
+      acceptance_criteria:
+        - <완료 기준>
+```
+
+`decision`이 `already_completed`/`duplicate_open_work`/`ambiguous`이면
+`planned_tasks`는 항상 비어 있다(0개). `single_task`는 정확히 1개,
+`multi_task`는 2개 이상의 `planned_tasks`를 반환하며, 각 항목의
+`dependencies`는 항상 더 앞선 순서의 Task만 가리킨다(순환/순방향 참조
+없음).
+
+`ambiguous`일 때만 종료 코드가 1이다 - 나머지 네 가지 `decision`은 모두
+"계획을 성공적으로 계산했다"는 뜻이므로 종료 코드 0이다.
+
+### 안전 동작과 한계
+
+- **계획된 Task의 Issue/Branch/Contract/PR을 직접 만들지 않는다.** 이
+  명령은 오직 읽기 전용 계획 수립만 한다 - 실행은 항상 사람(또는 별도
+  Planner 절차)이 한다.
+- **근거 없이 계획을 지어내지 않는다.** `planned_tasks`의 모든 title/
+  objective/expected_deliverables/acceptance_criteria는 미리 손으로 정리해
+  코드에 고정한 capability catalog(`src/devbot/goal_planner.py`의
+  `CAPABILITY_CATALOG`)에서만 나온다 - Goal 문장을 요약하거나 자유
+  생성하지 않는다. catalog에 없고 로드맵 텍스트와도 겹치지 않는 Goal은
+  항상 `ambiguous`로 처리된다.
+- **catalog는 손으로 유지 관리되며 오래될 수 있다.** 새 Task가 catalog에
+  없는 기능을 구현해도, `docs/00-roadmap.md`를 직접 비교하는 별도 경로가
+  있어 이미 완료된 작업은 (catalog가 아직 그 사실을 모르더라도)
+  `already_completed`로 잡아낼 수 있다. 다만 아직 구현되지 않은 새로운
+  종류의 Goal은 catalog를 갱신하기 전까지 `ambiguous`로만 보고된다.
+- **중복/진행 중 작업 우선순위:** 열린 Issue/PR과의 텍스트 중첩이 완료된
+  Task(로드맵)나 catalog 일치보다 먼저 확인된다 - 진행 중인 작업이 있다면
+  이미 끝난 것으로 오판하지 않기 위함이다.
+- **결정론적이며 LLM을 호출하지 않는다.** 키워드/구절 포함 매칭과 토큰
+  중첩 비율만 사용하므로, 동일한 입력(Goal, 로드맵, 열린 Issue/PR
+  목록)에는 항상 동일한 출력이 나온다 - 테스트와 재현이 쉽다는 뜻이지만,
+  자유 형식 자연어를 사람처럼 이해하지는 못한다.
+- **한국어 지원도 같은 고정 catalog/문자열 매칭 방식이며, 번역이나 자유
+  생성을 하지 않는다.** catalog의 각 도메인은 영어 keyword phrase 옆에
+  근거 있는 한국어 표현을 나란히 등록해 둔다(예: `self_update_runtime`
+  도메인은 `"self update"`와 `"셀프 업데이트"`를 모두 인식). 실행 동사
+  판정도 마찬가지로 영어 단어 집합과 한국어 어간
+  (`구현`/`추가`/`개선`/`수정`/`발행`/`게시` 등, 활용형은 부분 문자열
+  매칭으로 인식 - 예: `"구현해줘"`는 `"구현"` 어간 매칭) 양쪽을 확인한다.
+  catalog나 로드맵 어디에도 없는 한국어 Goal은 영어와 마찬가지로 항상
+  `ambiguous`다 - 언어를 더 많이 인식한다고 해서 "지어내지 않는다"는
+  기본 원칙이 약해지지 않는다.
