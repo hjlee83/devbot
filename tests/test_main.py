@@ -822,6 +822,23 @@ def test_specification_show_is_read_only(
     assert "# Specification: Task 099" in capsys.readouterr().out
 
 
+def test_specification_show_passes_template_override(
+    tmp_path: Path,
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    specification = _specification()
+
+    with patch("devbot.main.generate_specification", return_value=specification) as mock_generate:
+        exit_code = main(
+            ["specification", "show", "--task", "99", "--template", "docs"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    assert mock_generate.call_args.kwargs["template_id"] == "docs"
+
+
 def test_specification_generate_writes_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -861,6 +878,23 @@ def test_specification_generate_dry_run_does_not_write(tmp_path: Path) -> None:
 
     assert exit_code == 0
     mock_write.assert_not_called()
+
+
+def test_specification_generate_passes_template_override(
+    tmp_path: Path,
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    specification = _specification()
+
+    with patch("devbot.main.generate_specification", return_value=specification) as mock_generate:
+        exit_code = main(
+            ["specification", "generate", "--task", "99", "--template", "bugfix", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    assert mock_generate.call_args.kwargs["template_id"] == "bugfix"
 
 
 def test_specification_error_returns_failure_exit_code(tmp_path: Path) -> None:
@@ -1031,6 +1065,60 @@ def test_specification_validate_does_not_call_github(tmp_path: Path) -> None:
 
     assert exit_code == 0
     mock_github_client.assert_not_called()
+
+
+def test_specification_templates_lists_registered_templates(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with patch("devbot.main.ProcessLock") as mock_lock:
+        exit_code = main(
+            ["specification", "templates"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+    out = capsys.readouterr().out
+    assert "bugfix:" in out
+    assert out.index("bugfix:") < out.index("docs:") < out.index("feature:")
+
+
+def test_specification_template_show_is_read_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with (
+        patch("devbot.main.ProcessLock") as mock_lock,
+        patch("devbot.main.GitHubClient") as mock_github_client,
+    ):
+        exit_code = main(
+            ["specification", "template", "show", "--template", "internal"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+    mock_github_client.assert_not_called()
+    assert "template: internal" in capsys.readouterr().out
+
+
+def test_specification_template_show_unknown_returns_nonzero(
+    tmp_path: Path,
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        ["specification", "template", "show", "--template", "release"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
 
 
 def test_goal_dispatch_shows_role_resolution_without_invoking_agent(
