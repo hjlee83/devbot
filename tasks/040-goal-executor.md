@@ -270,6 +270,7 @@ continuing to pass under the new name).
 
 - Task Issue: #85
 - Branch: `task/040-goal-executor`
+- Pull Request: #86
 - Result: `results/040-goal-executor.md`
 - Do not create another Issue, Branch, or Pull Request for this Task.
 - Do not create a Pull Request for any Task materialized by this Task's own
