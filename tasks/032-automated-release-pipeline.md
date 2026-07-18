@@ -9,7 +9,7 @@ Automatically create a verified stable GitHub Release after an eligible change r
 1. Establish one authoritative semantic version source for DevBot.
 2. Automatically determine the next release version from merged PR metadata.
 3. Create the release tag and GitHub Release only after required `main` validation passes.
-4. Build one deterministic portable Python release artifact that Task 033 can install/update from.
+4. Build deterministic platform-specific release artifacts that Task 033 can install/update from.
 5. Generate and publish SHA-256 checksums for every artifact.
 6. Generate release notes from merged PR metadata.
 7. Prevent duplicate tags, duplicate releases, and partially published stable releases.
@@ -108,17 +108,18 @@ Required tests:
 - `test_release_tag_targets_validated_main_commit`
 - `test_duplicate_tag_or_release_is_rejected_without_mutation`
 
-### CP-032-6 — Reproducible portable Python artifact
+### CP-032-6 — Reproducible platform-specific artifact
 
-Build exactly one deterministic portable Python artifact for the initial release contract:
+Build deterministic platform-specific artifacts for the initial release contract:
 
-- `devbot-<version>-portable-python.tar.gz`
+- `devbot-<version>-linux-x86_64.tar.gz`
+- `devbot-<version>-macos-arm64.tar.gz`
 
 The artifact must include the real DevBot package source, locked dependency metadata, release metadata, and a launcher that Task 033 can consume. Platform-specific native launchers/installers are out of scope for this Task and will be handled by the installer/updater contract.
 
 Required tests/evidence:
 - `test_release_artifact_names_are_deterministic`
-- workflow fixture proves the release job builds `portable/python` and does not use an OS/architecture matrix
+- workflow fixture proves the release job uses an OS/architecture matrix for `ubuntu-latest / linux / x86_64` and `macos-14 / macos / arm64`
 - local package build demonstration
 
 ### CP-032-7 — Embedded artifact metadata
@@ -218,7 +219,7 @@ uv run devbot --once --dry-run
 Additionally demonstrate without publishing a real stable Release:
 
 - next-version calculation for patch, minor, major, and none
-- deterministic portable Python artifact generation
+- deterministic platform-specific artifact generation
 - complete checksum manifest generation
 - release-note generation
 - duplicate-release rejection
@@ -231,7 +232,7 @@ A real first stable Release remains a post-merge operational verification and mu
 - All checkpoints and required tests pass.
 - Merging an eligible PR to `main` can automatically produce exactly one versioned stable Release after validation.
 - Tag, runtime version, package version, artifact metadata, and Release version agree.
-- The expected portable Python artifact and its SHA-256 manifest are published atomically.
+- The expected platform-specific artifact and its SHA-256 manifest are published atomically.
 - Failed validation or packaging creates no incomplete stable Release.
 - Release creation uses minimal permissions and no long-lived PAT.
 - Result and PR Evidence record actual implementation and validation outcomes.

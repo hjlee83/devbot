@@ -5,7 +5,7 @@
 - `src/devbot/release.py`에 릴리스 정책의 순수 함수 모델을 추가했다.
 - `devbot --version`이 새 authoritative version helper를 통하도록 연결했다.
 - `.github/workflows/release.yml`을 추가해 `main` push와 `workflow_dispatch`에서 validation → plan → artifact build → draft Release → stable publication 순서로 실행되도록 했다.
-- `scripts/release_pipeline.py`를 추가해 workflow가 버전 조회, release plan 산출, portable Python artifact 생성, checksum manifest 생성을 동일한 로컬 코드로 수행하게 했다.
+- `scripts/release_pipeline.py`를 추가해 workflow가 버전 조회, release plan 산출, platform-specific artifact 생성, checksum manifest 생성을 동일한 로컬 코드로 수행하게 했다.
 - `tests/test_release.py`에 Task 032 필수 테스트와 workflow fixture 검증을 추가했다.
 
 ## 주요 설계 결정
@@ -13,7 +13,7 @@
 - 권위 버전 소스는 `pyproject.toml`의 `[project].version`이다. 설치된 CLI는 package metadata를 읽고, source-tree release tooling은 같은 값을 `pyproject.toml`에서 읽는다.
 - 릴리스 정책은 GitHub API 호출과 분리된 pure helper로 작성했다. tag 중복, release 중복, semantic version 계산, artifact naming, checksum manifest, release notes를 로컬 테스트로 검증할 수 있다.
 - `plan-release`는 대상 commit SHA를 명시 입력으로 받아 merge commit에 연결된 PR metadata와 기존 Release 목록을 검증한다. 같은 target commit에 stable/draft Release가 이미 있으면 새 버전을 증가시키지 않고 기존 version/tag를 재사용한다. `release:none`은 publish=false로 종료하고, 누락/충돌 release label은 fail-closed로 처리한다.
-- Artifact naming contract는 updater와 일치하는 portable Python artifact `devbot-<version>-portable-python.tar.gz`로 고정했다.
+- Artifact naming contract는 updater와 일치하는 platform-specific artifact `devbot-<version>-linux-x86_64.tar.gz` and `devbot-<version>-macos-arm64.tar.gz`로 고정했다.
 - Artifact는 실제 `src/` 패키지 코드, version이 주입된 `pyproject.toml`, `uv.lock`, metadata, `bin/devbot` launcher를 포함하는 deterministic tarball로 구성했다. gzip/tar metadata 시간을 고정해 동일 입력의 artifact byte가 재현된다.
 
 ## 수정 파일
@@ -35,7 +35,7 @@
 | CP-032-3 next version | `test_next_semantic_version_is_calculated_from_latest_stable_tag`, `test_prerelease_draft_and_malformed_tags_are_ignored`, `test_release_plan_uses_pr_label_and_latest_stable_release`, `test_release_plan_reuses_existing_stable_release_for_target_commit`, `test_release_plan_bumps_next_commit_after_existing_release` |
 | CP-032-4 validation gate | `test_release_workflow_structure_enforces_validation_before_publication`; workflow `publish-release` needs `validate-main` |
 | CP-032-5 safe tag/release | `test_release_tag_targets_validated_main_commit`, `test_duplicate_tag_or_release_is_rejected_without_mutation` |
-| CP-032-6 artifacts | `test_release_artifact_names_are_deterministic`, `test_release_artifact_generation_is_reproducible`; workflow builds portable/python artifact without an OS/architecture matrix |
+| CP-032-6 artifacts | `test_release_artifact_names_are_deterministic`, `test_release_artifact_generation_is_reproducible`; workflow builds linux/x86_64 and macos/arm64 artifact without an OS/architecture matrix |
 | CP-032-7 embedded metadata | `test_packaged_cli_reports_release_version` |
 | CP-032-8 checksum manifest | `test_checksum_manifest_covers_every_release_artifact`, `test_checksum_manifest_is_deterministic` |
 | CP-032-9 atomic publication | workflow verifies artifacts/checksums before `gh release create --draft`, then publishes with `gh release edit --draft=false` |
@@ -48,7 +48,7 @@
 
 ## 재리뷰 Blocker 대응: Portable Release Artifact와 Version Consistency
 
-- OS/architecture별 가짜 shell-script artifact matrix를 제거하고 portable Python artifact 하나로 계약을 변경했다.
+- release workflow를 실제 platform-specific artifact matrix로 정렬했다.
 - `build_artifact()`는 실제 `src/devbot` 패키지 코드와 `pyproject.toml`을 tarball에 포함한다.
 - Artifact 생성 시 계산된 release version을 artifact 내부 `pyproject.toml`에 주입한다.
 - Artifact launcher는 `DEVBOT_PROJECT_ROOT`와 `PYTHONPATH`를 artifact 내부 source tree로 설정해 실제 `devbot.main`을 실행한다.
@@ -99,9 +99,9 @@
   - same target commit existing stable Release → existing version/tag reused, publish=false
   - same target commit existing draft Release → existing version/tag reused, publish=true
 - 대표 artifact 생성: PASS
-  - `devbot-0.2.0-portable-python.tar.gz`
+  - `devbot-0.2.0-linux-x86_64.tar.gz` and `devbot-0.2.0-macos-arm64.tar.gz`
 - checksum manifest 생성: PASS
-  - portable Python artifact의 SHA-256 항목 생성 확인
+  - platform-specific artifact의 SHA-256 항목 생성 확인
 - release-note generation: PASS
   - `## devbot 0.2.0`
   - `- minor: #67 Task 032: Automated Release Pipeline`
