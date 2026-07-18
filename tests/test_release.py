@@ -657,7 +657,15 @@ def test_release_workflow_uses_platform_artifact_matrix_and_manual_dispatch() ->
     assert '--os-name "${{ matrix.os_name }}"' in build_steps
     assert '--architecture "${{ matrix.architecture }}"' in build_steps
     assert "release-${{ matrix.os_name }}-${{ matrix.architecture }}" in str(build_job)
-    assert "Smoke packaged DevBot" in [step.get("name") for step in build_job["steps"]]
+
+    smoke_step = next(
+        step for step in build_job["steps"] if step.get("name") == "Smoke packaged DevBot"
+    )
+    smoke_run = smoke_step["run"]
+    assert 'PYTHON_BIN="$(uv python find 3.13)"' in smoke_run
+    assert 'PATH="$(dirname "$PYTHON_BIN"):$PATH" \\' in smoke_run
+    assert "smoke/devbot-release/bin/devbot --version" in smoke_run
+
     assert workflow[True]["workflow_dispatch"]["inputs"]["increment"]["options"] == [
         "patch",
         "minor",
