@@ -384,3 +384,25 @@
       Loop/Workflow Engine/Release Automation은 이번에 전혀 구현하지
       않았다(`specifications/045-contract-schema.md`,
       `results/045-contract-schema.md`).
+- [x] Task 046: contract metadata engine. Task 045의 Contract Schema v1
+      위에 실제 런타임 파서를 구현한다 - 새 `src/devbot/
+      contract_metadata.py`가 `parse_contract_metadata(text) ->
+      ContractParseResult` 하나로 Task Contract Markdown을 결정론적으로
+      타입화된 메타데이터로 파싱하는 유일한 컴포넌트다. `## Contract
+      Version`이 없는 Contract는 명시적으로 legacy로 분류되고(에러
+      아님, 강제 마이그레이션 없음), 일단 `Contract Version` 섹션이
+      존재하면 그 이후 잘못된/미지원 내용은 legacy로 조용히 되돌아가지
+      않고 항상 fail closed한다(미지원 버전/형식이 아닌 버전/필수 섹션
+      누락·중복/필수 Metadata 필드 누락·중복/알 수 없는 필드/잘못된
+      enum 값/Task Identity 불일치 9종 전용 예외). `x-` 접두사 확장
+      필드는 별도의 불변 매핑에 보존되며 5개 핵심 필드 값에 절대 영향을
+      주지 않는다(예: `x-specification_type`가 실제 `specification_type`
+      값을 절대 덮어쓰지 못함을 테스트로 고정). CLI/정책/Release
+      Recommendation/Review Loop/Workflow Engine은 이번에 전혀 구현하지
+      않았다. `specifications/046-contract-metadata-engine.md`도 Task
+      042/043의 canonical Specification 스키마를 만족하도록 재구성해
+      (Task 045와 같은 패턴) `devbot specification validate --task 46`을
+      통과한다. 실제 저장소의 Task 046 자신의 Contract(Schema v1)와
+      6개의 legacy Contract(001/022/037/042/044/045)를 대상으로 라이브
+      검증했다(`src/devbot/contract_metadata.py`,
+      `results/046-contract-metadata-engine.md`).
