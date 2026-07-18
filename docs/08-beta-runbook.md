@@ -373,9 +373,14 @@ daemon lock을 잡지 않고 GitHub에 아무것도 쓰지 않는(읽기 전용)
 
 ### 입력
 
-- 위치 인자 하나: 분석할 Goal 문장(자유 텍스트). 예:
+- 위치 인자 하나: 분석할 Goal 문장(자유 텍스트). **한국어와 영어를 모두
+  1급 입력으로 지원한다** (PR #82 리뷰로 추가). 예:
   `"Publish the next stable release."`, `"Improve Release UX."`,
-  `"Implement Self Update."`, `"Reduce GitHub API failures."`
+  `"Implement Self Update."`, `"Reduce GitHub API failures."`,
+  `"다음 안정 릴리스를 발행해"`, `"셀프 업데이트 기능을 구현해"`.
+  입력 텍스트는 Unicode NFC로 정규화한 뒤 처리하므로 한글이 NFC/NFD 중
+  어느 형태로 들어와도(예: macOS 일부 입력 경로에서 발생하는 자모 분리형)
+  동일하게 인식한다.
 - `--repo owner/repo` (선택): 생략하면 `config/repositories.yaml`의 단일
   enabled 저장소를 쓴다.
 
@@ -430,3 +435,13 @@ planned_tasks (<N>):
   중첩 비율만 사용하므로, 동일한 입력(Goal, 로드맵, 열린 Issue/PR
   목록)에는 항상 동일한 출력이 나온다 - 테스트와 재현이 쉽다는 뜻이지만,
   자유 형식 자연어를 사람처럼 이해하지는 못한다.
+- **한국어 지원도 같은 고정 catalog/문자열 매칭 방식이며, 번역이나 자유
+  생성을 하지 않는다.** catalog의 각 도메인은 영어 keyword phrase 옆에
+  근거 있는 한국어 표현을 나란히 등록해 둔다(예: `self_update_runtime`
+  도메인은 `"self update"`와 `"셀프 업데이트"`를 모두 인식). 실행 동사
+  판정도 마찬가지로 영어 단어 집합과 한국어 어간
+  (`구현`/`추가`/`개선`/`수정`/`발행`/`게시` 등, 활용형은 부분 문자열
+  매칭으로 인식 - 예: `"구현해줘"`는 `"구현"` 어간 매칭) 양쪽을 확인한다.
+  catalog나 로드맵 어디에도 없는 한국어 Goal은 영어와 마찬가지로 항상
+  `ambiguous`다 - 언어를 더 많이 인식한다고 해서 "지어내지 않는다"는
+  기본 원칙이 약해지지 않는다.

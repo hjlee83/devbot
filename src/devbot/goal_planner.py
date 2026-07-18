@@ -1,13 +1,25 @@
 """Task 038: Goal-based Planning (Operator Planner).
 
 `devbot goal plan "<goal>"` lets an operator state a high-level Goal ("Publish
-the next stable release.", "Implement Self Update.") instead of manually
-deciding which Task(s) to write. This module never invents scope: it only
-ever cites (a) a small hand-curated catalog of capability domains whose
-`evidence`/planned-task deliverables are grounded in real Task numbers and
-doc text that existed when the catalog was written, (b) real
-`docs/00-roadmap.md` entries, or (c) real open GitHub Issues/Pull Requests.
-A Goal that matches none of these is reported `ambiguous`, never guessed at.
+the next stable release.", "Implement Self Update.", "셀프 업데이트 기능을
+구현해", "다음 안정 릴리스를 발행해") instead of manually deciding which
+Task(s) to write. This module never invents scope: it only ever cites (a) a
+small hand-curated catalog of capability domains whose `evidence`/planned-task
+deliverables are grounded in real Task numbers and doc text that existed when
+the catalog was written, (b) real `docs/00-roadmap.md` entries, or (c) real
+open GitHub Issues/Pull Requests. A Goal that matches none of these is
+reported `ambiguous`, never guessed at.
+
+**Language contract:** English and Korean Goal text are both first-class
+inputs (PR #82 review). Text is Unicode-normalized (NFC) before matching;
+tokenization recognizes Hangul syllables as well as ASCII words; the
+actionable-verb gate and every catalog domain's `keywords` include Korean
+phrases alongside their English equivalents. There is no free-form
+translation or generation anywhere in this module - Korean support is the
+same fixed-catalog/substring-matching mechanism as English, just with more
+phrases in it. A Goal in a language with no matching catalog/roadmap
+evidence at all (English or Korean or otherwise) is still `ambiguous` -
+recognizing more phrasings does not weaken the fail-closed default.
 
 Two layers, mirroring `devbot.release_ops`: `plan_goal()` is pure (given
 already-fetched roadmap text and open-work titles, no network calls, fully
@@ -20,6 +32,7 @@ contracts, or PRs, and does not execute the plan it produces.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,8 +107,13 @@ _STOPWORDS = _GRAMMATICAL_STOPWORDS | _BOILERPLATE_STOPWORDS
 
 # A Goal must contain at least one of these to be treated as an actionable
 # request at all - otherwise it is ambiguous regardless of any keyword
-# overlap (CP-038 ambiguity gate).
-_ACTIONABLE_VERBS = frozenset(
+# overlap (CP-038 ambiguity gate). English verbs are matched as whole
+# tokens (`goal_tokens & _ACTIONABLE_VERBS_EN`); Korean verbs are matched as
+# a substring of the normalized Goal text (`_ACTIONABLE_VERB_STEMS_KO`),
+# since Korean is agglutinative - a verb stem like "구현" ("implement")
+# always appears with a conjugated ending attached ("구현해", "구현하다",
+# "구현해줘"), never as a bare token.
+_ACTIONABLE_VERBS_EN = frozenset(
     {
         "add",
         "automate",
@@ -116,15 +134,48 @@ _ACTIONABLE_VERBS = frozenset(
     }
 )
 
+_ACTIONABLE_VERB_STEMS_KO: tuple[str, ...] = (
+    "구현",  # implement
+    "추가",  # add
+    "생성",  # create/generate
+    "개선",  # improve
+    "수정",  # fix
+    "제거",  # remove
+    "지원",  # support
+    "발행",  # publish (release)
+    "게시",  # publish (post)
+    "감소",  # reduce
+    "줄이",  # reduce (줄이다/줄여)
+    "자동화",  # automate
+    "감지",  # detect
+    "탐지",  # detect
+    "활성화",  # enable
+    "만들",  # build/make (만들다/만들어)
+)
+
 _MIN_SIGNIFICANT_TOKENS = 2
 _OPEN_WORK_OVERLAP_THRESHOLD = 0.6
 _ROADMAP_OVERLAP_THRESHOLD = 0.5
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# `가-힣` is the precomposed Hangul syllable block, so a Korean
+# Goal tokenizes into its space-separated words (each still carrying any
+# attached grammatical particle/ending - see `_ACTIONABLE_VERB_STEMS_KO`'s
+# docstring above) instead of contributing zero significant tokens.
+_TOKEN_RE = re.compile(r"[a-z0-9]+|[가-힣]+")
+
+
+def _normalize(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
 
 
 def _tokenize(text: str) -> frozenset[str]:
-    return frozenset(_TOKEN_RE.findall(text.lower())) - _STOPWORDS
+    return frozenset(_TOKEN_RE.findall(_normalize(text).lower())) - _STOPWORDS
+
+
+def _has_actionable_verb(goal_tokens: frozenset[str], normalized_goal: str) -> bool:
+    if goal_tokens & _ACTIONABLE_VERBS_EN:
+        return True
+    return any(stem in normalized_goal for stem in _ACTIONABLE_VERB_STEMS_KO)
 
 
 def _overlap_score(goal_tokens: frozenset[str], candidate_text: str) -> float:
@@ -216,6 +267,13 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
             "release publish",
             "cut a release",
             "cut the release",
+            "다음 안정 릴리스",
+            "다음 stable release",
+            "릴리스를 발행",
+            "릴리스 발행",
+            "릴리스를 게시",
+            "릴리스 게시",
+            "스테이블 릴리스 발행",
         ),
         implemented=True,
         evidence=(
@@ -232,6 +290,9 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
             "release notes generation",
             "bilingual release notes",
             "automatic release notes",
+            "릴리스 노트 생성",
+            "릴리스 노트를 생성",
+            "릴리스 노트 자동 생성",
         ),
         implemented=True,
         evidence=(
@@ -247,6 +308,10 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
             "release operator ux",
             "release ux",
             "improve release experience",
+            "릴리스 ux를 개선",
+            "릴리스 ux 개선",
+            "릴리스 경험을 개선",
+            "릴리스 경험 개선",
         ),
         implemented=True,
         evidence=(
@@ -263,6 +328,10 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
             "github api retry",
             "transient github failures",
             "flaky github api",
+            "github api 실패를 감소",
+            "github api 실패 감소",
+            "github api 안정성",
+            "github api 재시도",
         ),
         implemented=True,
         evidence=(
@@ -273,7 +342,13 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
     ),
     CapabilityDomain(
         domain_id="automatic_merge",
-        keywords=("automatic merge", "auto merge devbot", "automerge"),
+        keywords=(
+            "automatic merge",
+            "auto merge devbot",
+            "automerge",
+            "자동 머지",
+            "자동 병합",
+        ),
         implemented=True,
         evidence=(
             "B2 (자동 머지 안전 게이트, `src/devbot/automerge.py`) already implements "
@@ -287,6 +362,10 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
             "install devbot on path",
             "global launcher",
             "path launcher",
+            "글로벌 path 런처",
+            "path에 devbot 설치",
+            "전역 실행 파일",
+            "전역 런처",
         ),
         implemented=False,
         evidence=(
@@ -330,6 +409,11 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
             "automatic update",
             "runtime update",
             "update client",
+            "셀프 업데이트",
+            "셀프업데이트",
+            "자체 업데이트",
+            "자동 업데이트",
+            "자동 갱신",
         ),
         implemented=False,
         evidence=(
@@ -408,7 +492,7 @@ CAPABILITY_CATALOG: tuple[CapabilityDomain, ...] = (
 
 
 def _match_catalog_domain(goal_text: str) -> CapabilityDomain | None:
-    normalized = goal_text.lower()
+    normalized = _normalize(goal_text).lower()
     for domain in CAPABILITY_CATALOG:
         if any(keyword in normalized for keyword in domain.keywords):
             return domain
@@ -519,10 +603,11 @@ def plan_goal(
 ) -> GoalPlan:
     """Pure decision core. `open_work` is `(searchable_text, reference)`
     pairs for every open Issue/PR (title + body). No network calls."""
+    normalized_goal = _normalize(goal).lower()
     goal_tokens = _tokenize(goal)
 
-    if len(goal_tokens) < _MIN_SIGNIFICANT_TOKENS or not (
-        goal_tokens & _ACTIONABLE_VERBS
+    if len(goal_tokens) < _MIN_SIGNIFICANT_TOKENS or not _has_actionable_verb(
+        goal_tokens, normalized_goal
     ):
         return GoalPlan(
             goal=goal,

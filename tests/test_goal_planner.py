@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -355,3 +356,62 @@ def test_pull_request_dataclass_still_has_no_title_field() -> None:
     field_names = {field.name for field in dataclasses.fields(PullRequest)}
     assert "title" not in field_names
     assert "body" in field_names
+
+
+# --------------------------------------------------------------------------
+# Korean-language Goal support (PR #82 review)
+# --------------------------------------------------------------------------
+
+
+def test_korean_goal_matching_implemented_catalog_domain_is_already_completed() -> None:
+    plan = plan_goal("다음 안정 릴리스를 발행해")
+
+    assert plan.decision == "already_completed"
+    assert plan.planned_tasks == ()
+    assert any("Task 037" in item for item in plan.evidence)
+
+
+def test_korean_goal_matching_not_implemented_domain_is_multi_task() -> None:
+    plan = plan_goal("셀프 업데이트 기능을 구현해")
+
+    assert plan.decision == "multi_task"
+    assert len(plan.planned_tasks) == 3
+    assert [task.order for task in plan.planned_tasks] == [1, 2, 3]
+    assert dependency_order_is_valid(plan.planned_tasks)
+
+
+def test_korean_goal_with_no_actionable_verb_is_ambiguous() -> None:
+    plan = plan_goal("그거 좀 해줘")
+
+    assert plan.decision == "ambiguous"
+    assert plan.planned_tasks == ()
+
+
+def test_korean_goal_without_catalog_or_roadmap_evidence_is_ambiguous_not_invented() -> None:
+    plan = plan_goal("양자 순간이동 대시보드를 구현해줘")
+
+    assert plan.decision == "ambiguous"
+    assert plan.planned_tasks == ()
+    assert "inventing scope" in plan.reasons[0]
+
+
+def test_nfd_and_nfc_korean_input_match_identically() -> None:
+    nfc_goal = "다음 안정 릴리스를 발행해"
+    nfd_goal = unicodedata.normalize("NFD", nfc_goal)
+    assert nfc_goal != nfd_goal  # sanity: the two encodings really do differ
+
+    assert plan_goal(nfc_goal).decision == plan_goal(nfd_goal).decision == "already_completed"
+
+
+def test_korean_goal_overlapping_open_issue_is_duplicate_open_work() -> None:
+    open_work = [
+        (
+            "릴리스 발행 시 Slack 알림 통합 기능 추가",
+            "Issue #99: Slack 알림 통합",
+        )
+    ]
+
+    plan = plan_goal("릴리스 발행 시 Slack 알림 통합 기능 추가", open_work=open_work)
+
+    assert plan.decision == "duplicate_open_work"
+    assert plan.evidence == ("Issue #99: Slack 알림 통합",)

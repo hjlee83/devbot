@@ -1,5 +1,37 @@
 # Task 038 Result: Goal-based Planning (Operator Planner)
 
+## 리뷰 반영 (PR #82, hjlee83)
+
+1차 리뷰에서 blocking 지적을 받았다: `_TOKEN_RE = re.compile(r"[a-z0-9]+")`가 ASCII만
+매칭해 한국어 Goal은 유의미한 토큰이 0개가 되어 무조건 `ambiguous`로 처리됐다. 이
+저장소의 실제 운영자 워크플로가 한국어 중심이므로(`"셀프 업데이트 기능을
+구현해"`, `"다음 안정 릴리스를 발행해"` 같은 입력이 동작해야 한다는 지적), 언어
+계약을 명시하고 한국어를 지원하라는 요구를 받았다.
+
+반영 내용:
+
+- `unicodedata.normalize("NFC", ...)`로 입력 텍스트를 정규화한 뒤 처리한다
+  (`_normalize()`). NFC/NFD 인코딩이 달라도 동일하게 매칭된다.
+- 토큰 정규식에 한글 음절 블록(`가-힣`)을 추가해(`_TOKEN_RE`) 한국어 Goal도
+  유의미한 토큰을 얻는다.
+- 실행 동사 판정을 이중화했다(`_has_actionable_verb`): 영어는 기존처럼 토큰
+  집합 교집합(`_ACTIONABLE_VERBS_EN`), 한국어는 어간 부분 문자열 매칭
+  (`_ACTIONABLE_VERB_STEMS_KO`: 구현/추가/생성/개선/수정/제거/지원/발행/게시/
+  감소/줄이/자동화/감지/탐지/활성화/만들) - 한국어는 교착어라 어간에 활용
+  어미가 붙으므로("구현해", "구현해줘") 정확 토큰 매칭 대신 부분 문자열
+  매칭을 쓴다.
+- catalog의 6개 도메인 모두에 근거 있는 한국어 keyword phrase를 영어 phrase
+  옆에 추가했다(자유 생성이 아니라 각 도메인이 이미 가진 것과 같은 개념을
+  한국어로 표현한 것뿐).
+- 자유 텍스트 생성이나 번역 기능은 추가하지 않았다 - 결정론적/fail-closed
+  설계는 그대로 유지된다: catalog나 로드맵에 없는 한국어 Goal도 영어와
+  동일하게 `ambiguous`다.
+- 회귀 테스트 6개 추가(완료된 Goal, multi-task Goal, 실행 동사 없음, catalog/
+  로드맵 근거 없음, NFC/NFD 동일 처리, 열린 작업 중복 - 모두 한국어).
+- `docs/08-beta-runbook.md`와 이 모듈의 docstring에 언어 계약을 명시했다.
+- `tasks/038-goal-based-planning.md`에 CP-038-11을 추가해 이 변경을 계약에
+  반영했다.
+
 ## 완료 내용
 
 - `devbot goal plan "<goal>"` CLI를 추가했다 (`src/devbot/main.py`의
@@ -82,13 +114,14 @@
 | CP-038-8 로드맵 파싱 | `test_parse_roadmap_extracts_completed_and_incomplete_entries` |
 | CP-038-9 문서와 근거 | 본 Result, `docs/00-roadmap.md`, `docs/08-beta-runbook.md` |
 | CP-038-10 검증 게이트 | `uv run ruff check .`, `uv run pytest` |
+| CP-038-11 한국어 Goal 지원 (PR #82 리뷰) | `test_korean_goal_matching_implemented_catalog_domain_is_already_completed`, `test_korean_goal_matching_not_implemented_domain_is_multi_task`, `test_korean_goal_with_no_actionable_verb_is_ambiguous`, `test_korean_goal_without_catalog_or_roadmap_evidence_is_ambiguous_not_invented`, `test_nfd_and_nfc_korean_input_match_identically`, `test_korean_goal_overlapping_open_issue_is_duplicate_open_work` |
 
 ## Validation 결과
 
 - `uv run ruff check .`: PASS
-- `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS, 632 passed
-  (기존 609개 + 이번 Task에서 추가한 23개: `tests/test_goal_planner.py` 20개,
-  `tests/test_main.py` 3개)
+- `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS, 638 passed
+  (기존 609개 + 최초 구현 23개 + 리뷰 반영(한국어 지원) 6개:
+  `tests/test_goal_planner.py` 26개, `tests/test_main.py` 3개)
 
 ## 수동 검증 결과
 
@@ -117,6 +150,15 @@ Goal과 거의 모든 열린 Issue/PR 사이의 중첩 점수를 부풀리고 �
 `test_repo_name_and_task_template_boilerplate_do_not_inflate_overlap`로 고정했다.
 수정 후 위 세 가지 예시는 모두 의도한 대로 판정된다.
 
+**리뷰 반영 후 한국어 라이브 검증** (읽기 전용, 아무것도 쓰지 않음):
+
+- `uv run devbot goal plan "다음 안정 릴리스를 발행해"` →
+  `decision: already_completed`, evidence: Task 037. (종료 코드 0)
+- `uv run devbot goal plan "셀프 업데이트 기능을 구현해"` →
+  `decision: multi_task`, 3개 Task(Self-Update Discovery → Fetch and Verify →
+  Apply), 의존성 순서대로. (종료 코드 0)
+- `uv run devbot goal plan "그거 좀 해줘"` → `decision: ambiguous`. (종료 코드 1)
+
 ## 남은 TODO와 제한
 
 - **capability catalog는 손으로 유지 관리되며 자동으로 최신 상태를 유지하지
@@ -132,6 +174,13 @@ Goal과 거의 모든 열린 Issue/PR 사이의 중첩 점수를 부풀리고 �
   이는 의도된 설계(지어내지 않기 위함)이며 버그가 아니다.
 - 계획 실행(계획된 Task의 실제 Issue/Branch/Contract/PR 생성)은 계약에서 명시적
   범위 밖으로 뒀다 - 후속 Task가 필요하다.
+- **한국어 토큰화는 형태소 분석이 아니라 한글 음절 블록을 통째로 잡는
+  정규식(`[가-힣]+`)이다.** catalog 매칭(부분 문자열 포함 검사)에는 영향이
+  없지만, 로드맵/열린 Issue-PR 텍스트 중첩 비율 계산(`_overlap_score`,
+  토큰 집합 기반)에서는 조사가 붙은 한국어 단어("릴리스를"과 "릴리스"처럼
+  같은 어근이라도 조사가 다르면 다른 토큰)가 완전히 일치하지 않을 수 있어,
+  영어보다 한국어 로드맵 fallback 매칭의 정밀도가 다소 낮을 수 있다. catalog
+  가 있는 도메인(대부분의 실제 사용 사례)은 이 한계의 영향을 받지 않는다.
 
 ## 위험 요소
 

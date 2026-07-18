@@ -158,6 +158,24 @@ Required commands:
 - `uv run ruff check .`
 - `uv run pytest`
 
+### CP-038-11 - Korean-language Goal support (PR #82 review)
+
+The Goal language contract (English + Korean, both first-class) is explicit in
+`docs/08-beta-runbook.md` and this module's docstring. Goal text is Unicode-normalized
+(NFC) before matching; tokenization recognizes Hangul syllables; the actionable-verb
+gate and every catalog domain's `keywords` include grounded Korean phrases alongside
+their existing English equivalents. No free-form translation or generation is
+introduced - Korean support uses the same fixed-catalog/substring-matching mechanism
+as English.
+
+Required tests:
+- `test_korean_goal_matching_implemented_catalog_domain_is_already_completed`
+- `test_korean_goal_matching_not_implemented_domain_is_multi_task`
+- `test_korean_goal_with_no_actionable_verb_is_ambiguous`
+- `test_korean_goal_without_catalog_or_roadmap_evidence_is_ambiguous_not_invented`
+- `test_nfd_and_nfc_korean_input_match_identically`
+- `test_korean_goal_overlapping_open_issue_is_duplicate_open_work`
+
 ## Validation Gate
 
 ```bash
