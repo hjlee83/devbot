@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from devbot.release import (
+    RELEASE_NOTE_SECTIONS,
     PullRequestMetadata,
     ReleasePolicyError,
     ReleaseRecord,
@@ -21,7 +22,9 @@ from devbot.release import (
     build_artifact,
     checksum_manifest,
     expected_artifact_names,
+    initial_release_notes,
     latest_stable_version,
+    manual_release_plan,
     next_version,
     release_artifact_name,
     release_increment_for_pr,
@@ -265,11 +268,23 @@ def test_checksum_manifest_is_deterministic(tmp_path: Path) -> None:
         checksum_manifest([], expected_names=expected)
 
 
+def _assert_standard_release_note_sections(notes: str) -> None:
+    for section in RELEASE_NOTE_SECTIONS:
+        assert f"### {section}\n" in notes
+    assert notes.index("### What's New") < notes.index("### Improvements")
+    assert notes.index("### Improvements") < notes.index("### Fixes")
+    assert notes.index("### Fixes") < notes.index("### Operational Changes")
+    assert notes.index("### Operational Changes") < notes.index("### Upgrade Notes")
+    assert notes.index("### Upgrade Notes") < notes.index("### Known Limitations")
+
+
 def test_release_note_generation_is_deterministic() -> None:
-    assert release_notes(_pr(labels=("release:minor",)), "minor", "0.2.0") == (
-        "## devbot 0.2.0\n\n"
-        "- minor: #67 Task 032: Automated Release Pipeline\n"
-    )
+    notes = release_notes(_pr(labels=("release:minor",)), "minor", "0.2.0")
+
+    assert notes.startswith("## devbot 0.2.0\n\n")
+    _assert_standard_release_note_sections(notes)
+    assert "- minor: #67 Task 032: Automated Release Pipeline" in notes
+    assert "No additional improvements recorded for this release." in notes
 
 
 def test_release_plan_uses_pr_label_and_latest_stable_release() -> None:
@@ -288,6 +303,62 @@ def test_release_plan_uses_pr_label_and_latest_stable_release() -> None:
     assert plan.increment == "minor"
     assert plan.new_version == "0.3.0"
     assert plan.tag == "v0.3.0"
+
+
+def test_release_plan_bootstraps_first_stable_release_from_authoritative_initial_version() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:minor",), merge_commit_sha="commit-a"),
+        releases=(
+            ReleaseRecord("v0.1.0-alpha.1", "commit-zero", prerelease=True),
+            ReleaseRecord("v0.0.9", "feature-commit"),
+        ),
+        main_commits={"commit-zero", "commit-a"},
+        initial_version="0.1.0",
+        target_commit="commit-a",
+    )
+
+    assert plan.publish is True
+    assert plan.previous_version == "0.1.0"
+    assert plan.increment == "minor"
+    assert plan.new_version == "0.1.0"
+    assert plan.tag == "v0.1.0"
+    _assert_standard_release_note_sections(plan.notes)
+    assert "Source commit: `commit-a`" in plan.notes
+    assert "Portable Python release artifact" in plan.notes
+    assert "Runtime automatic update discovery" in plan.notes
+    assert "- minor: #67 Task 032: Automated Release Pipeline" not in plan.notes
+
+
+def test_release_plan_bootstraps_first_stable_release_regardless_of_increment_label() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:major",), merge_commit_sha="commit-major"),
+        releases=(ReleaseRecord("v0.1.0-alpha.1", "commit-zero", prerelease=True),),
+        main_commits={"commit-zero", "commit-major"},
+        initial_version="0.1.0",
+        target_commit="commit-major",
+    )
+
+    assert plan.publish is True
+    assert plan.increment == "major"
+    assert plan.new_version == "0.1.0"
+    assert plan.tag == "v0.1.0"
+    assert "Source commit: `commit-major`" in plan.notes
+
+
+def test_manual_release_plan_bootstraps_first_stable_from_initial_version() -> None:
+    plan = manual_release_plan(
+        increment="patch",
+        releases=(ReleaseRecord("v0.1.0-alpha.1", "commit-zero", prerelease=True),),
+        main_commits={"commit-zero", "commit-a"},
+        initial_version="0.1.0",
+        target_commit="commit-a",
+    )
+
+    assert plan.publish is True
+    assert plan.previous_version == "0.1.0"
+    assert plan.increment == "patch"
+    assert plan.new_version == "0.1.0"
+    assert plan.tag == "v0.1.0"
 
 
 
@@ -535,3 +606,148 @@ def test_release_pipeline_plan_command_writes_github_outputs(tmp_path: Path) -> 
     assert plan["version"] == "0.2.1"
     assert plan["tag"] == "v0.2.1"
     assert "publish=true" in github_output.read_text(encoding="utf-8")
+
+
+def test_release_pipeline_plan_command_bootstraps_first_stable_release(tmp_path: Path) -> None:
+    event = tmp_path / "event.json"
+    releases = tmp_path / "releases.json"
+    main_commits = tmp_path / "main-commits.json"
+    output = tmp_path / "plan.json"
+    event.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "number": 69,
+                    "title": "Task 033: Bootstrap Initial Release",
+                    "labels": [{"name": "release:minor"}],
+                    "merged": True,
+                    "base": {"ref": "main"},
+                    "merge_commit_sha": "initial-main",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    releases.write_text(
+        json.dumps(
+            [{"tag_name": "v0.1.0-alpha.1", "target_commitish": "old", "prerelease": True}]
+        ),
+        encoding="utf-8",
+    )
+    main_commits.write_text(json.dumps(["old", "initial-main"]), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/release_pipeline.py",
+            "plan",
+            "--event-name",
+            "push",
+            "--event-json",
+            str(event),
+            "--releases-json",
+            str(releases),
+            "--main-commits-json",
+            str(main_commits),
+            "--initial-version",
+            "0.1.0",
+            "--target-commit",
+            "initial-main",
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    plan = json.loads(output.read_text(encoding="utf-8"))
+    assert plan["publish"] is True
+    assert plan["previous_version"] == "0.1.0"
+    assert plan["increment"] == "minor"
+    assert plan["version"] == "0.1.0"
+    assert plan["tag"] == "v0.1.0"
+
+
+def test_initial_release_notes_use_standard_future_sections() -> None:
+    notes = initial_release_notes(version="0.1.0", source_commit="6526cfe")
+
+    assert notes.startswith("## devbot 0.1.0\n")
+    assert "Source commit: `6526cfe`" in notes
+    for section in RELEASE_NOTE_SECTIONS:
+        assert f"### {section}\n" in notes
+    assert notes.index("### What's New") < notes.index("### Improvements")
+    assert "Portable Python release artifact" in notes
+    assert "Runtime automatic update discovery" in notes
+
+
+def test_history_marks_initial_release_pending_and_preserves_required_milestones() -> None:
+    history = Path("docs/history.md").read_text(encoding="utf-8")
+
+    expected_sections = [
+        "## Release Notes Format",
+        "## Stable Releases",
+        "## Development Milestones Through Task 032",
+        "## Initial Release Notes",
+    ]
+    for section in expected_sections:
+        assert section in history
+
+    release_note_sections = [
+        f"{index}. {section}" for index, section in enumerate(RELEASE_NOTE_SECTIONS, 1)
+    ]
+    assert "\n".join(release_note_sections) in history
+
+    assert "pending operator-controlled publication" in history
+    assert "No official stable GitHub Release has been published yet." in history
+    assert "this document does not claim that" in history
+    assert "- Intended Release URL:" in history
+    assert "- Release URL:" not in history
+    assert "retrospective stable\nRelease tags" in history
+
+    for milestone in (
+        "Task 000",
+        "Tasks 001-005",
+        "Tasks 006-009",
+        "Tasks 010-012",
+        "Tasks 013-020",
+        "Tasks 021-027",
+        "Task 028",
+        "Task 029",
+        "Task 030",
+        "Task 031",
+        "Task 032",
+    ):
+        assert milestone in history
+
+
+def test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract(
+    tmp_path: Path,
+) -> None:
+    version = authoritative_version(Path.cwd())
+    assert version == "0.1.0"
+    assert SemanticVersion.parse(version).tag == "v0.1.0"
+
+    artifact = build_artifact(tmp_path, version=version, os_name="portable", architecture="python")
+    manifest = checksum_manifest([artifact], expected_names=expected_artifact_names(version))
+
+    assert artifact.name == "devbot-0.1.0-portable-python.tar.gz"
+    assert f"  {artifact.name}\n" in manifest
+
+
+def test_initial_release_rejects_prior_stable_release_or_moved_tag() -> None:
+    with pytest.raises(ReleasePolicyError, match="release already exists"):
+        assert_tag_and_release_can_be_created(
+            tag="v0.1.0",
+            target_commit="6526cfe",
+            existing_tags={},
+            existing_releases=(ReleaseRecord("v0.1.0", "old-main"),),
+        )
+    with pytest.raises(ReleasePolicyError, match="refusing to move"):
+        assert_tag_and_release_can_be_created(
+            tag="v0.1.0",
+            target_commit="6526cfe",
+            existing_tags={"v0.1.0": "old-main"},
+            existing_releases=(),
+        )
