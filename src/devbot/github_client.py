@@ -519,15 +519,23 @@ class GitHubClient:
         *,
         event: str | None = None,
         created: str | None = None,
+        head_sha: str | None = None,
         per_page: int = DEFAULT_PER_PAGE,
     ) -> list[WorkflowRun]:
         """List runs of `workflow_file` (e.g. `release.yml`), most recent
-        first (`GET /repos/{owner}/{repo}/actions/workflows/{workflow_file}/runs`)."""
+        first (`GET /repos/{owner}/{repo}/actions/workflows/{workflow_file}/runs`).
+
+        `head_sha` narrows server-side to runs whose head commit exactly
+        matches - the precise, workflow-scoped alternative to
+        `list_check_runs_for_ref` (Task 039), which returns check runs from
+        *every* workflow triggered for a commit, not just `workflow_file`."""
         params: dict[str, Any] = {"per_page": per_page}
         if event is not None:
             params["event"] = event
         if created is not None:
             params["created"] = created
+        if head_sha is not None:
+            params["head_sha"] = head_sha
         payload = self._get(
             f"/repos/{repository.owner}/{repository.repo}/actions/workflows/"
             f"{workflow_file}/runs",

@@ -246,3 +246,16 @@
       구현해"), 한국어도 동일한 고정 catalog/문자열 매칭 방식만 쓰고 번역이나
       자유 생성은 하지 않는다(PR #82 리뷰 반영)
       (`results/038-goal-based-planning.md`).
+- [x] Task 039: release operator main CI validation fix. `devbot release
+      preview`가 실제로 성공한 main push CI를 "검증 안 됨"으로 잘못
+      보고하던 버그를 닫는다. 근본 원인은 Check Runs API가 같은 커밋에
+      대한 **모든** 워크플로(설정된 CI 워크플로뿐 아니라 push마다 함께
+      트리거되는 `release.yml` 자신의 job들까지)의 check run을 섞어
+      반환해, 무관한 워크플로의 실패/skip이 전체 판정을 오염시킨 것이다.
+      Check Runs 집계 대신 GitHub Actions Workflow Runs API로 설정된 CI
+      워크플로만, 정확한 head SHA와 `push` 이벤트, `completed`/`success`
+      조건을 모두 만족하는 실행이 있는지 확인하도록 바꿨다. PR Check Run을
+      머지 커밋에 요구하지 않으며, 매칭 없음/큐잉/진행 중/실패/취소/다른
+      커밋의 성공/pre-merge PR 실행/API 인증 실패 모두 fail closed를
+      유지한다(`src/devbot/release_ops.py`,
+      `results/039-release-main-ci-validation.md`).
