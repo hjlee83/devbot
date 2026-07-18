@@ -292,3 +292,28 @@
       dispatch는 이번에 구현하지 않고, 나중에 API를 바꾸지 않고 추가할 수
       있는 추상화만 만들었다(`src/devbot/agent_registry.py`,
       `results/041-role-dispatch.md`).
+- [x] Task 042: specification generator. Goal → Planner → Issue → Contract
+      워크플로 뒤에 **Specification** 단계를 추가한다 - 향후 Agent
+      Dispatch가 수동 프롬프트 대신 참고할 산출물이다. 새
+      `src/devbot/specification.py`가 정확히 하나의 `tasks/NNN-*.md`
+      Contract, 제목이 정확히 일치하는 GitHub Issue(`Task NNN: <제목>`),
+      선택적으로 `docs/00-roadmap.md` 항목만 근거로 삼아
+      Overview/Functional Requirements/Technical Design/Validation/
+      Safety/Completion/Handoff 7개 최상위 섹션을 결정적으로 렌더링한다
+      - 같은 입력이면 몇 번을 실행하든 바이트 단위로 동일한 출력을
+      만든다. Contract 헤딩이 영어/한국어로 제각각인 41개 기존 Task를
+      다루기 위해 최선-노력 bilingual alias 테이블을 쓰되, alias가
+      매칭하지 못한 개념은 절대 지어내지 않고
+      `"Not specified in the Task Contract."`로 채우며, Contract 원문
+      전체를 Specification 맨 끝에 그대로 붙여 넣어 정보 손실을 막는다.
+      Contract 없음/여러 Contract 매칭/Issue 없음/Issue 여러 개 매칭
+      또는 제목 불일치/Planner 근거(Goal/Background/Scope/Functional
+      Requirements) 없음/유효하지 않은 Task 번호 여섯 가지 모두 전용
+      예외로 fail closed 처리한다. 읽기 전용
+      `devbot specification show --task <N>`과 파일에 쓰는
+      `devbot specification generate --task <N>`(`--dry-run` 시
+      show와 동일하게 쓰지 않음)을 추가했다 - 어느 쪽도 daemon lock을
+      잡지 않는다. Dispatch 쪽 코드(`devbot.workspace`/`devbot.agents`/
+      `devbot.polling`/`devbot.review`/`devbot.rework`)는 이번에 전혀
+      바꾸지 않았고 어떤 Agent도 호출하지 않는다(`src/devbot/
+      specification.py`, `results/042-specification-generator.md`).

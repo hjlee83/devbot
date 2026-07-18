@@ -525,3 +525,67 @@ Issue 생성 후 네트워크 문제 등으로 Branch/Contract 생성이 실패�
 `devbot goal execute`가 성공적으로 Issue/Branch/초안 Contract를 만들면,
 다음 운영자 행동은 항상 출력의 `next_operator_action`에 표시된다 - 보통
 "초안 Contract를 완성하고 PR을 열라"는 안내다.
+
+## Specification 생성 절차 (Task 042)
+
+Task Contract는 이미 실제 구현 범위를 담고 있지만, 41개 기존 Contract는
+헤딩 표현이 제각각이다(영어/한국어 혼용, `## Goal`/`## 목표`, `## Out of
+Scope`/`## 제외 범위` 등). Specification Generator는 이 정보를 흩어보지
+않고 하나의 고정된 구조로 재구성한다 - Contract에 실제로 없는 내용은
+**절대 지어내지 않고** `"Not specified in the Task Contract."`로 채운다.
+
+새 워크플로: Goal → Planner → Issue → Contract → **Specification** →
+Dispatch. Specification은 향후 Agent Dispatch가 수동으로 작성한 프롬프트
+대신 참고할 자료가 될 예정이며, Task 042는 이 산출물만 준비하고 Dispatch
+쪽 코드는 전혀 바꾸지 않는다.
+
+```bash
+# 미리 본다 (읽기 전용, 아무것도 쓰지 않는다).
+uv run devbot specification show --task 38
+
+# 파일로 저장한다 (specifications/NNN-slug.md).
+uv run devbot specification generate --task 38
+
+# --dry-run을 주면 generate도 show와 동일하게 아무것도 쓰지 않는다.
+uv run devbot specification generate --task 38 --dry-run
+```
+
+두 명령 모두 daemon lock을 잡지 않는다.
+
+### Contract ↔ Specification 관계
+
+- Specification은 정확히 하나의 `tasks/NNN-*.md` Contract, 그 Contract와
+  제목이 정확히 일치하는 GitHub Issue(`Task NNN: <제목>`), 그리고
+  존재한다면 `docs/00-roadmap.md`의 해당 항목만 근거로 생성한다.
+- Contract가 원본이다 - Specification 맨 끝 "Full Task Contract Reference"
+  섹션에 Contract 전체 원문을 그대로 붙여 넣으므로, 위쪽 섹션의 매핑이
+  놓친 내용이 있어도 정보 손실이 없다.
+- 생성은 결정적이다: 같은 Contract/Issue/로드맵 상태에서는 몇 번을
+  실행하든 완전히 동일한 바이트를 만든다(타임스탬프/무작위성 없음).
+
+### 생성 규칙과 실패 조건
+
+다음 경우 Specification을 생성하지 않고 fail closed로 실패한다(부분적인
+Specification을 만들지 않는다):
+
+- 해당 Task 번호의 Contract 파일이 없음, 또는 여러 개가 매칭됨
+- Task 번호가 양의 정수가 아니거나, Contract가 정식
+  `# Task NNN: <제목>` 헤딩으로 시작하지 않음
+- `Task NNN: ...` 제목의 GitHub Issue가 없음, 또는 여러 개가 매칭됨,
+  또는 Issue 제목이 Contract 제목과 다름
+- Contract에 Goal/Background/Scope/Functional Requirements로 인식할
+  내용이 전혀 없음
+
+이 중 상당수는 실제 저장소에서 재현된다: Task 001-009는 GitHub Issue
+자체가 없고, Task 010-026은 Task 022 이전의 `Execute Task NNN: ...`
+두-Issue 명명 규칙을 썼다 - 이런 Task에 대해
+`devbot specification show/generate`를 실행하면 `IssueMissingError`로
+정상적으로 fail closed된다. 버그가 아니라 의도된 안전장치다.
+
+### 향후 Dispatch 연동
+
+Task 042는 인터페이스만 준비한다. 향후 Agent Dispatch는 수동 프롬프트
+대신 Issue + Contract + Specification을 사용하도록 바뀔 예정이지만, 이
+Task는 `devbot.workspace`/`devbot.agents`/`devbot.polling`/
+`devbot.review`/`devbot.rework` 어디도 수정하지 않았고 어떤 구현 Agent도
+호출하지 않는다.

@@ -787,6 +787,118 @@ def test_agent_list_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "priority=" in out
 
 
+def _specification(**overrides: object):
+    from devbot.specification import Specification
+
+    defaults: dict[str, object] = dict(
+        task_number=99,
+        slug="sample",
+        path=Path("specifications/099-sample.md"),
+        content="# Specification: Task 099 — Sample\n\n# Overview\n",
+    )
+    defaults.update(overrides)
+    return Specification(**defaults)  # type: ignore[arg-type]
+
+
+def test_specification_show_is_read_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    specification = _specification()
+
+    with (
+        patch("devbot.main.generate_specification", return_value=specification) as mock_generate,
+        patch("devbot.main.write_specification") as mock_write,
+    ):
+        exit_code = main(
+            ["specification", "show", "--task", "99"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_generate.assert_called_once()
+    mock_write.assert_not_called()
+    assert "# Specification: Task 099" in capsys.readouterr().out
+
+
+def test_specification_generate_writes_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    specification = _specification()
+    written_path = Path("specifications/099-sample.md")
+
+    with (
+        patch("devbot.main.generate_specification", return_value=specification),
+        patch("devbot.main.write_specification", return_value=written_path) as mock_write,
+    ):
+        exit_code = main(
+            ["specification", "generate", "--task", "99"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_write.assert_called_once_with(specification)
+    out = capsys.readouterr().out
+    assert "path: specifications/099-sample.md" in out
+
+
+def test_specification_generate_dry_run_does_not_write(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    specification = _specification()
+
+    with (
+        patch("devbot.main.generate_specification", return_value=specification),
+        patch("devbot.main.write_specification") as mock_write,
+    ):
+        exit_code = main(
+            ["specification", "generate", "--task", "99", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_write.assert_not_called()
+
+
+def test_specification_error_returns_failure_exit_code(tmp_path: Path) -> None:
+    from devbot.specification import ContractMissingError
+
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with patch(
+        "devbot.main.generate_specification",
+        side_effect=ContractMissingError("no Task Contract found for Task 999"),
+    ):
+        exit_code = main(
+            ["specification", "show", "--task", "999"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+
+
+def test_specification_command_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    specification = _specification()
+
+    with (
+        patch("devbot.main.generate_specification", return_value=specification),
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["specification", "show", "--task", "99"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
 def test_goal_dispatch_shows_role_resolution_without_invoking_agent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
