@@ -590,6 +590,43 @@ Task는 `devbot.workspace`/`devbot.agents`/`devbot.polling`/
 `devbot.review`/`devbot.rework` 어디도 수정하지 않았고 어떤 구현 Agent도
 호출하지 않는다.
 
+
+## Specification Template Engine (Task 044)
+
+Task 044 adds deterministic template policy on top of the single Task 042/043
+Specification schema. Templates never create separate top-level formats; they add
+grounded guidance inside the canonical document and must still pass
+`devbot specification validate`.
+
+Selection rules:
+
+- `## Specification Type` in the Task Contract selects one of
+  `feature`, `bugfix`, `refactor`, `docs`, `internal`, or `generic`.
+- Matching trims surrounding whitespace and lowercases the value.
+- Missing `## Specification Type` falls back to `generic` for historical
+  Contracts.
+- Unknown explicit values fail closed; they do not fall back to `generic`.
+- `--template <id>` overrides Contract selection for `show` and `generate`, and
+  the override source is recorded in Provenance.
+
+Read-only inspection:
+
+```bash
+uv run devbot specification templates
+uv run devbot specification template show --template bugfix
+```
+
+Representative generation:
+
+```bash
+uv run devbot specification show --task 44 --template feature
+uv run devbot specification generate --task 44 --template bugfix --dry-run
+```
+
+The inspection commands and `show`/`generate --dry-run` do not acquire the daemon
+lock. Task 044 does not invoke Agents, Dispatch, polling, review, rework, Task 045
+release classification, external templates, or code-to-Spec validation.
+
 ## Specification 검증 절차 (Task 043)
 
 Task 042가 만든 Specification이 실제로 구조적으로 완전하고, 내용이

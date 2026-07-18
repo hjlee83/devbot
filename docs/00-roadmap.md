@@ -348,3 +348,13 @@
       릴리스 분류/code-to-Spec 검증은 이번에 전혀 구현하지 않았다
       (`src/devbot/specification_validation.py`,
       `results/043-specification-validator.md`).
+
+- [x] Task 044: specification template engine. Specification Generator가
+      explicit `## Specification Type` 또는 `--template` override로 여섯
+      built-in template(`feature`/`bugfix`/`refactor`/`docs`/`internal`/
+      `generic`)을 결정론적으로 선택한다. Template은 canonical Task 043
+      schema를 바꾸지 않는 policy overlay이며, 선택된 template ID와 source를
+      Provenance에 기록한다. `devbot specification templates`와
+      `devbot specification template show --template <id>`는 read-only
+      inspection command로 제공된다. 여섯 template 출력 모두 Task 043
+      Validator를 통과했다(`results/044-specification-template-engine.md`).

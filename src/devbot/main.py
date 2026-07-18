@@ -72,6 +72,12 @@ from devbot.specification import (
     generate_specification,
     write_specification,
 )
+from devbot.specification_templates import (
+    SpecificationTemplateError,
+    get_specification_template,
+    list_specification_templates,
+    render_template_policy,
+)
 from devbot.specification_validation import (
     SpecificationValidationError,
     render_validation_report,
@@ -354,6 +360,9 @@ def _build_specification_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="파일에 쓰지 않고 계산된 Specification만 출력합니다 (show와 동일).",
     )
+    generate_parser.add_argument(
+        "--template", default=None, help="등록된 Specification template ID로 선택을 override합니다."
+    )
 
     show_parser = specification_subparsers.add_parser(
         "show", help="Specification을 계산만 하고 출력합니다 (읽기 전용, 아무것도 쓰지 않음)."
@@ -362,6 +371,23 @@ def _build_specification_parser(subparsers: argparse._SubParsersAction) -> None:
     show_parser.add_argument(
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
+    show_parser.add_argument(
+        "--template", default=None, help="등록된 Specification template ID로 선택을 override합니다."
+    )
+
+    specification_subparsers.add_parser(
+        "templates", help="등록된 Specification template 목록을 결정론적으로 출력합니다."
+    )
+    template_parser = specification_subparsers.add_parser(
+        "template", help="Specification template 세부 정보를 조회합니다."
+    )
+    template_subparsers = template_parser.add_subparsers(
+        dest="template_command", required=True
+    )
+    template_show_parser = template_subparsers.add_parser(
+        "show", help="등록된 Specification template 정책을 출력합니다."
+    )
+    template_show_parser.add_argument("--template", required=True, help="template ID.")
 
     validate_parser = specification_subparsers.add_parser(
         "validate",
@@ -374,6 +400,21 @@ def _build_specification_parser(subparsers: argparse._SubParsersAction) -> None:
     validate_parser.add_argument(
         "--format", choices=("text", "json"), default="text", help="출력 형식 (기본값: text)."
     )
+
+
+def _run_specification_template_command(args: argparse.Namespace) -> int:
+    try:
+        if args.specification_command == "templates":
+            for template in list_specification_templates():
+                print(f"{template.id}: {template.description}")
+            return 0
+        if args.specification_command == "template" and args.template_command == "show":
+            print(render_template_policy(get_specification_template(args.template)), end="")
+            return 0
+    except SpecificationTemplateError as exc:
+        print(f"specification template 오류: {exc}", file=sys.stderr)
+        return 1
+    return 1
 
 
 def _run_specification_validate_command(args: argparse.Namespace) -> int:
@@ -391,6 +432,8 @@ def _run_specification_validate_command(args: argparse.Namespace) -> int:
 def _run_specification_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     if args.specification_command == "validate":
         return _run_specification_validate_command(args)
+    if args.specification_command in {"templates", "template"}:
+        return _run_specification_template_command(args)
 
     try:
         repository = _resolve_repository(config, args.repo)
@@ -400,8 +443,10 @@ def _run_specification_command(args: argparse.Namespace, config: DevBotConfig) -
 
     github_client = GitHubClient(config.github_token)
     try:
-        specification = generate_specification(github_client, repository, args.task)
-    except (SpecificationError, GitHubClientError) as exc:
+        specification = generate_specification(
+            github_client, repository, args.task, template_id=getattr(args, "template", None)
+        )
+    except (SpecificationError, SpecificationTemplateError, GitHubClientError) as exc:
         print(f"specification 오류: {exc}", file=sys.stderr)
         return 1
 
