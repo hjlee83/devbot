@@ -39,7 +39,7 @@
 
 ## 수동 검증 결과
 
-- PR URL: Pending
+- PR URL: https://github.com/hjlee83/devbot/pull/78
 - `v0.1.0` tag/Release 수동 생성 없음
 
 ## 남은 TODO와 제한

@@ -77,7 +77,7 @@ Required commands:
 
 - Task Issue: #77
 - Branch: `task/036-release-tag-git-identity`
-- Pull Request: TBD
+- Pull Request: #78
 - Result: `results/036-release-tag-git-identity.md`
 - Do not create another Issue, Branch, or Pull Request for this task.
 - Do not create or publish `v0.1.0` as part of this task.
