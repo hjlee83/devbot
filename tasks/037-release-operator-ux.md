@@ -311,6 +311,7 @@ schema, label, or state-machine change is introduced anywhere else.
 
 - Task Issue: #79
 - Branch: `task/037-release-operator-ux`
+- Pull Request: #80
 - Result: `results/037-release-operator-ux.md`
 - Do not create another Issue, Branch, or Pull Request for this Task.
 - Do not publish a real Release as part of this Task.
