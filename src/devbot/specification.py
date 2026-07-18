@@ -106,7 +106,10 @@ _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # The `# <heading>` structure every generated Specification must contain -
-# the "Output schema" CP-042 tests check against this list.
+# the "Output schema" CP-042 tests check against this list. Task 043's
+# `specification_validation` module imports this same tuple for its SPV-003
+# required-top-level-section rule rather than defining a second, potentially
+# incompatible schema.
 REQUIRED_TOP_LEVEL_SECTIONS: tuple[str, ...] = (
     "# Overview",
     "# Functional Requirements",
@@ -115,6 +118,7 @@ REQUIRED_TOP_LEVEL_SECTIONS: tuple[str, ...] = (
     "# Safety",
     "# Completion",
     "# Handoff",
+    "# Full Task Contract Reference",
 )
 
 
@@ -180,10 +184,12 @@ class Specification:
     content: str
 
 
-def _fenced_code_ranges(text: str) -> list[tuple[int, int]]:
+def fenced_code_ranges(text: str) -> list[tuple[int, int]]:
     """Character-offset (start, end) ranges covered by ``` fenced code blocks,
     so illustrative `#`/`##` text inside an example (e.g. a Specification
-    Structure template) is never mistaken for a real section heading."""
+    Structure template) is never mistaken for a real section heading. Public
+    because Task 043's `specification_validation` reuses this exact parsing
+    concept for the same reason on Specification documents."""
     ranges: list[tuple[int, int]] = []
     fence_start: int | None = None
     offset = 0
@@ -206,7 +212,7 @@ def _split_level2_sections(text: str) -> dict[str, str]:
     nothing under them is ever dropped. Headings inside ``` fenced code
     blocks are ignored - they are illustrative example text, not real
     section boundaries."""
-    fenced = _fenced_code_ranges(text)
+    fenced = fenced_code_ranges(text)
     matches = [
         match
         for match in _SECTION_HEADING_RE.finditer(text)

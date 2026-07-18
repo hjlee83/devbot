@@ -589,3 +589,94 @@ Task 042는 인터페이스만 준비한다. 향후 Agent Dispatch는 수동 프
 Task는 `devbot.workspace`/`devbot.agents`/`devbot.polling`/
 `devbot.review`/`devbot.rework` 어디도 수정하지 않았고 어떤 구현 Agent도
 호출하지 않는다.
+
+## Specification 검증 절차 (Task 043)
+
+Task 042가 만든 Specification이 실제로 구조적으로 완전하고, 내용이
+비어 있지 않고, 구현 Agent에게 안전하게 넘길 수 있는 상태인지를 검사하는
+품질 게이트다. 새 워크플로:
+
+`Goal → Planner → Issue → Contract → Specification → Validation → Dispatch`
+
+```bash
+# 사람이 읽는 형식 (기본값).
+uv run devbot specification validate --task 42
+
+# 향후 워크플로 자동화가 소비할 결정론적 JSON 형식.
+uv run devbot specification validate --task 42 --format json
+```
+
+GitHub API를 전혀 호출하지 않는다 - 로컬 `specifications/NNN-*.md` 파일만
+읽으며, daemon lock도 잡지 않는다.
+
+### 종료 코드
+
+- `0`: 문서가 유효함 (경고만 있어도 0).
+- `1`: 문서 검증 실패 (에러 1개 이상).
+- `2`: 운영 오류 - Task 번호가 유효하지 않거나, 해당 Specification
+  파일이 없거나, 여러 개가 매칭되거나, 읽을 수 없음. 문서 자체의 검증
+  실패와는 다른 종류의 실패이므로 종료 코드로 구분한다.
+
+### 검증 규칙 (SPV-001~013)
+
+Task 042의 `REQUIRED_TOP_LEVEL_SECTIONS`(`# Full Task Contract Reference`를
+8번째 항목으로 포함하도록 이번에 확장했다)와 `fenced_code_ranges`를 그대로
+재사용한다 - 두 번째의, 호환되지 않는 Specification 스키마를 만들지
+않는다.
+
+에러(`passed = False`를 만든다):
+
+- `SPV-001` 제목이 `# Specification: Task NNN — <Title>` 정식 형식이
+  아니거나, Task 번호가 요청과 다르거나, 제목이 비어 있음.
+- `SPV-002` `## Provenance`가 없거나, Task Issue/Task Contract/생성 출처
+  중 하나라도 식별할 수 없음.
+- `SPV-003` 필수 최상위 섹션이 없거나 중복됨.
+- `SPV-004` 필수 서브섹션이 없음.
+- `SPV-005` 필수 본문이 비어 있음 - Task 042의 canonical fallback
+  (`Not specified in the Task Contract.`)은 내용으로 인정한다.
+- `SPV-006` Acceptance Criteria에 checkpoint 헤딩/체크리스트/목록 중
+  아무것도 없거나, checkpoint id가 중복됨.
+- `SPV-007` Validation Commands에 실행 명령도 없고 "명시적으로
+  지정되지 않음"이라는 진술도 없음.
+- `SPV-008` Safety의 Agent 금지 사항 서브섹션이 비어 있음.
+- `SPV-009` Full Task Contract Reference가 비어 있거나 경로 참조만
+  있고 실제 Contract 본문이 없음.
+
+경고(검증을 실패시키지 않는다):
+
+- `SPV-010` 필수 최상위 섹션이 canonical 순서를 벗어남.
+- `SPV-011` 스키마에 없는 추가 최상위 섹션.
+- `SPV-012` 정규 섹션(Full Task Contract Reference 제외)에 미해결
+  `TODO`/`TBD`/`FIXME`/`XXX`/`{{...}}` 마커가 있음 - canonical fallback
+  문구나 `--task <N>` 같은 CLI 플레이스홀더는 마커로 취급하지 않는다.
+
+`SPV-013`은 문서 규칙이 아니라 구현 요구사항이다 - 반환되는 이슈는 항상
+줄 번호 → 규칙 코드 → 메시지 순으로 정렬되어, 동일한 바이트를 반복
+검증하면 항상 동일한 순서의 결과가 나온다.
+
+### 라이브 검증 중 발견한 버그
+
+`Full Task Contract Reference`는 원본 Contract 전체를 3-backtick 코드
+펜스로 감싼다. Contract 자신이 내부에 같은 3-backtick 펜스를 또 쓰면
+(예: Task 042 계약서의 "Specification Structure" 예시나 Task 043
+계약서의 Python 모델 예시) 표준 마크다운은 같은 길이의 펜스를 중첩할
+수 없으므로, 단순한 펜스 토글 로직은 이 지점에서 추적이 깨진다.
+`devbot specification validate --task 42`를 실제로 실행해 보고 나서야
+발견했다 - 안쪽 예시의 헤딩이 바깥 Specification 문서의 진짜 섹션처럼
+오검출되어 `# Overview`/`# Functional Requirements` 등이 "중복 섹션"
+에러로 잘못 보고됐다. Task 042의 실제 렌더링 방식(Contract를 그대로
+verbatim 인용)은 바꾸지 않고, Validator 쪽에서 `# Full Task Contract
+Reference` 헤딩을 만나면 그 뒤 문서 전체를 더 이상 구조로 재해석하지
+않도록 고쳤다 - 이 섹션은 설계상 항상 마지막 섹션이고 내용 전체가
+불투명한 인용 블록이기 때문에 안전한 수정이다.
+
+### 향후 Dispatch 연동
+
+Task 043은 검증 결과를 소비하는 쪽을 구현하지 않는다. 향후 Workflow
+Engine은 Dispatch 전에 `devbot specification validate --task <N>
+--format json`의 `passed` 필드를 게이트로 사용할 수 있지만, 이 Task는
+`devbot.workspace`/`devbot.agents`/`devbot.polling`/`devbot.review`/
+`devbot.rework` 어디도 수정하지 않았고 어떤 Agent도 호출하지 않는다.
+Task 044(Specification Template Engine)/Task 045(Contract-based Release
+Classification)/code-to-Spec 검증/유효하지 않은 Specification의 자동
+복구는 이번 범위가 아니다.

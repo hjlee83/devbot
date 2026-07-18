@@ -72,6 +72,11 @@ from devbot.specification import (
     generate_specification,
     write_specification,
 )
+from devbot.specification_validation import (
+    SpecificationValidationError,
+    render_validation_report,
+    validate_specification_file,
+)
 from devbot.startup import (
     STARTUP_SELF_UPDATE_ENV,
     StartupSelfUpdateError,
@@ -358,8 +363,35 @@ def _build_specification_parser(subparsers: argparse._SubParsersAction) -> None:
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
 
+    validate_parser = specification_subparsers.add_parser(
+        "validate",
+        help=(
+            "specifications/NNN-slug.md가 Task 042 스키마를 만족하는지 검증합니다 "
+            "(읽기 전용, GitHub 호출 없음)."
+        ),
+    )
+    validate_parser.add_argument("--task", type=int, required=True, help="Task 번호.")
+    validate_parser.add_argument(
+        "--format", choices=("text", "json"), default="text", help="출력 형식 (기본값: text)."
+    )
+
+
+def _run_specification_validate_command(args: argparse.Namespace) -> int:
+    """Task 043: read-only, no GitHub client - resolves and validates the
+    on-disk `specifications/NNN-*.md` file directly."""
+    try:
+        result = validate_specification_file(Path("."), args.task)
+    except SpecificationValidationError as exc:
+        print(f"specification validate 오류: {exc}", file=sys.stderr)
+        return 2
+    print(render_validation_report(result, output_format=args.format), end="")
+    return 0 if result.passed else 1
+
 
 def _run_specification_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    if args.specification_command == "validate":
+        return _run_specification_validate_command(args)
+
     try:
         repository = _resolve_repository(config, args.repo)
     except ConfigError as exc:
