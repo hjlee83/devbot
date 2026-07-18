@@ -7,17 +7,25 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from devbot.github_client import GitHubRelease, GitHubReleaseAsset, WorkflowRun
+from devbot.github_client import (
+    GitHubAuthenticationError,
+    GitHubRelease,
+    GitHubReleaseAsset,
+    WorkflowRun,
+)
 from devbot.models import RepositoryConfig
 from devbot.release import PullRequestMetadata, ReleaseRecord
 from devbot.release_ops import (
+    CI_WORKFLOW_FILE,
     ReleaseContext,
     ReleaseOpsError,
     ReleasePreview,
     ReleaseReadiness,
+    _target_commit_is_ci_validated,
     build_release_preview,
     build_release_status,
     dispatch_release,
+    fetch_release_preview,
     gather_release_context,
     local_checkout_is_dirty,
     publish_release,
@@ -200,6 +208,206 @@ def test_local_checkout_is_dirty_returns_none_for_non_git_path(tmp_path: Path) -
 
 
 # --------------------------------------------------------------------------
+# _target_commit_is_ci_validated (Task 039): the CI workflow's own push-
+# triggered run for the exact target commit is the only source of truth -
+# never the aggregate Check Runs API, which mixes in every other workflow
+# triggered for the same commit (see Task 039's Result doc for how this
+# broke live: Release workflow jobs' check runs were poisoning the result).
+# --------------------------------------------------------------------------
+
+
+def test_ci_validated_true_for_exact_push_success() -> None:
+    client = MagicMock()
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="success",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="target-sha",
+            event="push",
+        )
+    ]
+
+    result = _target_commit_is_ci_validated(
+        client, _repository(), "target-sha", workflow_file=CI_WORKFLOW_FILE
+    )
+
+    assert result is True
+    client.list_workflow_runs.assert_called_once_with(
+        _repository(), CI_WORKFLOW_FILE, event="push", head_sha="target-sha"
+    )
+
+
+def test_ci_validated_false_for_pr_only_success_at_premerge_sha() -> None:
+    """A successful run exists, but only for the pre-merge PR head SHA
+    (`event="pull_request"`), not the post-merge commit on main - must not
+    count, even if a defensive client-side check ever saw it."""
+    client = MagicMock()
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="success",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="target-sha",
+            event="pull_request",
+        )
+    ]
+
+    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+
+
+def test_ci_validated_false_for_success_on_another_sha() -> None:
+    client = MagicMock()
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="success",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="some-other-sha",
+            event="push",
+        )
+    ]
+
+    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+
+
+def test_ci_validated_false_when_no_run_found() -> None:
+    client = MagicMock()
+    client.list_workflow_runs.return_value = []
+
+    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+
+
+def test_ci_validated_false_for_queued_run() -> None:
+    client = MagicMock()
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="queued",
+            conclusion=None,
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="target-sha",
+            event="push",
+        )
+    ]
+
+    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+
+
+def test_ci_validated_false_for_in_progress_run() -> None:
+    client = MagicMock()
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="in_progress",
+            conclusion=None,
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="target-sha",
+            event="push",
+        )
+    ]
+
+    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+
+
+def test_ci_validated_false_for_failed_run() -> None:
+    client = MagicMock()
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="failure",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="target-sha",
+            event="push",
+        )
+    ]
+
+    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+
+
+def test_ci_validated_false_for_cancelled_run() -> None:
+    client = MagicMock()
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="cancelled",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="target-sha",
+            event="push",
+        )
+    ]
+
+    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+
+
+def test_gather_release_context_reports_api_failure_as_validation_error() -> None:
+    client = MagicMock()
+    client.get_commit_sha.return_value = "target-sha"
+    client.list_workflow_runs.side_effect = GitHubAuthenticationError(
+        "GitHub authentication failed: Resource not accessible by personal access token"
+    )
+    client.list_releases.return_value = []
+    client.list_commits.return_value = ["target-sha"]
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("devbot.release_ops.authoritative_version", lambda: "0.1.0")
+        context = gather_release_context(client, _repository())
+
+    assert context.target_commit_validated is False
+    assert context.target_commit_validation_error is not None
+    assert "Resource not accessible" in context.target_commit_validation_error
+
+    preview = build_release_preview(context)
+    assert preview.readiness.ready is False
+    assert any(
+        "could not verify" in blocker and "Resource not accessible" in blocker
+        for blocker in preview.readiness.blockers
+    )
+
+
+def test_release_preview_is_ready_with_valid_ci_push_run_and_labels() -> None:
+    """End-to-end (CP-039 scenario 10): a CI-validated push run for the
+    exact target commit, plus a properly labeled merged PR and no other
+    blockers, makes `devbot release preview` report ready."""
+    client = MagicMock()
+    client.get_commit_sha.return_value = "target-sha"
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="success",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="target-sha",
+            event="push",
+        )
+    ]
+    client.list_releases.return_value = [
+        GitHubRelease(
+            id=1,
+            tag_name="v0.1.0",
+            target_commitish="aaa",
+            name="v0.1.0",
+            body="",
+            draft=False,
+            prerelease=False,
+            html_url="https://example/releases/v0.1.0",
+            assets=(),
+            published_at=None,
+        )
+    ]
+    client.list_commits.return_value = ["target-sha", "aaa"]
+    client.compare_commits.return_value = ["target-sha"]
+    client.get_commit_pull_request_metadata.return_value = _pr(
+        80, "Task 039: Fix CI validation", "release:patch", "target-sha"
+    )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("devbot.release_ops.authoritative_version", lambda: "0.1.0")
+        preview = fetch_release_preview(client, _repository(), local_checkout_path=Path("/tmp"))
+
+    assert preview.readiness.ready is True
+    assert preview.readiness.blockers == ()
+    assert preview.target_commit_validated is True
+
+
+# --------------------------------------------------------------------------
 # gather_release_context (mocked GitHubClient)
 # --------------------------------------------------------------------------
 
@@ -207,7 +415,15 @@ def test_local_checkout_is_dirty_returns_none_for_non_git_path(tmp_path: Path) -
 def test_gather_release_context_computes_commit_range_from_compare_api() -> None:
     client = MagicMock()
     client.get_commit_sha.return_value = "ccc"
-    client.list_check_runs_for_ref.return_value = [{"conclusion": "success"}]
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="success",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="ccc",
+            event="push",
+        )
+    ]
     client.list_releases.return_value = [
         GitHubRelease(
             id=1,
@@ -234,6 +450,10 @@ def test_gather_release_context_computes_commit_range_from_compare_api() -> None
         context = gather_release_context(client, _repository())
 
     client.compare_commits.assert_called_once_with(_repository(), "aaa", "ccc")
+    client.list_workflow_runs.assert_called_once_with(
+        _repository(), "ci.yml", event="push", head_sha="ccc"
+    )
+    client.list_check_runs_for_ref.assert_not_called()
     assert context.target_commit == "ccc"
     assert context.target_commit_validated is True
     assert context.commit_range_prs[0] is not None
@@ -244,7 +464,15 @@ def test_gather_release_context_computes_commit_range_from_compare_api() -> None
 def test_gather_release_context_falls_back_to_full_history_without_prior_release() -> None:
     client = MagicMock()
     client.get_commit_sha.return_value = "bbb"
-    client.list_check_runs_for_ref.return_value = [{"conclusion": "success"}]
+    client.list_workflow_runs.return_value = [
+        _run(
+            status="completed",
+            conclusion="success",
+            created_at=datetime(2026, 7, 18, tzinfo=UTC),
+            head_sha="bbb",
+            event="push",
+        )
+    ]
     client.list_releases.return_value = []
     client.list_commits.return_value = ["bbb", "aaa"]
     client.get_commit_pull_request_metadata.return_value = _pr(
@@ -301,7 +529,13 @@ def test_dispatch_release_sends_expected_inputs() -> None:
 
 
 def _run(
-    *, status: str, conclusion: str | None, created_at: datetime, run_id: int = 1
+    *,
+    status: str,
+    conclusion: str | None,
+    created_at: datetime,
+    run_id: int = 1,
+    head_sha: str = "ccc",
+    event: str = "workflow_dispatch",
 ) -> WorkflowRun:
     return WorkflowRun(
         id=run_id,
@@ -310,8 +544,8 @@ def _run(
         conclusion=conclusion,
         html_url=f"https://example/actions/runs/{run_id}",
         created_at=created_at,
-        head_sha="ccc",
-        event="workflow_dispatch",
+        head_sha=head_sha,
+        event=event,
     )
 
 

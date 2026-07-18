@@ -50,6 +50,7 @@ from devbot.release import (
 from devbot.startup import resolve_operator_checkout
 
 RELEASE_WORKFLOW_FILE = "release.yml"
+CI_WORKFLOW_FILE = "ci.yml"
 CHECKSUM_MANIFEST_NAME = "SHA256SUMS"
 
 _INCREMENT_RANK: dict[ReleaseIncrement, int] = {"none": 0, "patch": 1, "minor": 2, "major": 3}
@@ -152,25 +153,64 @@ def _previous_release_commit(
     return None
 
 
+def _target_commit_is_ci_validated(
+    github_client: GitHubClient,
+    repository: RepositoryConfig,
+    target_commit: str,
+    *,
+    workflow_file: str = CI_WORKFLOW_FILE,
+) -> bool:
+    """A main commit counts as CI-validated only when `workflow_file` (the
+    configured CI workflow) has a run whose head SHA exactly matches
+    `target_commit`, triggered by a `push` event, with `status ==
+    "completed"` and `conclusion == "success"` (Task 039).
+
+    Deliberately does *not* use `GitHubClient.list_check_runs_for_ref` -
+    `GET .../commits/{sha}/check-runs` returns check runs from *every*
+    workflow that ran for the commit, not just `workflow_file`. Since
+    `.github/workflows/release.yml` also triggers on every push to `main`,
+    its own jobs' check runs (including ones that are legitimately
+    `skipped`, or that can fail for reasons unrelated to CI health - see
+    Task 039's Result doc) were being folded into an "every check run must
+    be success" requirement, so a green CI run could still be reported
+    unvalidated. Querying the CI workflow's own runs, filtered to the exact
+    commit and a `push` event, cannot be confused by another workflow's
+    check runs or by a pull-request run against a different (pre-merge)
+    head SHA.
+    """
+    runs = github_client.list_workflow_runs(
+        repository, workflow_file, event="push", head_sha=target_commit
+    )
+    return any(
+        run.head_sha == target_commit
+        and run.event == "push"
+        and run.status == "completed"
+        and run.conclusion == "success"
+        for run in runs
+    )
+
+
 def gather_release_context(
-    github_client: GitHubClient, repository: RepositoryConfig
+    github_client: GitHubClient,
+    repository: RepositoryConfig,
+    *,
+    ci_workflow_file: str = CI_WORKFLOW_FILE,
 ) -> ReleaseContext:
     """Fetch every piece of GitHub state `build_release_preview` needs.
-    Read-only: lists releases/commits/check-runs, never writes."""
+    Read-only: lists releases/commits/workflow runs, never writes."""
     target_commit = github_client.get_commit_sha(repository, repository.default_branch)
     target_commit_validation_error: str | None = None
     try:
-        check_runs = github_client.list_check_runs_for_ref(repository, target_commit)
+        target_commit_validated = _target_commit_is_ci_validated(
+            github_client, repository, target_commit, workflow_file=ci_workflow_file
+        )
     except GitHubClientError as exc:
         # A permission/connectivity failure answering "is this commit
         # validated?" is not the same claim as "it failed validation" - and
         # must not silently abort the rest of the (still useful) preview.
         # Treated as not-validated with a distinguishable reason.
-        check_runs = []
+        target_commit_validated = False
         target_commit_validation_error = str(exc)
-    target_commit_validated = bool(check_runs) and all(
-        run.get("conclusion") == "success" for run in check_runs
-    )
 
     raw_releases = github_client.list_releases(repository)
     release_records = tuple(
@@ -324,10 +364,11 @@ def fetch_release_preview(
     repository: RepositoryConfig,
     *,
     local_checkout_path: Path | None = None,
+    ci_workflow_file: str = CI_WORKFLOW_FILE,
 ) -> ReleasePreview:
     """`gather_release_context` + `build_release_preview` in one call - the
     entry point `devbot release preview`/`publish` actually use."""
-    context = gather_release_context(github_client, repository)
+    context = gather_release_context(github_client, repository, ci_workflow_file=ci_workflow_file)
     path = local_checkout_path
     if path is None:
         try:
@@ -473,6 +514,7 @@ def publish_release(
     *,
     preview: ReleasePreview | None = None,
     workflow_file: str = RELEASE_WORKFLOW_FILE,
+    ci_workflow_file: str = CI_WORKFLOW_FILE,
     local_checkout_path: Path | None = None,
     poll_interval_seconds: float = 15.0,
     timeout_seconds: float = 1800.0,
@@ -487,7 +529,10 @@ def publish_release(
     tag or Release directly."""
     if preview is None:
         preview = fetch_release_preview(
-            github_client, repository, local_checkout_path=local_checkout_path
+            github_client,
+            repository,
+            local_checkout_path=local_checkout_path,
+            ci_workflow_file=ci_workflow_file,
         )
     dispatched_at = now()
     dispatch_release(write_client, repository, preview, workflow_file=workflow_file)
