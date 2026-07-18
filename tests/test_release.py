@@ -268,11 +268,23 @@ def test_checksum_manifest_is_deterministic(tmp_path: Path) -> None:
         checksum_manifest([], expected_names=expected)
 
 
+def _assert_standard_release_note_sections(notes: str) -> None:
+    for section in RELEASE_NOTE_SECTIONS:
+        assert f"### {section}\n" in notes
+    assert notes.index("### What's New") < notes.index("### Improvements")
+    assert notes.index("### Improvements") < notes.index("### Fixes")
+    assert notes.index("### Fixes") < notes.index("### Operational Changes")
+    assert notes.index("### Operational Changes") < notes.index("### Upgrade Notes")
+    assert notes.index("### Upgrade Notes") < notes.index("### Known Limitations")
+
+
 def test_release_note_generation_is_deterministic() -> None:
-    assert release_notes(_pr(labels=("release:minor",)), "minor", "0.2.0") == (
-        "## devbot 0.2.0\n\n"
-        "- minor: #67 Task 032: Automated Release Pipeline\n"
-    )
+    notes = release_notes(_pr(labels=("release:minor",)), "minor", "0.2.0")
+
+    assert notes.startswith("## devbot 0.2.0\n\n")
+    _assert_standard_release_note_sections(notes)
+    assert "- minor: #67 Task 032: Automated Release Pipeline" in notes
+    assert "No additional improvements recorded for this release." in notes
 
 
 def test_release_plan_uses_pr_label_and_latest_stable_release() -> None:
@@ -310,6 +322,27 @@ def test_release_plan_bootstraps_first_stable_release_from_authoritative_initial
     assert plan.increment == "minor"
     assert plan.new_version == "0.1.0"
     assert plan.tag == "v0.1.0"
+    _assert_standard_release_note_sections(plan.notes)
+    assert "Source commit: `commit-a`" in plan.notes
+    assert "Portable Python release artifact" in plan.notes
+    assert "Runtime automatic update discovery" in plan.notes
+    assert "- minor: #67 Task 032: Automated Release Pipeline" not in plan.notes
+
+
+def test_release_plan_bootstraps_first_stable_release_regardless_of_increment_label() -> None:
+    plan = release_plan_for_pr(
+        _pr(labels=("release:major",), merge_commit_sha="commit-major"),
+        releases=(ReleaseRecord("v0.1.0-alpha.1", "commit-zero", prerelease=True),),
+        main_commits={"commit-zero", "commit-major"},
+        initial_version="0.1.0",
+        target_commit="commit-major",
+    )
+
+    assert plan.publish is True
+    assert plan.increment == "major"
+    assert plan.new_version == "0.1.0"
+    assert plan.tag == "v0.1.0"
+    assert "Source commit: `commit-major`" in plan.notes
 
 
 def test_manual_release_plan_bootstraps_first_stable_from_initial_version() -> None:

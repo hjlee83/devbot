@@ -14,6 +14,10 @@
 - Rework 요청에 따라 prior stable Release가 없을 때 자동 PR planning,
   manual dispatch planning, release pipeline CLI planning이 모두 첫 stable
   version을 `0.1.0`/`v0.1.0`으로 고정하도록 수정하고 회귀 테스트를 추가했다.
+- Review follow-up으로 `release_plan_for_pr()`의 첫 stable Release notes 경로가
+  one-line PR summary가 아니라 `initial_release_notes()`를 사용하도록 수정했다.
+- Task 033 계약이 future generated Release Notes에도 표준 섹션을 요구하므로,
+  이후 stable Release의 `release_notes()`도 동일 섹션 구조를 유지하도록 정렬했다.
 - 로컬에서 Task 032 portable Python artifact와 `SHA256SUMS`를 생성하고,
   패키지된 `devbot --version` smoke를 수행했다.
 
@@ -61,7 +65,7 @@
 | CP-033-1 initial stable version | `test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract`, `test_release_plan_bootstraps_first_stable_release_from_authoritative_initial_version`, `test_manual_release_plan_bootstraps_first_stable_from_initial_version`, `test_release_pipeline_plan_command_bootstraps_first_stable_release` |
 | CP-033-2 stable Release safety | `test_initial_release_rejects_prior_stable_release_or_moved_tag` |
 | CP-033-3 artifact/checksum evidence | `test_first_stable_release_uses_authoritative_initial_version_and_artifact_contract`, existing artifact/checksum/package CLI tests |
-| CP-033-4 Release Notes standard | `test_initial_release_notes_use_standard_future_sections` |
+| CP-033-4 Release Notes standard | `test_initial_release_notes_use_standard_future_sections`, `test_release_note_generation_is_deterministic`, `test_release_plan_bootstraps_first_stable_release_from_authoritative_initial_version`, `test_release_plan_bumps_next_commit_after_existing_release` |
 | CP-033-5 canonical history | `docs/history.md`, `test_initial_release_notes_use_standard_future_sections`, `test_history_marks_initial_release_pending_and_preserves_required_milestones` |
 
 ## Validation 결과
@@ -92,6 +96,9 @@
   preserved as already-merged base history.
 - Post-rebase `uv run ruff check .`: PASS
 - Post-rebase `uv run pytest`: PASS, 558 passed
+- Release notes path fix `uv run pytest tests/test_release.py -q`: PASS, 37 passed
+- Release notes path fix `uv run ruff check .`: PASS
+- Release notes path fix `uv run pytest`: PASS, 559 passed
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache WORKSPACE_ROOT=/tmp/devbot-task033-doctor-runtime DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task033-doctor-runtime/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task033-doctor-runtime/devbot.lock GITHUB_TOKEN=dummy uv run devbot doctor --ci`: PASS exit 0, `safe_to_start: yes`; dummy token caused expected `github_connectivity` bad-credentials diagnostic.
 - `UV_CACHE_DIR=/tmp/devbot-task033-uv-cache WORKSPACE_ROOT=/tmp/devbot-task033-runtime DEVBOT_REPOSITORIES_PATH=/tmp/devbot-task033-runtime/repositories.yaml DEVBOT_LOCK_FILE=/tmp/devbot-task033-runtime/devbot.lock GITHUB_TOKEN=dummy uv run devbot --once --dry-run`: PASS, `no_managed_repositories`
 

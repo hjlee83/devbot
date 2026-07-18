@@ -300,14 +300,20 @@ def checksum_manifest(artifacts: Iterable[Artifact], *, expected_names: Iterable
 
 def release_notes(pr: PullRequestMetadata, increment: ReleaseIncrement, version: str) -> str:
     safe_title = pr.title.replace("\r", " ").replace("\n", " ").strip()
-    return "\n".join(
-        [
-            f"## {PRODUCT_NAME} {version}",
-            "",
-            f"- {increment}: #{pr.number} {safe_title}",
-            "",
-        ]
-    )
+    sections: dict[str, tuple[str, ...]] = {
+        "What's New": (f"{increment}: #{pr.number} {safe_title}",),
+        "Improvements": ("No additional improvements recorded for this release.",),
+        "Fixes": ("No fixes recorded for this release.",),
+        "Operational Changes": ("No operational changes recorded for this release.",),
+        "Upgrade Notes": ("No upgrade notes recorded for this release.",),
+        "Known Limitations": ("No new known limitations recorded for this release.",),
+    }
+    lines = [f"## {PRODUCT_NAME} {version}", ""]
+    for section in RELEASE_NOTE_SECTIONS:
+        lines.extend([f"### {section}", ""])
+        lines.extend(f"- {item}" for item in sections[section])
+        lines.append("")
+    return "\n".join(lines)
 
 
 def initial_release_notes(*, version: str, source_commit: str) -> str:
@@ -419,10 +425,13 @@ def release_plan_for_pr(
             notes="",
             reason="release:none or ineligible PR",
         )
-    version = (
-        base
-        if not has_stable_release(releases_tuple, main_commits=main_commits)
-        else next_version(base, increment)
+    is_first_stable = not has_stable_release(releases_tuple, main_commits=main_commits)
+    version = base if is_first_stable else next_version(base, increment)
+    source_commit = target_commit if target_commit is not None else pr.merge_commit_sha
+    notes = (
+        initial_release_notes(version=str(version), source_commit=source_commit)
+        if is_first_stable
+        else release_notes(pr, increment, str(version))
     )
     return ReleasePlan(
         publish=True,
@@ -430,7 +439,7 @@ def release_plan_for_pr(
         increment=increment,
         new_version=str(version),
         tag=version.tag,
-        notes=release_notes(pr, increment, str(version)),
+        notes=notes,
         reason="eligible merged main PR",
     )
 
