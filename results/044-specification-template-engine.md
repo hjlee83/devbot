@@ -119,7 +119,8 @@ no issues found.
 
 - Issue: https://github.com/hjlee83/devbot/issues/92
 - Branch: `task/044-specification-template-engine`
-- PR: Pending
+- Commit: `17d821e`
+- PR: https://github.com/hjlee83/devbot/pull/93
 - `Dispatch`, Task 045, external templates, code-to-Spec validation 범위는 구현하지 않았다.
 
 ## 남은 TODO와 제한
