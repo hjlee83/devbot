@@ -203,18 +203,30 @@ def _parse_specification(text: str) -> _ParsedSpecification:
     title_line = _line_number(text, title_match.start())
 
     section_headings = level1[1:]
-    # Full Task Contract Reference is an opaque, verbatim dump of the
-    # original Task Contract - which may itself contain ``` fenced code
-    # blocks using the same delimiter as the outer ```markdown fence this
-    # section is wrapped in. A flat fence-toggle can't represent that
-    # nesting, so a heading-like line deep inside the dump can appear to sit
-    # outside any fence. Once this section starts, everything to
-    # end-of-document belongs to it - nothing after this heading is ever
-    # treated as further document structure.
-    for index, match in enumerate(section_headings):
-        if match.group(1).strip() == "Full Task Contract Reference":
-            section_headings = section_headings[: index + 1]
-            break
+    # Full Task Contract Reference is an opaque, verbatim dump of the original
+    # Task Contract, so heading-like lines inside it must not create unknown or
+    # duplicate document sections. If the reference is out of canonical order,
+    # however, later canonical top-level headings still belong to the real
+    # Specification and must remain visible to SPV-003; the ordering issue is
+    # reported by SPV-010 as a warning.
+    canonical_headings = {heading[2:] for heading in REQUIRED_TOP_LEVEL_SECTIONS}
+
+    def _follows_closing_fence(match: re.Match[str]) -> bool:
+        before = text[: match.start()].splitlines()
+        previous_nonblank = next((line.strip() for line in reversed(before) if line.strip()), "")
+        return previous_nonblank == "```"
+
+    filtered_headings = []
+    inside_contract_reference = False
+    for match in section_headings:
+        heading = match.group(1).strip()
+        if inside_contract_reference and (
+            heading not in canonical_headings or not _follows_closing_fence(match)
+        ):
+            continue
+        filtered_headings.append(match)
+        inside_contract_reference = heading == "Full Task Contract Reference"
+    section_headings = filtered_headings
     preamble_end = section_headings[0].start() if section_headings else len(text)
     preamble_subsections = _subsections_in(text, level2, title_match.end(), preamble_end)
 

@@ -12,6 +12,8 @@ Target workflow:
 
 ## Context
 
+Task Issue provenance: pre-existing Task 043 work item tracked through PR #91 review comments; no separate closing Issue was created for the original branch.
+
 Task 042 introduced `specifications/NNN-slug.md` as the authoritative implementation
 artifact and added a limited top-level schema check. Task 043 promotes validation into
 an explicit domain capability with stable rules, deterministic results, CLI support,

@@ -668,6 +668,26 @@ def test_out_of_order_top_level_sections_warns_but_still_passes() -> None:
     assert "SPV-010" in _codes(result.warnings)
 
 
+def test_full_contract_reference_out_of_order_warns_without_missing_section_errors() -> None:
+    safety_block = (
+        "# Safety\n\n## Things the Implementation Agent Must NOT Do\n\nSample restriction.\n\n"
+    )
+    contract_block = (
+        "# Full Task Contract Reference\n\n"
+        "```markdown\n# Task 099: Sample\n\n## Goal\n\nSample goal.\n```\n"
+    )
+    text = _MINIMAL_VALID.replace(safety_block, "").replace(
+        contract_block,
+        contract_block + "\n" + safety_block.rstrip() + "\n",
+    )
+
+    result = _validate(text)
+
+    assert result.passed is True
+    assert result.errors == ()
+    assert _codes(result.warnings) == ["SPV-010"]
+
+
 def test_unknown_top_level_section_warns_but_still_passes() -> None:
     text = _MINIMAL_VALID.replace(
         "# Full Task Contract Reference",

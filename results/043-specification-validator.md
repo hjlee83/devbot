@@ -159,43 +159,38 @@ Contract Reference` 헤딩을 만나면 그 지점 이후 문서 전체를 더 �
   Contract 인용 블록 내부의 텍스트가 별도 섹션으로 잘못 쪼개지지 않음을
   회귀 테스트로 고정한다.
 
-## 배포된 초기 Specification 자체를 검증해 발견한 실제 이슈 (버그 아님)
+## 리뷰 반영: Task 043 Specification 자기 검증 통과
 
-이번 Task 043 자신의 `specifications/043-specification-validator.md`
-(Task 042 파이프라인이 아니라 Architect 페르소나가 직접 작성한 문서)를
-새로 만든 Validator로 검증해 봤더니 진짜로 실패했다 - Validator가 제대로
-동작한다는 증거로서 그대로 기록한다:
+Architect review에서 지적한 두 가지 release-blocking 수준의 품질 게이트 문제를
+수정했다.
 
-```
-$ uv run devbot specification validate --task 43
+1. `# Full Task Contract Reference`가 canonical 마지막 위치보다 앞에 있을 때
+   뒤의 실제 필수 섹션을 SPV-003 누락 오류로 만들던 파서 버그를 고쳤다.
+   Contract dump 내부 heading-like 텍스트는 계속 opaque로 처리하되, FTR fence가
+   닫힌 뒤 이어지는 canonical top-level section은 실제 문서 구조로 보존한다.
+2. `specifications/043-specification-validator.md` 자체가 validator를 통과하도록
+   provenance를 정리하고, SPV-012 규칙 설명 문장 안의 자기참조 marker 문구를
+   비트리거 표현으로 바꿨다. Genuine unresolved marker detection은 전역으로
+   약화하지 않았다.
+
+추가 회귀 테스트:
+
+- `test_full_contract_reference_out_of_order_warns_without_missing_section_errors`
+  - 모든 필수 섹션이 존재한다.
+  - `# Full Task Contract Reference`만 중간 위치에 있다.
+  - 결과는 `passed=True`다.
+  - 오류는 없다.
+  - warning은 SPV-010 하나만 발생한다.
+
+검증 evidence:
+
+```text
+$ WORKSPACE_ROOT=/private/tmp/devbot-pr91-workspace GITHUB_TOKEN=dummy uv run devbot specification validate --task 43
 task: 043
 specification: specifications/043-specification-validator.md
-result: FAILED
-errors (1):
-  - [SPV-002] incomplete '## Provenance' section (missing: Task Issue)
-warnings (2):
-  - [SPV-012] unresolved marker 'TBD' in section '# Technical Design'
-  - [SPV-012] unresolved marker 'TODO' in section '# Technical Design'
-exit: 1
+result: PASS
+no issues found.
 ```
-
-- **SPV-002 에러는 실제로 정확하다**: Task 043은 (이번 세션의 다른 Task와
-  달리) GitHub Issue 없이 시작됐다 - `gh issue list --repo hjlee83/devbot
-  --state all --search "Task 043"`로 직접 확인했고, 이 Task의 계약서
-  Git Rules 절에도 "Task Issue: #NN" 항목이 없다. Validator가 Task 042
-  canonical 형식(Task Issue/Task Contract/생성 출처)과의 편차를 정확히
-  잡아낸 것이며, 이 Specification 파일 자체를 고치는 것은 이번 Task의
-  범위 밖이라 수정하지 않았다.
-- **SPV-012 경고 2개는 오탐이 아니라 자기참조 텍스트다**: 실제 위치는
-  `specifications/043-specification-validator.md`의 "### Canonical rules"
-  절, 그 서브섹션이 SPV-012 규칙 자체를 설명하는 문장
-  ("`SPV-012`: unresolved TODO/TBD/template marker — WARNING.")이다 -
-  즉 "TODO/TBD를 감지한다"는 규칙 설명 문장 안의 단어 자체가 감지된
-  것이다. 경고이므로 `passed`에는 영향이 없고(에러 1개만 `passed=False`를
-  만든다), 이런 자기참조적 오탐을 특별 처리하는 로직은 추가하지
-  않았다 - 순수 문자열/정규식 매칭으로는 "규칙을 설명하는 문장"과 "진짜
-  미해결 마커"를 구분할 수 없고, 계약서도 이런 의미론적 구분을 요구하지
-  않는다.
 
 ## Future Dispatch integration (문서화 요구사항)
 
@@ -283,9 +278,12 @@ $ uv run devbot specification validate --task 0
 specification validate 오류: invalid task number: 0
 (exit 2)
 
-$ uv run devbot specification validate --task 43
-(위 "배포된 초기 Specification 자체를 검증해 발견한 실제 이슈" 절 참고 -
- exit 1, SPV-002 에러 1개 + SPV-012 경고 2개)
+$ WORKSPACE_ROOT=/private/tmp/devbot-pr91-workspace GITHUB_TOKEN=dummy uv run devbot specification validate --task 43
+task: 043
+specification: specifications/043-specification-validator.md
+result: PASS
+no issues found.
+(exit 0)
 ```
 
 Task 037은 `tasks/037-*.md` Contract는 있지만 `specifications/037-*.md`가
@@ -298,11 +296,9 @@ Task 037은 `tasks/037-*.md` Contract는 있지만 `specifications/037-*.md`가
 - **Dispatch는 검증 결과를 아직 소비하지 않는다** - `devbot.workspace`/
   `devbot.agents`가 여전히 검증 여부와 무관하게 동작한다. 인터페이스만
   준비했다(위 "Future Dispatch integration" 참고).
-- **SPV-012(미해결 마커)는 의미론적 구분을 하지 않는다** - "규칙을
-  설명하는 문장 안의 TODO"와 "진짜 미해결 TODO"를 구분하지 못하고 둘 다
-  경고한다(위 Task 043 자기 검증 사례 참고). 경고이므로 검증을 막지는
-  않지만, 향후 더 정교한 휴리스틱(예: 코드 스팬 안의 규칙 이름은
-  제외)이 필요할 수 있다.
+- **SPV-012(미해결 마커)는 genuine marker 감지를 유지한다** - Task 043의
+  규칙 설명 문장은 marker literal을 피하도록 바꿨지만, 일반 정규 섹션의
+  실제 미해결 marker는 여전히 warning으로 보고한다.
 - **Contract traceability(SPV-009)의 "path-only" 판정은 휴리스틱이다** -
   전체 본문이 백틱으로 감싼 단일 경로 한 줄인 경우만 잡아낸다. 더
   교묘하게 짧은 placeholder 텍스트를 쓰는 경우까지는 잡지 못할 수
@@ -322,11 +318,8 @@ Task 037은 `tasks/037-*.md` Contract는 있지만 `specifications/037-*.md`가
   `generate_specification`이 즉시 `SpecificationError`로 fail closed된다
   (이미 있던 방어적 체크가 더 넓어진 것뿐 - 새로운 위험이 아니라 기존
   안전장치의 자연스러운 확장이다).
-- 펜스 중첩 수정(`# Full Task Contract Reference` 이후 전체를 구조
-  재해석 대상에서 제외)은 이 섹션이 "설계상 항상 마지막 섹션"이라는
-  Task 042의 현재 렌더링 순서에 암묵적으로 의존한다. 향후 누군가 Task
-  042의 섹션 순서를 바꿔 Full Task Contract Reference를 마지막이 아닌
-  위치로 옮기면, 그 뒤에 오는 진짜 섹션들이 이 Validator에서 검증되지
-  않고 조용히 건너뛰어질 수 있다 - 그런 순서 변경은 이번 Task의 범위
-  밖이므로 지금은 안전하지만, 향후 렌더링 순서를 바꾸는 Task는 이
-  가정을 다시 검토해야 한다.
+- FTR 파서는 Contract dump 내부 heading-like 텍스트를 opaque 처리하면서,
+  닫는 fence 뒤에 이어지는 canonical top-level section은 실제 문서 구조로
+  보존한다. FTR body를 fence 없이 작성하고 그 뒤에 실제 섹션을 두는
+  비표준 문서는 여전히 모호할 수 있으므로 canonical generator는 FTR을
+  마지막 fenced section으로 유지해야 한다.
