@@ -643,6 +643,23 @@ def test_release_workflow_structure_enforces_validation_before_publication() -> 
     )
 
 
+def test_release_workflow_configures_git_identity_before_annotated_tag() -> None:
+    workflow = yaml.safe_load(Path(".github/workflows/release.yml").read_text(encoding="utf-8"))
+    publish_steps = workflow["jobs"]["publish-release"]["steps"]
+    tag_step = next(step for step in publish_steps if step.get("name") == "Create immutable tag")
+    tag_run = tag_step["run"]
+
+    name_index = tag_run.index('git config user.name "github-actions[bot]"')
+    email_index = tag_run.index(
+        'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"'
+    )
+    tag_index = tag_run.index("git tag --annotate")
+
+    assert name_index < tag_index
+    assert email_index < tag_index
+    assert "git push origin" in tag_run
+
+
 def test_release_workflow_uses_platform_artifact_matrix_and_manual_dispatch() -> None:
     workflow = yaml.safe_load(Path(".github/workflows/release.yml").read_text(encoding="utf-8"))
     build_job = workflow["jobs"]["build-artifacts"]

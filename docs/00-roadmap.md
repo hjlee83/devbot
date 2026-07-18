@@ -187,3 +187,10 @@
       제거한다. command/workspace/exit code evidence와 환경 준비, dependency
       network, command, forbidden fallback failure category를 기록한다
       (`results/029-prepared-workspace-validation.md`).
+
+- [x] Task 036: release tag Git identity. v0.1.0 Release workflow가
+      `Create immutable tag` 단계에서 Git committer identity 부재로 실패한
+      문제를 닫는다. Annotated tag 생성 전에 `github-actions[bot]` identity를
+      local Git config로 설정하고, `git tag --annotate`보다 먼저 실행되는지
+      workflow regression test로 고정했다
+      (`results/036-release-tag-git-identity.md`).
