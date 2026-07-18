@@ -166,7 +166,14 @@ def test_automerge_merges_and_marks_issue_done_when_all_gates_pass() -> None:
     result = service.process(repo, issue, pull_request)
 
     assert result.decision is AutomergeDecision.MERGED
-    write_client.merge_pull_request.assert_called_once()
+    write_client.merge_pull_request.assert_called_once_with(
+        repo,
+        9,
+        expected_head_sha="abc123",
+        commit_title="Merge PR #9",
+        commit_message="Merged automatically by DevBot after MERGE READY and green CI.",
+        merge_method="merge",
+    )
     state_writer.mark_done.assert_called_once_with(
         repo, issue, reason="PR #9 자동 머지 완료: merge-sha"
     )

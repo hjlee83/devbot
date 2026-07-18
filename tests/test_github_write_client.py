@@ -119,6 +119,7 @@ def test_merge_pull_request_sends_put_and_parses_response() -> None:
     result = client.merge_pull_request(
         _repository(),
         99,
+        expected_head_sha="head-sha",
         commit_title="Merge PR #99: Add feature X",
         commit_message="Merged automatically by DevBot.",
     )
@@ -129,6 +130,7 @@ def test_merge_pull_request_sends_put_and_parses_response() -> None:
     args, kwargs = session.put.call_args
     assert args[0].endswith("/repos/someone/myrepo/pulls/99/merge")
     assert kwargs["json"] == {
+        "sha": "head-sha",
         "commit_title": "Merge PR #99: Add feature X",
         "commit_message": "Merged automatically by DevBot.",
         "merge_method": "merge",

@@ -65,7 +65,11 @@ class FakeGitHubClient:
     def list_pull_requests(self, repository: RepositoryConfig, **_kwargs: object):
         if self._error is not None:
             raise self._error
-        return self._pull_requests_by_repo.get(repository.full_name, [])
+        pull_requests = self._pull_requests_by_repo.get(repository.full_name, [])
+        state = _kwargs.get("state", "open")
+        if state == "closed":
+            return [pull_request for pull_request in pull_requests if pull_request.merged]
+        return [pull_request for pull_request in pull_requests if not pull_request.merged]
 
     def list_check_runs_for_ref(self, repository: RepositoryConfig, ref: str):
         if self._error is not None:
@@ -117,6 +121,7 @@ def _pull_request(
     issue_number: int,
     head_ref: str = "devbot/existing-branch",
     head_sha: str = "deadbeef",
+    merged: bool = False,
 ) -> PullRequest:
     return PullRequest(
         number=number,
@@ -124,6 +129,7 @@ def _pull_request(
         head_sha=head_sha,
         body=f"Closes #{issue_number}",
         html_url=f"https://github.com/someone/myrepo/pull/{number}",
+        merged=merged,
     )
 
 
@@ -755,7 +761,50 @@ def test_ready_to_merge_pr_is_merged_and_issue_marked_done() -> None:
     result = service.run_once()
 
     assert result.status is PollingStatus.MERGED
-    write_client.merge_pull_request.assert_called_once()
+    write_client.merge_pull_request.assert_called_once_with(
+        repo,
+        9,
+        expected_head_sha=pull_request.head_sha,
+        commit_title="Merge PR #9",
+        commit_message="Merged automatically by DevBot after MERGE READY and green CI.",
+        merge_method="merge",
+    )
+    write_client.set_labels.assert_called_once_with(repo, 42, ["devbot:done"])
+
+
+def test_merged_linked_pr_reconciles_review_issue_to_done() -> None:
+    repo = _automerge_repo("myrepo")
+    issue = _issue(
+        repo.full_name,
+        42,
+        labels=["devbot:review"],
+        body="Pull Request: #9",
+    )
+    merged_pull_request = _pull_request(9, issue_number=42, merged=True)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]},
+        pull_requests_by_repo={repo.full_name: [merged_pull_request]},
+    )
+    config = _config([repo], dry_run=False, automerge_enabled=True)
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        state_writer=state_writer,
+        automerge_service=AutomergeService(
+            config=config,
+            write_client=write_client,
+            state_writer=state_writer,
+            list_check_runs_for_ref=github_client.list_check_runs_for_ref,
+        ),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.MERGED
+    write_client.merge_pull_request.assert_not_called()
     write_client.set_labels.assert_called_once_with(repo, 42, ["devbot:done"])
 
 

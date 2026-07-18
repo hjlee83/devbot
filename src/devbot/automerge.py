@@ -118,6 +118,7 @@ class AutomergeService:
         merge_result = self.write_client.merge_pull_request(
             repository,
             pull_request.number,
+            expected_head_sha=pull_request.head_sha,
             commit_title=f"Merge PR #{pull_request.number}",
             commit_message="Merged automatically by DevBot after MERGE READY and green CI.",
             merge_method="merge",

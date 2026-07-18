@@ -165,6 +165,7 @@ class GitHubWriteClient:
         repository: RepositoryConfig,
         pull_request_number: int,
         *,
+        expected_head_sha: str,
         commit_title: str,
         commit_message: str = "",
         merge_method: str = "merge",
@@ -173,6 +174,7 @@ class GitHubWriteClient:
         payload = self._put(
             f"/repos/{repository.owner}/{repository.repo}/pulls/{pull_request_number}/merge",
             json={
+                "sha": expected_head_sha,
                 "commit_title": commit_title,
                 "commit_message": commit_message,
                 "merge_method": merge_method,

@@ -916,9 +916,13 @@ class PollingService:
 
         results: list[PollingResult] = []
         pull_requests_by_repo: dict[str, list[PullRequest]] = {}
+        closed_pull_requests_by_repo: dict[str, list[PullRequest]] = {}
         for repository in repositories:
             pull_requests_by_repo[repository.full_name] = self.github_client.list_pull_requests(
                 repository
+            )
+            closed_pull_requests_by_repo[repository.full_name] = (
+                self.github_client.list_pull_requests(repository, state="closed")
             )
 
         for task in tasks:
@@ -931,6 +935,26 @@ class PollingService:
             pull_request = find_linked_pull_request(
                 issue, pull_requests_by_repo[repository.full_name]
             )
+            if pull_request is None:
+                closed_pull_request = find_linked_pull_request(
+                    issue, closed_pull_requests_by_repo[repository.full_name]
+                )
+                if closed_pull_request is not None and closed_pull_request.merged:
+                    self.state_writer.mark_done(
+                        repository,
+                        issue,
+                        reason=(
+                            f"PR #{closed_pull_request.number} 자동 머지 상태 정합화 완료"
+                        ),
+                    )
+                    message = (
+                        f"PR #{closed_pull_request.number} merged 상태를 확인해 "
+                        "Issue를 done으로 정합화했습니다"
+                    )
+                    results.append(
+                        PollingResult(status=PollingStatus.MERGED, task=task, message=message)
+                    )
+                continue
             if pull_request is None or READY_TO_MERGE_LABEL not in pull_request.labels:
                 continue
 

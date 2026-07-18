@@ -86,6 +86,7 @@ class PullRequest:
     body: str
     html_url: str
     labels: tuple[str, ...] = ()
+    merged: bool = False
 
 
 def _error_message(response: requests.Response) -> str:
@@ -151,6 +152,7 @@ def _parse_pull_request(raw: dict[str, Any]) -> PullRequest:
         body=raw.get("body") or "",
         html_url=raw["html_url"],
         labels=labels,
+        merged=bool(raw.get("merged") or raw.get("merged_at")),
     )
 
 
