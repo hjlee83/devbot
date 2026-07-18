@@ -1,0 +1,449 @@
+# Task 045 — Contract Schema Specification
+
+## Provenance
+
+- GitHub Issue: #94
+- Task Contract: `tasks/045-contract-schema.md`
+- Branch: `task/045-contract-schema`
+- Epic: Contract Platform
+- Current Release: `v0.1.1`
+
+## Goal
+
+Define Contract Schema v1 as DevBot's authoritative and versioned Task Contract standard. This task creates the stable boundary that future metadata parsers, policy engines, workflow components, and review systems will consume.
+
+## Problem Statement
+
+Task Contracts currently carry useful structure, but the structure is conventional rather than formally defined. Multiple components may therefore interpret the same Contract differently. Implementing metadata parsing before defining the schema would hard-code assumptions and increase future migration cost.
+
+Contract Schema v1 must make the Contract format explicit, deterministic, versioned, and implementation-ready without adding parser or policy behavior in this task.
+
+## Design Principles
+
+1. **One authoritative schema** — Consumers must depend on the formal Contract Schema rather than independently interpreting Markdown.
+2. **Versioned evolution** — Every conforming Contract declares its schema version.
+3. **Fail closed** — Unknown required fields, invalid enum values, and unsupported schema versions are invalid unless a future compatibility rule explicitly permits them.
+4. **Canonical values** — Enum values are lowercase ASCII tokens.
+5. **Separation of concerns** — Schema definition is separate from parsing, policy evaluation, workflow execution, and release automation.
+6. **Human-readable source** — The Contract remains readable and maintainable as Markdown.
+
+## Normative Contract Structure
+
+A Contract conforming to Schema v1 uses the following top-level sections in this order:
+
+```markdown
+# Task NNN — Title
+
+## Contract Version
+
+1
+
+## Provenance
+
+...
+
+## Task Identity
+
+...
+
+## Metadata
+
+...
+
+## Goal
+
+...
+
+## Context
+
+...
+
+## Scope
+
+...
+
+## Out of Scope
+
+...
+
+## Deliverables
+
+...
+
+## Acceptance Criteria
+
+...
+
+## Quality Gates
+
+...
+
+## Handoff
+
+...
+
+## References
+
+...
+```
+
+Ordering is normative for newly generated Contracts. A future parser may support legacy ordering, but Schema v1 generation must be deterministic.
+
+## Field Definitions
+
+### Contract Version
+
+- **Required:** yes
+- **Cardinality:** exactly one
+- **Type:** positive integer
+- **Schema v1 value:** `1`
+- **Meaning:** Selects the rules used to interpret the Contract.
+
+Unsupported versions must fail closed.
+
+### Provenance
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Required entries:**
+  - GitHub Issue reference
+  - Branch name
+- **Optional entries:**
+  - Epic
+  - Current release
+  - Parent task or originating document
+
+Provenance links the Contract to its source and execution context.
+
+### Task Identity
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Required fields:**
+  - `id`: zero-padded task identifier such as `045`
+  - `title`: human-readable title
+- **Optional fields:**
+  - `owner`
+  - `priority`
+
+The heading and Task Identity values must agree.
+
+### Metadata
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Required fields:**
+  - `specification_type`
+  - `release_impact`
+  - `risk_level`
+  - `compatibility`
+  - `migration`
+
+Metadata values must use the canonical values defined below.
+
+### Goal
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** one concise outcome statement describing the intended change.
+
+### Context
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** background, motivation, constraints, and relevant existing behavior.
+
+### Scope
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** one or more explicit in-scope items.
+
+### Out of Scope
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** explicit exclusions that prevent accidental expansion.
+
+### Deliverables
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** concrete artifacts expected from implementation.
+
+### Acceptance Criteria
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** testable conditions. At least one criterion is required.
+
+### Quality Gates
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** validation, test, lint, compatibility, and documentation gates relevant to the task.
+
+### Handoff
+
+- **Required:** yes
+- **Cardinality:** exactly one section
+- **Content:** implementation instructions, authoritative source, target branch, and expected Result/PR behavior.
+
+### References
+
+- **Required:** no
+- **Cardinality:** zero or one section
+- **Content:** related documents, issues, pull requests, ADRs, or external standards.
+
+## Canonical Metadata Values
+
+### `specification_type`
+
+Allowed values:
+
+- `feature`
+- `bugfix`
+- `refactor`
+- `docs`
+- `internal`
+- `generic`
+
+Meaning:
+
+- `feature`: introduces or extends behavior
+- `bugfix`: corrects unintended behavior
+- `refactor`: restructures implementation without intended behavior change
+- `docs`: documentation-only change
+- `internal`: internal tooling or operational change
+- `generic`: no more specific category applies
+
+### `release_impact`
+
+Allowed values:
+
+- `breaking`
+- `feature`
+- `fix`
+- `docs`
+- `internal`
+- `none`
+
+This field describes release significance. It does not itself change a version in Task 045.
+
+### `risk_level`
+
+Allowed values:
+
+- `low`
+- `medium`
+- `high`
+
+Risk represents implementation and operational risk, not task priority.
+
+### `compatibility`
+
+Allowed values:
+
+- `backward`
+- `breaking`
+
+`backward` means existing supported consumers are expected to continue working. `breaking` means at least one supported consumer may require change.
+
+### `migration`
+
+Allowed values:
+
+- `none`
+- `optional`
+- `required`
+
+Migration describes whether persisted state, configuration, documents, or users require migration work.
+
+## Canonical Metadata Representation
+
+Newly generated Schema v1 Contracts must represent Metadata as a Markdown definition list:
+
+```markdown
+## Metadata
+
+- specification_type: internal
+- release_impact: internal
+- risk_level: low
+- compatibility: backward
+- migration: none
+```
+
+Rules:
+
+- Each field appears exactly once.
+- Field names and values are lowercase.
+- Values are unquoted canonical tokens.
+- Unknown fields are invalid in Schema v1 unless prefixed with `x-` for experimental extensions.
+- Experimental `x-` fields must not affect core policy decisions.
+
+## Required and Optional Summary
+
+| Area | Required | Cardinality |
+|---|---:|---:|
+| Contract Version | yes | 1 |
+| Provenance | yes | 1 |
+| Task Identity | yes | 1 |
+| Metadata | yes | 1 |
+| Goal | yes | 1 |
+| Context | yes | 1 |
+| Scope | yes | 1 |
+| Out of Scope | yes | 1 |
+| Deliverables | yes | 1 |
+| Acceptance Criteria | yes | 1 |
+| Quality Gates | yes | 1 |
+| Handoff | yes | 1 |
+| References | no | 0..1 |
+
+## Versioning Rules
+
+### Backward-Compatible Schema Change
+
+A schema change is backward-compatible when existing valid Schema v1 Contracts remain valid and retain their meaning. Examples include:
+
+- Clarifying documentation without changing semantics.
+- Adding an optional section or optional field.
+- Adding an experimental `x-` extension that core consumers ignore.
+
+Backward-compatible clarifications do not require changing `contract_version`.
+
+### Breaking Schema Change
+
+A schema change is breaking when an existing valid Contract could become invalid, ambiguous, or change meaning. Examples include:
+
+- Adding a new required field.
+- Removing or renaming a field.
+- Removing or redefining an enum value.
+- Changing section cardinality or interpretation.
+- Changing canonical representation.
+
+Breaking changes require a new integer `contract_version` and explicit migration guidance.
+
+## Legacy Compatibility
+
+Existing historical Contracts that do not declare `Contract Version` are considered legacy, not Schema v1 compliant. Task 045 does not require rewriting every historical Contract.
+
+Future parser work may provide a legacy adapter, but it must expose whether a Contract was parsed through legacy compatibility rather than native Schema v1.
+
+## Normative Example
+
+```markdown
+# Task 045 — Contract Schema
+
+## Contract Version
+
+1
+
+## Provenance
+
+- GitHub Issue: #94
+- Branch: `task/045-contract-schema`
+- Epic: Contract Platform
+- Current Release: `v0.1.1`
+
+## Task Identity
+
+- id: 045
+- title: Contract Schema
+
+## Metadata
+
+- specification_type: internal
+- release_impact: internal
+- risk_level: low
+- compatibility: backward
+- migration: none
+
+## Goal
+
+Define Contract Schema v1 as the authoritative Task Contract standard.
+
+## Context
+
+Contracts need a stable versioned boundary before metadata parsing and policy evaluation are implemented.
+
+## Scope
+
+- Define the schema structure.
+- Define required fields.
+- Define canonical metadata values.
+- Define versioning rules.
+
+## Out of Scope
+
+- Parser implementation.
+- Release recommendation logic.
+- Workflow automation.
+
+## Deliverables
+
+- Task Contract.
+- Specification.
+- Result document.
+
+## Acceptance Criteria
+
+- Schema v1 is explicit and versioned.
+- Required and optional fields are documented.
+- Canonical values are deterministic.
+
+## Quality Gates
+
+- Specification validation passes.
+- Examples conform to Schema v1.
+
+## Handoff
+
+Implement the Specification, produce a Result document, and open a PR targeting `main`.
+```
+
+## Validation Expectations for Future Tasks
+
+The future Contract validator/parser must, at minimum:
+
+- Reject unsupported Contract versions.
+- Reject missing required sections.
+- Reject duplicate singleton sections.
+- Reject missing required metadata fields.
+- Reject unknown non-extension metadata fields.
+- Reject invalid enum values.
+- Verify Task Identity consistency.
+- Preserve deterministic canonical output.
+
+These expectations are documented here but are not implemented in Task 045.
+
+## Implementation Constraints
+
+- Do not add parser or policy code.
+- Do not add CLI commands.
+- Do not automatically modify project versions.
+- Do not implement Review Loop or Workflow behavior.
+- Keep the task documentation-focused unless a minimal schema artifact is already established by repository convention.
+
+## Acceptance Criteria
+
+1. Contract Schema v1 is fully defined.
+2. Every normative area has meaning, requiredness, and cardinality.
+3. Canonical metadata values and representation are fixed.
+4. Versioning rules distinguish compatible and breaking evolution.
+5. Legacy Contracts are explicitly classified without forced migration.
+6. A normative conforming example is provided.
+7. Future parser validation expectations are documented.
+8. The Specification validates under the existing Specification Validator.
+9. No parser, CLI, policy, workflow, review, or release automation is introduced.
+10. A Result document records implementation and validation evidence.
+
+## Quality Gates
+
+- Run the repository's Specification validation command against this file.
+- Run documentation or repository lint checks relevant to changed files.
+- Confirm all examples use only declared Schema v1 fields and enum values.
+- Confirm the PR contains no out-of-scope application behavior.
+
+## Handoff
+
+Use this Specification as the authoritative source. Work only on `task/045-contract-schema`, produce the repository-standard Result document, run the relevant validation commands, and open a pull request targeting `main`. Do not expand into the future Contract Metadata Engine or AI Review Loop.
