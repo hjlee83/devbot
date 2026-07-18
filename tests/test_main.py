@@ -299,6 +299,148 @@ def test_goal_plan_command_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
     mock_lock.assert_not_called()
 
 
+def _execution_report(*, ready: bool = True, executed: bool = False, blockers: tuple = ()):
+    from devbot.goal_executor import ExecutionPlan, ExecutionReadiness, ExecutionReport
+    from devbot.goal_planner import PlannedTask
+
+    plan = GoalPlan(
+        goal="Add a global PATH launcher.",
+        decision="single_task",
+        reasons=(),
+        evidence=("Task 032 Out of Scope",),
+        planned_tasks=(
+            PlannedTask(
+                title="Global PATH Launcher",
+                objective="obj",
+                dependencies=(),
+                expected_deliverables=("d",),
+                acceptance_criteria=("a",),
+                order=1,
+            ),
+        ),
+    )
+    execution_plan = ExecutionPlan(
+        goal=plan.goal,
+        plan=plan,
+        selected_task=plan.planned_tasks[0],
+        already_materialized=False,
+        existing_issue_number=None,
+        existing_issue_url=None,
+        task_number=41,
+        branch="task/041-global-path-launcher",
+        contract_path="tasks/041-global-path-launcher.md",
+        result_path="results/041-global-path-launcher.md",
+        issue_title="Task 041: Global PATH Launcher",
+        issue_body="body",
+        contract_content="content",
+        readiness=ExecutionReadiness(ready=ready, blockers=blockers),
+    )
+    return ExecutionReport(
+        goal=plan.goal,
+        execution_plan=execution_plan,
+        executed=executed,
+        materialize_result=None,
+        next_operator_action="re-run with --confirm",
+    )
+
+
+def test_goal_execute_dry_run_never_constructs_write_client(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report = _execution_report(ready=True, executed=False)
+
+    with (
+        patch("devbot.main.execute_goal", return_value=report) as mock_execute,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["goal", "execute", "Add a global PATH launcher.", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_write_client.assert_not_called()
+    assert mock_execute.call_args.kwargs["confirm"] is False
+    out = capsys.readouterr().out
+    assert "executed: no" in out
+    assert "--confirm" in out
+
+
+def test_goal_execute_confirm_constructs_write_client_and_calls_execute(
+    tmp_path: Path,
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report = _execution_report(ready=True, executed=True)
+
+    with (
+        patch("devbot.main.execute_goal", return_value=report) as mock_execute,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["goal", "execute", "Add a global PATH launcher.", "--task", "1", "--confirm"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_write_client.assert_called_once()
+    assert mock_execute.call_args.kwargs["confirm"] is True
+    assert mock_execute.call_args.kwargs["task_order"] == 1
+
+
+def test_goal_execute_dry_run_flag_overrides_confirm(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report = _execution_report(ready=True, executed=False)
+
+    with (
+        patch("devbot.main.execute_goal", return_value=report) as mock_execute,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["goal", "execute", "Add a global PATH launcher.", "--confirm", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_write_client.assert_not_called()
+    assert mock_execute.call_args.kwargs["confirm"] is False
+
+
+def test_goal_execute_blocked_returns_failure_exit_code(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report = _execution_report(ready=False, executed=False, blockers=("dirty checkout",))
+
+    with patch("devbot.main.execute_goal", return_value=report):
+        exit_code = main(
+            ["goal", "execute", "Add a global PATH launcher.", "--confirm"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+
+
+def test_goal_execute_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report = _execution_report(ready=True, executed=False)
+
+    with (
+        patch("devbot.main.execute_goal", return_value=report),
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["goal", "execute", "Add a global PATH launcher.", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
 def test_cli_version_prints_package_version(capsys: pytest.CaptureFixture[str]) -> None:
     with patch("devbot.main.authoritative_version", return_value="9.8.7"):
         exit_code = main(["--version"])

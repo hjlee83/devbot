@@ -21,7 +21,6 @@ from devbot.release_ops import (
     ReleaseOpsError,
     ReleasePreview,
     ReleaseReadiness,
-    _target_commit_is_ci_validated,
     build_release_preview,
     build_release_status,
     dispatch_release,
@@ -29,6 +28,7 @@ from devbot.release_ops import (
     gather_release_context,
     local_checkout_is_dirty,
     publish_release,
+    target_commit_is_ci_validated,
     validate_published_release,
     wait_for_dispatched_run,
 )
@@ -208,7 +208,7 @@ def test_local_checkout_is_dirty_returns_none_for_non_git_path(tmp_path: Path) -
 
 
 # --------------------------------------------------------------------------
-# _target_commit_is_ci_validated (Task 039): the CI workflow's own push-
+# target_commit_is_ci_validated (Task 039): the CI workflow's own push-
 # triggered run for the exact target commit is the only source of truth -
 # never the aggregate Check Runs API, which mixes in every other workflow
 # triggered for the same commit (see Task 039's Result doc for how this
@@ -228,7 +228,7 @@ def test_ci_validated_true_for_exact_push_success() -> None:
         )
     ]
 
-    result = _target_commit_is_ci_validated(
+    result = target_commit_is_ci_validated(
         client, _repository(), "target-sha", workflow_file=CI_WORKFLOW_FILE
     )
 
@@ -253,7 +253,7 @@ def test_ci_validated_false_for_pr_only_success_at_premerge_sha() -> None:
         )
     ]
 
-    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+    assert target_commit_is_ci_validated(client, _repository(), "target-sha") is False
 
 
 def test_ci_validated_false_for_success_on_another_sha() -> None:
@@ -268,14 +268,14 @@ def test_ci_validated_false_for_success_on_another_sha() -> None:
         )
     ]
 
-    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+    assert target_commit_is_ci_validated(client, _repository(), "target-sha") is False
 
 
 def test_ci_validated_false_when_no_run_found() -> None:
     client = MagicMock()
     client.list_workflow_runs.return_value = []
 
-    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+    assert target_commit_is_ci_validated(client, _repository(), "target-sha") is False
 
 
 def test_ci_validated_false_for_queued_run() -> None:
@@ -290,7 +290,7 @@ def test_ci_validated_false_for_queued_run() -> None:
         )
     ]
 
-    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+    assert target_commit_is_ci_validated(client, _repository(), "target-sha") is False
 
 
 def test_ci_validated_false_for_in_progress_run() -> None:
@@ -305,7 +305,7 @@ def test_ci_validated_false_for_in_progress_run() -> None:
         )
     ]
 
-    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+    assert target_commit_is_ci_validated(client, _repository(), "target-sha") is False
 
 
 def test_ci_validated_false_for_failed_run() -> None:
@@ -320,7 +320,7 @@ def test_ci_validated_false_for_failed_run() -> None:
         )
     ]
 
-    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+    assert target_commit_is_ci_validated(client, _repository(), "target-sha") is False
 
 
 def test_ci_validated_false_for_cancelled_run() -> None:
@@ -335,7 +335,7 @@ def test_ci_validated_false_for_cancelled_run() -> None:
         )
     ]
 
-    assert _target_commit_is_ci_validated(client, _repository(), "target-sha") is False
+    assert target_commit_is_ci_validated(client, _repository(), "target-sha") is False
 
 
 def test_gather_release_context_reports_api_failure_as_validation_error() -> None:

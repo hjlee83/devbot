@@ -8,6 +8,7 @@ those land in a later Task.
 
 from __future__ import annotations
 
+import base64
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -559,3 +560,35 @@ class GitHubClient:
             accept="application/octet-stream",
         )
         return response.content
+
+    def get_branch_ref(self, repository: RepositoryConfig, branch: str) -> str | None:
+        """Resolve a branch to its current head commit SHA, or `None` if the
+        branch does not exist
+        (`GET /repos/{owner}/{repo}/git/ref/heads/{branch}`, Task 040)."""
+        try:
+            payload = self._get(
+                f"/repos/{repository.owner}/{repository.repo}/git/ref/heads/{branch}"
+            ).json()
+        except GitHubNotFoundError:
+            return None
+        return str(payload["object"]["sha"])
+
+    def get_file_content(
+        self, repository: RepositoryConfig, path: str, *, ref: str
+    ) -> str | None:
+        """Fetch a text file's decoded content at `ref`, or `None` if it does
+        not exist there (`GET /repos/{owner}/{repo}/contents/{path}?ref=...`,
+        Task 040 - used to idempotently detect an already-created draft
+        contract before writing one)."""
+        try:
+            payload = self._get(
+                f"/repos/{repository.owner}/{repository.repo}/contents/{path}",
+                params={"ref": ref},
+            ).json()
+        except GitHubNotFoundError:
+            return None
+        if payload.get("encoding") != "base64":
+            raise GitHubAPIError(
+                f"unexpected content encoding for {path!r}: {payload.get('encoding')!r}"
+            )
+        return base64.b64decode(payload["content"]).decode("utf-8")

@@ -259,3 +259,16 @@
       커밋의 성공/pre-merge PR 실행/API 인증 실패 모두 fail closed를
       유지한다(`src/devbot/release_ops.py`,
       `results/039-release-main-ci-validation.md`).
+- [x] Task 040: goal executor. Task 038의 읽기 전용 Goal Planner를 확장해,
+      운영자가 검증된 계획에서 승인된 Task 하나만 정상 DevBot 워크플로로
+      구체화할 수 있게 한다(`devbot goal execute "<goal>" [--task <order>]
+      [--confirm] [--dry-run]`). Task 038의 `fetch_goal_plan`을 정확히 한
+      번만 호출하고 계획을 다시 계산하거나 재해석하지 않는다. `--confirm`
+      없이는 아무것도 쓰지 않고, 실행 가능한 decision(`single_task`/
+      `multi_task`)에서만, multi-task는 의존성 순서상 아직 구체화되지
+      않은 첫 Task만 진행한다. `--confirm` 시 정확히 GitHub Issue 1개,
+      최신 CI 검증된 `origin/main`에서 분기한 Branch 1개, 초안 Contract
+      파일 1개만 생성한다 - PR 생성이나 구현 Agent 호출은 절대 하지
+      않는다. Issue 존재 여부로 멱등성을 보장해 부분 실패 후 재시도해도
+      중복 생성하지 않는다(`src/devbot/goal_executor.py`,
+      `results/040-goal-executor.md`).
