@@ -26,7 +26,7 @@ RELEASE_LABELS: dict[str, ReleaseIncrement] = {
     "release:major": "major",
     "release:none": "none",
 }
-SUPPORTED_PLATFORMS: tuple[tuple[str, str], ...] = (("portable", "python"),)
+SUPPORTED_PLATFORMS: tuple[tuple[str, str], ...] = (("linux", "x86_64"), ("macos", "arm64"))
 RELEASE_NOTE_SECTIONS: tuple[str, ...] = (
     "What's New",
     "Improvements",
@@ -191,7 +191,7 @@ def release_artifact_name(version: str, os_name: str, architecture: str) -> str:
     if (os_name, architecture) not in SUPPORTED_PLATFORMS:
         raise ReleasePolicyError(f"unsupported release platform: {os_name}/{architecture}")
     SemanticVersion.parse(version)
-    return f"{PRODUCT_NAME}-{version}-portable-python.tar.gz"
+    return f"{PRODUCT_NAME}-{version}-{os_name}-{architecture}.tar.gz"
 
 
 def expected_artifact_names(version: str) -> tuple[str, ...]:
@@ -284,7 +284,7 @@ def _normalize_package_name(name: str) -> str:
 def _locked_runtime_dependencies(project_root: Path) -> dict[str, str]:
     lock_path = project_root / "uv.lock"
     if not lock_path.exists():
-        raise ReleasePolicyError("portable artifact requires uv.lock for locked dependencies")
+        raise ReleasePolicyError("release artifact requires uv.lock for locked dependencies")
     lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
     packages = {
         _normalize_package_name(str(package["name"])): package
@@ -431,7 +431,7 @@ def initial_release_notes(*, version: str, source_commit: str) -> str:
         ),
         "Upgrade Notes": (
             "This is the first stable DevBot Release. Install or update from the published "
-            "portable Python artifact and verify it against SHA256SUMS.",
+            "platform-specific artifact and verify it against SHA256SUMS.",
         ),
         "Known Limitations": (
             "Runtime automatic update discovery, package-manager distribution, launchd/systemd "

@@ -136,7 +136,17 @@ jobs:
   build-artifacts:
     needs: plan-release
     if: needs.plan-release.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_name: linux
+            architecture: x86_64
+          - runner: macos-14
+            os_name: macos
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -145,12 +155,12 @@ jobs:
         uses: astral-sh/setup-uv@v8.3.2
         with:
           python-version: "3.13"
-      - name: Build portable Python artifact
+      - name: Build platform artifact
         run: |
           uv run python scripts/release_pipeline.py build-artifact \
             --version "${{ needs.plan-release.outputs.version }}" \
-            --os-name portable \
-            --architecture python \
+            --os-name "${{ matrix.os_name }}" \
+            --architecture "${{ matrix.architecture }}" \
             --output-dir dist \
             --project-root .
       - name: Smoke packaged DevBot
@@ -160,7 +170,7 @@ jobs:
           smoke/devbot-release/bin/devbot --version
       - uses: actions/upload-artifact@v4
         with:
-          name: release-portable-python
+          name: release-${{ matrix.os_name }}-${{ matrix.architecture }}
           path: dist/*.tar.gz
 
   publish-release:

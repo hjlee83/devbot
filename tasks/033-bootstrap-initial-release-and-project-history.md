@@ -9,9 +9,7 @@ format.
 ## Context
 
 Task 032 added the automated release pipeline. Task 033 is the bootstrap operation for the
-first stable Release. The authoritative package version is `0.1.0`, no prior stable
-Release is present in local tag history, and the selected validated `main` commit is
-`6526cfea27e4a5fd0003df6eb698cd202dedcf57`.
+first stable Release. The authoritative package version is `0.1.0`, no prior stable Release is present in local tag history, and the source commit is the final `main` commit produced after Task 034 is merged and the release workflow is dispatched. Do not hard-code a future merge SHA before it exists.
 
 The only existing local version tag before this Task is prerelease tag `v0.1.0-alpha.1`.
 No retrospective stable tags may be added to older commits.
@@ -19,8 +17,8 @@ No retrospective stable tags may be added to older commits.
 ## In scope
 
 - Use the Task 032 release pipeline contract for the first stable Release.
-- Target stable tag `v0.1.0` at commit `6526cfea27e4a5fd0003df6eb698cd202dedcf57`.
-- Build the portable Python artifact `devbot-0.1.0-portable-python.tar.gz`.
+- Target stable tag `v0.1.0` at the final `main` commit produced after Task 034 is merged.
+- Build platform-specific artifacts: `devbot-0.1.0-linux-x86_64.tar.gz` and `devbot-0.1.0-macos-arm64.tar.gz`.
 - Generate and verify `SHA256SUMS`.
 - Smoke-test the packaged `devbot --version`.
 - Write initial Release Notes summarizing work completed through Task 032.
@@ -43,18 +41,18 @@ No retrospective stable tags may be added to older commits.
 - `results/033-bootstrap-initial-release-and-project-history.md`
 - `docs/history.md`
 - Initial stable Release Notes content for `v0.1.0`
-- Portable Python artifact name and `SHA256SUMS` evidence
+- Platform-specific artifact names and `SHA256SUMS` evidence
 
 ## Functional requirements
 
 1. The first stable Release version must be `0.1.0` only when the authoritative package
    version is `0.1.0` and no prior stable Release exists.
 2. The first official stable tag must be `v0.1.0` and must target exactly
-   `6526cfea27e4a5fd0003df6eb698cd202dedcf57`.
+   the final `main` commit produced after Task 034 is merged.
 3. Stable Release creation must fail safely if stable Release `v0.1.0` already exists or
    if tag `v0.1.0` points anywhere else.
-4. The portable artifact must be named `devbot-0.1.0-portable-python.tar.gz`.
-5. `SHA256SUMS` must cover the portable artifact exactly.
+4. The platform-specific artifacts must be named `devbot-0.1.0-linux-x86_64.tar.gz` and `devbot-0.1.0-macos-arm64.tar.gz`.
+5. `SHA256SUMS` must cover both platform-specific artifacts exactly.
 6. Packaged `devbot --version` must print `devbot 0.1.0`.
 7. Initial Release Notes and future generated Release Notes must use these sections:
    - What's New
@@ -89,7 +87,7 @@ Required test:
 
 ### CP-033-3 — Artifact and checksum evidence
 
-Verify deterministic portable artifact naming, complete checksum coverage, and packaged
+Verify deterministic platform-specific artifact naming, complete checksum coverage, and packaged
 CLI version agreement.
 
 Required tests:
@@ -126,7 +124,8 @@ Additional local release evidence commands:
 
 ```bash
 UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run python scripts/release_pipeline.py version --project-root .
-UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run python scripts/release_pipeline.py build-artifact --version 0.1.0 --os-name portable --architecture python --output-dir /tmp/devbot-task033-release --project-root .
+UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run python scripts/release_pipeline.py build-artifact --version 0.1.0 --os-name linux --architecture x86_64 --output-dir /tmp/devbot-task033-release --project-root .
+UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run python scripts/release_pipeline.py build-artifact --version 0.1.0 --os-name macos --architecture arm64 --output-dir /tmp/devbot-task033-release --project-root .
 UV_CACHE_DIR=/tmp/devbot-task033-uv-cache uv run python scripts/release_pipeline.py checksum-manifest --version 0.1.0 --artifact-dir /tmp/devbot-task033-release --output /tmp/devbot-task033-release/SHA256SUMS
 /tmp/devbot-task033-smoke/devbot-release/bin/devbot --version
 ```
