@@ -32,6 +32,7 @@ from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
 from devbot.github_client import GitHubClient, GitHubClientError, GitHubIssue, PullRequestComment
 from devbot.github_write_client import GitHubWriteClient
+from devbot.goal_planner import GoalPlan, fetch_goal_plan
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import AgentOutcome, DevBotConfig, IssueComment, RepositoryConfig
@@ -192,6 +193,67 @@ def _build_worktree_parser(subparsers: argparse._SubParsersAction) -> None:
         default=True,
         help="미커밋 변경이 있어도 강제로 제거합니다 (기본값).",
     )
+
+
+def _build_goal_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Task 038: read-only Goal-based planning. The operator states a
+    high-level Goal instead of manually deciding which Task(s) to write;
+    DevBot compares it against the roadmap, completed Tasks, and open
+    GitHub Issues/Pull Requests and reports a plan. Never creates an Issue,
+    branch, contract, or PR, and never runs as part of a polling cycle."""
+    goal_parser = subparsers.add_parser(
+        "goal", help="Goal 기반 계획 수립 (읽기 전용, 아무것도 쓰지 않음)."
+    )
+    goal_subparsers = goal_parser.add_subparsers(dest="goal_command", required=True)
+
+    plan_parser = goal_subparsers.add_parser(
+        "plan",
+        help=(
+            "Goal을 로드맵/완료된 Task/열린 Issue-PR과 비교해 필요한 Task 수와 "
+            "각 Task 계획을 계산합니다 (읽기 전용)."
+        ),
+    )
+    plan_parser.add_argument(
+        "goal", help='분석할 Goal 문장. 예: "Publish the next stable release."'
+    )
+    plan_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
+
+def _render_goal_plan(plan: GoalPlan) -> str:
+    lines = [f"goal: {plan.goal}", f"decision: {plan.decision}", "reasons:"]
+    lines.extend(f"  - {reason}" for reason in plan.reasons)
+    lines.append("evidence:")
+    lines.extend(f"  - {item}" for item in plan.evidence)
+    lines.append(f"planned_tasks ({len(plan.planned_tasks)}):")
+    for task in plan.planned_tasks:
+        lines.append(f"  [{task.order}] {task.title}")
+        lines.append(f"      objective: {task.objective}")
+        lines.append(f"      dependencies: {', '.join(task.dependencies) or 'none'}")
+        lines.append("      expected_deliverables:")
+        lines.extend(f"        - {item}" for item in task.expected_deliverables)
+        lines.append("      acceptance_criteria:")
+        lines.extend(f"        - {item}" for item in task.acceptance_criteria)
+    return "\n".join(lines)
+
+
+def _run_goal_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    github_client = GitHubClient(config.github_token)
+    try:
+        plan = fetch_goal_plan(github_client, repository, args.goal)
+    except GitHubClientError as exc:
+        print(f"goal plan 오류: GitHub 요청 실패: {exc}", file=sys.stderr)
+        return 1
+
+    print(_render_goal_plan(plan))
+    return 1 if plan.decision == "ambiguous" else 0
 
 
 def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -415,6 +477,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     _build_timeline_parser(subparsers)
     _build_worktree_parser(subparsers)
     _build_release_parser(subparsers)
+    _build_goal_parser(subparsers)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help=(
@@ -659,6 +722,9 @@ def main(
 
     if args.command == "release":
         return _run_release_command(args, config)
+
+    if args.command == "goal":
+        return _run_goal_command(args, config)
 
     if args.command == "doctor":
         if not args.ci and not _run_startup_self_update(config, logger):
