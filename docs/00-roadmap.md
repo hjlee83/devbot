@@ -317,3 +317,34 @@
       `devbot.polling`/`devbot.review`/`devbot.rework`)는 이번에 전혀
       바꾸지 않았고 어떤 Agent도 호출하지 않는다(`src/devbot/
       specification.py`, `results/042-specification-generator.md`).
+- [x] Task 043: specification validator. Goal → Planner → Issue → Contract →
+      Specification 뒤에 **Validation** 단계를 추가한다 - 향후 Workflow
+      Engine이 Dispatch 전에 통과해야 하는 품질 게이트다. 새
+      `src/devbot/specification_validation.py`가 Task 042의
+      `REQUIRED_TOP_LEVEL_SECTIONS`(이번에 `# Full Task Contract
+      Reference`를 8번째 항목으로 확장해 두 모듈이 같은 스키마를 공유하게
+      했다)와 `fenced_code_ranges`(기존 `_fenced_code_ranges`를 공개
+      helper로 승격)를 그대로 재사용해 별도의 호환되지 않는 스키마를
+      만들지 않는다. 안정적인 규칙 코드 13개(SPV-001~013)로 제목/
+      Provenance/필수 최상위 섹션과 서브섹션 존재·중복·순서/본문 비어
+      있음(canonical fallback은 내용으로 인정)/Acceptance Criteria 형식
+      (checkpoint/checklist/목록 중 하나 필요, 중복 checkpoint id
+      거부)/Validation Commands(실행 명령 또는 명시적 미지정)/Safety
+      경계/Contract 전문 인용(빈 값이나 경로만 있는 참조 거부)/미해결
+      TODO·TBD·FIXME·XXX·`{{...}}` 마커/결정론적 이슈 정렬(줄→코드→
+      메시지)을 검사한다 - 에러만 `passed=False`를 만들고 경고는 검증을
+      절대 실패시키지 않는다. 라이브 검증 중 실제 버그를 하나 더
+      발견했다: `# Full Task Contract Reference`가 원본 Contract를
+      3-backtick 코드 펜스로 감싸는데, Contract 자신이 같은 펜스를
+      내부에 또 쓰면(중첩 불가) 펜스 추적이 깨져 안쪽 예시 헤딩이 바깥
+      문서의 진짜 섹션처럼 오검출됐다 - 이 섹션이 시작되면 그 뒤 전체를
+      더 이상 문서 구조로 재해석하지 않도록 고쳤다. 읽기
+      전용 `devbot specification validate --task <N>`(`--format json`
+      지원)을 추가했다 - GitHub API를 전혀 호출하지 않고 로컬
+      `specifications/NNN-*.md`만 읽으며, 통과 시 종료 코드 0, 문서
+      검증 실패 시 1, Task 번호 오류·파일 없음·모호함·읽기 실패 같은
+      운영 오류는 2로 구분한다. daemon lock을 잡지 않으며, Dispatch/
+      Role Dispatch/polling/review/rework/Task 044 템플릿 생성/Task 045
+      릴리스 분류/code-to-Spec 검증은 이번에 전혀 구현하지 않았다
+      (`src/devbot/specification_validation.py`,
+      `results/043-specification-validator.md`).

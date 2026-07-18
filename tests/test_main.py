@@ -899,6 +899,140 @@ def test_specification_command_does_not_acquire_daemon_lock(tmp_path: Path) -> N
     mock_lock.assert_not_called()
 
 
+def _validation_result(**overrides: object):
+    from devbot.specification_validation import SpecificationValidationResult
+
+    defaults: dict[str, object] = dict(
+        task_number=99,
+        specification_path=Path("specifications/099-sample.md"),
+        passed=True,
+        errors=(),
+        warnings=(),
+    )
+    defaults.update(overrides)
+    return SpecificationValidationResult(**defaults)  # type: ignore[arg-type]
+
+
+def _sample_error_issue():
+    from devbot.specification_validation import ValidationIssue, ValidationSeverity
+
+    return ValidationIssue(
+        code="SPV-005",
+        severity=ValidationSeverity.ERROR,
+        message="empty required body for subsection 'Background'",
+        section="Background",
+        line=10,
+    )
+
+
+def test_specification_validate_text_output_passes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    result = _validation_result()
+
+    with patch("devbot.main.validate_specification_file", return_value=result) as mock_validate:
+        exit_code = main(
+            ["specification", "validate", "--task", "99"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_validate.assert_called_once()
+    out = capsys.readouterr().out
+    assert "result: PASS" in out
+
+
+def test_specification_validate_json_output_is_valid(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    env_path, repositories_path = _release_env(tmp_path)
+    result = _validation_result()
+
+    with patch("devbot.main.validate_specification_file", return_value=result):
+        exit_code = main(
+            ["specification", "validate", "--task", "99", "--format", "json"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task_number"] == 99
+    assert payload["passed"] is True
+
+
+def test_specification_validate_failure_exits_one(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    result = _validation_result(errors=(_sample_error_issue(),), passed=False)
+
+    with patch("devbot.main.validate_specification_file", return_value=result):
+        exit_code = main(
+            ["specification", "validate", "--task", "99"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+
+
+def test_specification_validate_operational_error_exits_two(tmp_path: Path) -> None:
+    from devbot.specification_validation import SpecificationNotFoundError
+
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with patch(
+        "devbot.main.validate_specification_file",
+        side_effect=SpecificationNotFoundError("no Specification found for Task 999"),
+    ):
+        exit_code = main(
+            ["specification", "validate", "--task", "999"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 2
+
+
+def test_specification_validate_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    result = _validation_result()
+
+    with (
+        patch("devbot.main.validate_specification_file", return_value=result),
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["specification", "validate", "--task", "99"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
+def test_specification_validate_does_not_call_github(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    result = _validation_result()
+
+    with (
+        patch("devbot.main.validate_specification_file", return_value=result),
+        patch("devbot.main.GitHubClient") as mock_github_client,
+    ):
+        exit_code = main(
+            ["specification", "validate", "--task", "99"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_github_client.assert_not_called()
+
+
 def test_goal_dispatch_shows_role_resolution_without_invoking_agent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
