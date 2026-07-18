@@ -67,6 +67,11 @@ from devbot.release_ops import (
 )
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
+from devbot.specification import (
+    SpecificationError,
+    generate_specification,
+    write_specification,
+)
 from devbot.startup import (
     STARTUP_SELF_UPDATE_ENV,
     StartupSelfUpdateError,
@@ -314,6 +319,70 @@ def _build_agent_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     agent_subparsers = agent_parser.add_subparsers(dest="agent_command", required=True)
     agent_subparsers.add_parser("list", help="등록된 모든 Agent를 나열합니다.")
+
+
+def _build_specification_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Task 042: deterministic, evidence-grounded Specification generation
+    (Goal -> Planner -> Issue -> Contract -> **Specification** -> Dispatch).
+    Never invokes an Agent and never changes how any existing Agent is
+    dispatched - only prepares the artifact a future Dispatch would read."""
+    specification_parser = subparsers.add_parser(
+        "specification", help="Task Specification을 생성/조회합니다."
+    )
+    specification_subparsers = specification_parser.add_subparsers(
+        dest="specification_command", required=True
+    )
+
+    generate_parser = specification_subparsers.add_parser(
+        "generate",
+        help=(
+            "Task Contract/Issue/로드맵 근거만으로 specifications/NNN-slug.md를 "
+            "결정론적으로 생성합니다."
+        ),
+    )
+    generate_parser.add_argument("--task", type=int, required=True, help="Task 번호.")
+    generate_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+    generate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="파일에 쓰지 않고 계산된 Specification만 출력합니다 (show와 동일).",
+    )
+
+    show_parser = specification_subparsers.add_parser(
+        "show", help="Specification을 계산만 하고 출력합니다 (읽기 전용, 아무것도 쓰지 않음)."
+    )
+    show_parser.add_argument("--task", type=int, required=True, help="Task 번호.")
+    show_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
+
+def _run_specification_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    github_client = GitHubClient(config.github_token)
+    try:
+        specification = generate_specification(github_client, repository, args.task)
+    except (SpecificationError, GitHubClientError) as exc:
+        print(f"specification 오류: {exc}", file=sys.stderr)
+        return 1
+
+    write = args.specification_command == "generate" and not getattr(args, "dry_run", False)
+    if write:
+        written_path = write_specification(specification)
+        print(f"task: {specification.task_number:03d}")
+        print(f"path: {written_path}")
+        print(f"bytes: {len(specification.content.encode('utf-8'))}")
+    else:
+        print(specification.content)
+
+    return 0
 
 
 def _render_goal_plan(plan: GoalPlan) -> str:
@@ -723,6 +792,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     _build_goal_parser(subparsers)
     _build_role_parser(subparsers)
     _build_agent_parser(subparsers)
+    _build_specification_parser(subparsers)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help=(
@@ -976,6 +1046,9 @@ def main(
 
     if args.command == "agent":
         return _run_agent_command(args, config)
+
+    if args.command == "specification":
+        return _run_specification_command(args, config)
 
     if args.command == "doctor":
         if not args.ci and not _run_startup_self_update(config, logger):
