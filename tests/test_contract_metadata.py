@@ -9,11 +9,14 @@ from devbot.contract_metadata import (
     ContractKind,
     ContractMetadataError,
     DuplicateMetadataFieldError,
+    DuplicateProvenanceFieldError,
     DuplicateSectionError,
     InvalidMetadataValueError,
     MalformedContractVersionError,
+    MalformedProvenanceFieldError,
     Migration,
     MissingMetadataFieldError,
+    MissingProvenanceFieldError,
     MissingSectionError,
     ReleaseImpact,
     RiskLevel,
@@ -35,6 +38,7 @@ _BASE_CONTRACT = """# Task 099 — Sample
 ## Provenance
 
 - GitHub Issue: #1
+- Branch: `task/099-sample`
 
 ## Task Identity
 
@@ -101,6 +105,9 @@ def test_valid_schema_v1_contract_parses_deterministically() -> None:
     assert first.task_id == "099"
     assert first.title == "Sample"
     assert first.contract_version == 1
+    assert first.provenance is not None
+    assert first.provenance.github_issue == "#1"
+    assert first.provenance.branch == "task/099-sample"
     assert first.metadata is not None
     assert first.metadata.specification_type is SpecificationType.FEATURE
     assert first.metadata.extensions == {}
@@ -113,6 +120,9 @@ def test_real_schema_v1_contract_046_parses_natively() -> None:
     assert result.task_id == "046"
     assert result.title == "Contract Metadata Engine"
     assert result.contract_version == 1
+    assert result.provenance is not None
+    assert result.provenance.github_issue == "#96"
+    assert result.provenance.branch == "task/046-contract-metadata-engine"
     assert result.metadata is not None
     assert result.metadata.specification_type is SpecificationType.FEATURE
     assert result.metadata.release_impact is ReleaseImpact.INTERNAL
@@ -364,6 +374,119 @@ def test_missing_task_identity_id_raises() -> None:
         parse_contract_metadata(text)
 
 
+def test_task_identity_title_mismatch_raises() -> None:
+    text = _BASE_CONTRACT.replace("- title: Sample\n", "- title: Something Else\n")
+
+    with pytest.raises(TaskIdentityMismatchError):
+        parse_contract_metadata(text)
+
+
+def test_missing_task_identity_title_raises() -> None:
+    text = _BASE_CONTRACT.replace("- title: Sample\n", "")
+
+    with pytest.raises(MissingMetadataFieldError):
+        parse_contract_metadata(text)
+
+
+def test_duplicate_task_identity_title_raises() -> None:
+    text = _BASE_CONTRACT.replace(
+        "- title: Sample\n", "- title: Sample\n- title: Sample\n"
+    )
+
+    with pytest.raises(DuplicateMetadataFieldError):
+        parse_contract_metadata(text)
+
+
+def test_duplicate_task_identity_id_raises() -> None:
+    text = _BASE_CONTRACT.replace("- id: 099\n", "- id: 099\n- id: 099\n")
+
+    with pytest.raises(DuplicateMetadataFieldError):
+        parse_contract_metadata(text)
+
+
+# --------------------------------------------------------------------------
+# Provenance: required GitHub Issue / Branch entries
+# --------------------------------------------------------------------------
+
+
+def test_provenance_is_parsed_into_the_result() -> None:
+    result = parse_contract_metadata(_BASE_CONTRACT)
+
+    assert result.provenance is not None
+    assert result.provenance.github_issue == "#1"
+    assert result.provenance.branch == "task/099-sample"
+
+
+def test_provenance_branch_without_backticks_still_parses() -> None:
+    text = _BASE_CONTRACT.replace(
+        "- Branch: `task/099-sample`", "- Branch: task/099-sample"
+    )
+
+    result = parse_contract_metadata(text)
+
+    assert result.provenance.branch == "task/099-sample"
+
+
+def test_missing_github_issue_provenance_field_raises() -> None:
+    text = _BASE_CONTRACT.replace("- GitHub Issue: #1\n", "")
+
+    with pytest.raises(MissingProvenanceFieldError):
+        parse_contract_metadata(text)
+
+
+def test_missing_branch_provenance_field_raises() -> None:
+    text = _BASE_CONTRACT.replace("- Branch: `task/099-sample`\n", "")
+
+    with pytest.raises(MissingProvenanceFieldError):
+        parse_contract_metadata(text)
+
+
+def test_duplicate_github_issue_provenance_field_raises() -> None:
+    text = _BASE_CONTRACT.replace(
+        "- GitHub Issue: #1\n", "- GitHub Issue: #1\n- GitHub Issue: #2\n"
+    )
+
+    with pytest.raises(DuplicateProvenanceFieldError):
+        parse_contract_metadata(text)
+
+
+def test_duplicate_branch_provenance_field_raises() -> None:
+    text = _BASE_CONTRACT.replace(
+        "- Branch: `task/099-sample`\n",
+        "- Branch: `task/099-sample`\n- Branch: `task/099-other`\n",
+    )
+
+    with pytest.raises(DuplicateProvenanceFieldError):
+        parse_contract_metadata(text)
+
+
+@pytest.mark.parametrize("malformed", ["96", "issue-96", "# 96", "#ninety-six"])
+def test_malformed_github_issue_provenance_field_raises(malformed: str) -> None:
+    text = _BASE_CONTRACT.replace("- GitHub Issue: #1", f"- GitHub Issue: {malformed}")
+
+    with pytest.raises(MalformedProvenanceFieldError):
+        parse_contract_metadata(text)
+
+
+def test_empty_branch_provenance_field_raises() -> None:
+    text = _BASE_CONTRACT.replace("- Branch: `task/099-sample`\n", "- Branch: ``\n")
+
+    with pytest.raises(MalformedProvenanceFieldError):
+        parse_contract_metadata(text)
+
+
+def test_optional_provenance_entries_are_ignored_but_do_not_break_parsing() -> None:
+    text = _BASE_CONTRACT.replace(
+        "- Branch: `task/099-sample`\n",
+        "- Branch: `task/099-sample`\n- Epic: Sample Epic\n- Current Release: `v0.1.1`\n",
+    )
+
+    result = parse_contract_metadata(text)
+
+    assert result.provenance.github_issue == "#1"
+    assert result.provenance.branch == "task/099-sample"
+
+
 # --------------------------------------------------------------------------
 # Legacy classification
 # --------------------------------------------------------------------------
@@ -376,6 +499,7 @@ def test_contract_with_no_contract_version_is_legacy() -> None:
 
     assert result.kind is ContractKind.LEGACY
     assert result.contract_version is None
+    assert result.provenance is None
     assert result.metadata is None
     assert result.task_id == "099"
     assert result.title == "Sample"

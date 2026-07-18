@@ -1,5 +1,53 @@
 # Task 046 Result: Contract Metadata Engine
 
+## 리뷰 반영 (PR #97, hjlee83)
+
+아키텍처 리뷰에서 blocking 지적을 2건 받았다:
+
+1. **필수 Provenance가 파싱/반환되지 않음.** Task 046 Specification의
+   Required Behaviour는 native 결과가 "provenance fields required by
+   Schema v1"을 포함해야 한다고 명시하는데, 원래 구현은 `## Provenance`
+   섹션이 존재하는지만 확인했을 뿐 본문을 전혀 파싱하지 않았다 -
+   `ContractParseResult`에 Provenance 모델도, GitHub Issue/Branch 값도
+   없었다. 비어 있거나 잘못된 Provenance도 그냥 통과했다.
+2. **Task Identity 일관성 검사가 `id`만 확인하고 `title`은 무시함.**
+   Task 045 Field Definitions는 "heading과 Task Identity 값이 일치해야
+   한다"고 요구하는데, `_parse_task_identity()`가 `title` 필드를 전혀
+   읽지 않아 `- title:`이 없거나 heading과 달라도 조용히 통과하고
+   heading의 title을 그대로 썼다.
+
+반영 내용:
+
+- 새 불변 `ContractProvenance(github_issue, branch)` 모델을 추가하고,
+  `ContractParseResult`에 `provenance` 필드를 추가했다(legacy는
+  `None`, 기존 `metadata=None` 패턴과 동일).
+- `## Provenance` 본문에서 `- GitHub Issue: #NN`과 `` - Branch: `...` ``
+  두 필수 항목을 정확히 한 번씩 파싱한다 - 누락되면
+  `MissingProvenanceFieldError`, 중복되면
+  `DuplicateProvenanceFieldError`, GitHub Issue가 `#<숫자>` 형식이
+  아니거나 Branch가(백틱을 벗겨낸 뒤) 비어 있으면
+  `MalformedProvenanceFieldError`로 fail closed한다. 이 3개는 Task
+  046 Error Model이 원래 나열한 9종에는 없던, 이번 리뷰로 새로 추가한
+  전용 예외다 - Epic/Current Release 같은 선택 항목은 모델링하지
+  않는다(리뷰가 요구한 "required" 항목만).
+- `_parse_task_identity()`가 이제 `id`와 `title` 둘 다 정확히 한 번씩
+  요구하고, 둘 다 heading과 비교한다 - 어느 쪽이 다르든
+  `TaskIdentityMismatchError` 하나로 fail closed한다(새 예외 타입을
+  추가하지 않고 기존 타입을 재사용 - 두 경우 모두 "Task Identity가
+  heading과 불일치"라는 같은 종류의 결함이므로). `title` 누락/중복도
+  이제 `id`와 동일하게 `Missing`/`DuplicateMetadataFieldError`로
+  거부한다(이전에는 애초에 검사하지 않았음).
+- 회귀 테스트 16개 추가: Provenance 파싱/누락/중복/형식 오류(GitHub
+  Issue 4가지 잘못된 형식 포함)/선택 항목 무시, Task Identity title
+  불일치/누락/중복, 그리고 기존 valid-contract 테스트들에 provenance
+  값 검증을 추가했다.
+- `tasks/046-contract-metadata-engine.md`(Full Task Contract Reference에
+  인용된 원본)는 건드리지 않았다.
+- 재구성 중 실제 Task 046 Contract로 다시 파싱해 `provenance=
+  ContractProvenance(github_issue='#96', branch=
+  'task/046-contract-metadata-engine')`가 정확히 나오는 것을 직접
+  확인했다(아래 "수동 검증 결과" 참고).
+
 ## 완료 내용
 
 Task 045의 Contract Schema v1 위에 실제 런타임 엔진을 구현했다 - 새
@@ -105,7 +153,8 @@ fence 추적을 깨뜨릴 뻔한 것을 작성 중 직접 발견해 고쳤다(De
 - `specifications/046-contract-metadata-engine.md` (재구성 - Task
   042/043 canonical Specification 스키마를 만족하도록 누락된 서브섹션
   추가, 내용은 보존)
-- `tests/test_contract_metadata.py` (신규, 60개 테스트)
+- `tests/test_contract_metadata.py` (신규, 76개 테스트 - 리뷰 반영
+  16개 포함)
 - `docs/00-roadmap.md` (Task 046 항목 추가)
 - `results/046-contract-metadata-engine.md` (본 문서)
 
@@ -123,10 +172,11 @@ fence 추적을 깨뜨릴 뻔한 것을 작성 중 직접 발견해 고쳤다(De
 | 5. 메타데이터 누락/중복/알수없음/잘못된값이 fail closed | `test_missing_metadata_field_raises`, `test_duplicate_metadata_field_raises`, `test_unknown_metadata_field_raises`, `test_invalid_metadata_value_raises` |
 | 6. Contract Version 없는 Contract가 legacy로 명시 분류 | `test_contract_with_no_contract_version_is_legacy`, `test_representative_real_legacy_contracts_classify_as_legacy`(6개 실제 Contract) |
 | 7. `x-` 확장이 분리 보존되고 핵심 필드에 영향 없음 | `test_valid_extension_is_preserved_separately`, `test_extension_cannot_shadow_or_override_a_core_field`, `test_duplicate_extension_field_raises` |
-| 8. Task identity 일관성 검증 | `test_task_identity_mismatch_raises`, `test_missing_task_identity_id_raises` |
+| 8. Task identity 일관성 검증 (id + title, 리뷰 반영) | `test_task_identity_mismatch_raises`, `test_missing_task_identity_id_raises`, `test_task_identity_title_mismatch_raises`, `test_missing_task_identity_title_raises`, `test_duplicate_task_identity_title_raises`, `test_duplicate_task_identity_id_raises` |
 | 9. 기존 legacy Contract가 강제 마이그레이션 없이 계속 동작 | `test_representative_real_legacy_contracts_classify_as_legacy` |
 | 10. release/workflow/dispatch 정책 없음 | grep으로 `devbot.agents`/`devbot.workspace`/`devbot.polling`/`devbot.review`/`devbot.rework` 미import 확인, CLI 명령 미추가 확인 |
 | 11. Specification 검증/lint/전체 테스트 통과 | 아래 Validation 결과 |
+| 리뷰 반영: Provenance가 파싱/반환됨 | `test_provenance_is_parsed_into_the_result`, `test_provenance_branch_without_backticks_still_parses`, `test_missing_github_issue_provenance_field_raises`, `test_missing_branch_provenance_field_raises`, `test_duplicate_github_issue_provenance_field_raises`, `test_duplicate_branch_provenance_field_raises`, `test_malformed_github_issue_provenance_field_raises`(4가지 형식), `test_empty_branch_provenance_field_raises`, `test_optional_provenance_entries_are_ignored_but_do_not_break_parsing` |
 
 추가로 계약에 명시되지 않았지만 안전을 위해 작성한 테스트:
 `test_malformed_version_does_not_silently_fall_back_to_legacy`(Safety
@@ -138,11 +188,12 @@ fence 추적을 깨뜨릴 뻔한 것을 작성 중 직접 발견해 고쳤다(De
 ## Validation 결과
 
 - `uv run devbot specification validate --task 46`: PASS (text/json 모두,
-  에러/경고 0개)
+  에러/경고 0개, 리뷰 반영 이후에도 불변 - Provenance/Task Identity
+  파싱 로직 변경은 Specification 구조에 영향 없음)
 - `uv run ruff check .`: PASS
 - `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS,
-  917 passed (Task 045 병합 후 기준 857개 + `tests/test_contract_metadata.py`
-  60개[parametrize 포함, 함수 정의 31개])
+  933 passed (Task 045 병합 후 기준 857개 + `tests/test_contract_metadata.py`
+  76개[parametrize 포함, 함수 정의 44개])
 
 ## 수동 검증 결과 (읽기 전용, 실제 저장소 대상)
 
@@ -162,9 +213,20 @@ result = parse_contract_metadata(Path('tasks/037-release-operator-ux.md').read_t
 print(result.kind, result.task_id, result.metadata)
 "
 legacy 037 None
+
+$ uv run python -c "
+from devbot.contract_metadata import parse_contract_metadata
+from pathlib import Path
+result = parse_contract_metadata(Path('tasks/046-contract-metadata-engine.md').read_text(encoding='utf-8'))
+print(result.provenance)
+"
+ContractProvenance(github_issue='#96', branch='task/046-contract-metadata-engine')
 ```
 
-Task 046 자신의 실제 Contract(Schema v1로 이미 작성돼 있었다)가
+리뷰 반영 후 Task 046 자신의 실제 Contract를 다시 파싱해 Provenance가
+정확히 `github_issue='#96'`, `branch='task/046-contract-metadata-engine'`로
+채워지는 것을 직접 확인했다. Task 046 자신의 실제 Contract(Schema v1로
+이미 작성돼 있었다)가
 native로 정확히 파싱되고, 실제 legacy Contract(Task 037)가 에러 없이
 `ContractKind.LEGACY`로 분류되는 것을 직접 확인했다. `# Full Task
 Contract Reference`에 인용한 내용이 `tasks/046-contract-metadata-engine.md`

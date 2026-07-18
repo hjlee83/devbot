@@ -17,8 +17,9 @@ silently downgrade malformed versioned Contracts to legacy").
 
 **Fail closed.** Unsupported `contract_version` values, missing/duplicate
 required sections, missing/duplicate/unknown metadata fields, invalid enum
-values, and a Task Identity `id` that disagrees with the Contract's own
-heading task id all raise a dedicated `ContractMetadataError` subclass.
+values, missing/duplicate/malformed provenance fields, and a Task Identity
+`id` or `title` that disagrees with the Contract's own heading all raise a
+dedicated `ContractMetadataError` subclass.
 
 **Extensions never affect core metadata.** `x-`-prefixed metadata fields
 are preserved verbatim in a separate, immutable `extensions` mapping. They
@@ -147,8 +148,34 @@ class InvalidMetadataValueError(ContractMetadataError):
 
 
 class TaskIdentityMismatchError(ContractMetadataError):
-    """The Contract heading's task id disagrees with Task Identity's own
-    `id` field."""
+    """The Contract heading's task id or title disagrees with Task
+    Identity's own `id` or `title` field."""
+
+
+class MissingProvenanceFieldError(ContractMetadataError):
+    """A required Provenance entry (`GitHub Issue` or `Branch`) is
+    absent."""
+
+
+class DuplicateProvenanceFieldError(ContractMetadataError):
+    """A Provenance entry occurs more than once."""
+
+
+class MalformedProvenanceFieldError(ContractMetadataError):
+    """A required Provenance entry is present but not a well-formed
+    value (e.g. `GitHub Issue` is not `#<digits>`, or `Branch` is
+    empty)."""
+
+
+@dataclass(frozen=True)
+class ContractProvenance:
+    """The Schema v1 required Provenance entries (Task 045: "Required
+    entries: GitHub Issue reference, Branch name"). Optional entries
+    (Epic, Current Release, ...) are not modeled here - only the two
+    required ones this engine must fail closed on."""
+
+    github_issue: str
+    branch: str
 
 
 @dataclass(frozen=True)
@@ -166,14 +193,16 @@ class ContractMetadata:
 
 @dataclass(frozen=True)
 class ContractParseResult:
-    """The result of parsing one Contract's Markdown. `metadata` is
-    `None` for `ContractKind.LEGACY` - legacy Contracts are explicitly
-    represented, never silently treated as Schema v1."""
+    """The result of parsing one Contract's Markdown. `provenance` and
+    `metadata` are both `None` for `ContractKind.LEGACY` - legacy
+    Contracts are explicitly represented, never silently treated as
+    Schema v1."""
 
     kind: ContractKind
     task_id: str
     title: str
     contract_version: int | None
+    provenance: ContractProvenance | None
     metadata: ContractMetadata | None
 
 
@@ -181,6 +210,8 @@ _TITLE_RE = re.compile(r"^#\s+Task\s+(\d{3})\s*[—:-]\s*(.+?)\s*$")
 _SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _VERSION_RE = re.compile(r"^\s*(\d+)\s*$")
 _FIELD_LINE_RE = re.compile(r"^-\s+([\w-]+):\s*(\S.*?)\s*$", re.MULTILINE)
+_PROVENANCE_FIELD_LINE_RE = re.compile(r"^-\s+([A-Za-z][A-Za-z ]*?):\s*(\S.*?)\s*$", re.MULTILINE)
+_GITHUB_ISSUE_RE = re.compile(r"^#\d+$")
 
 
 def _line_number(text: str, offset: int) -> int:
@@ -212,6 +243,19 @@ def _parse_field_lines(body: str) -> list[tuple[str, str]]:
     return [(match.group(1), match.group(2)) for match in _FIELD_LINE_RE.finditer(body)]
 
 
+def _strip_backticks(value: str) -> str:
+    if len(value) >= 2 and value.startswith("`") and value.endswith("`"):
+        return value[1:-1]
+    return value
+
+
+def _group_by_field_name(pairs: list[tuple[str, str]]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for name, value in pairs:
+        grouped.setdefault(name, []).append(value)
+    return grouped
+
+
 def _parse_contract_version(body: str) -> int:
     stripped = body.strip()
     match = _VERSION_RE.match(stripped)
@@ -229,16 +273,59 @@ def _parse_contract_version(body: str) -> int:
     return version
 
 
-def _parse_task_identity(body: str, heading_task_id: str) -> None:
-    fields = dict(_parse_field_lines(body))
-    identity_id = fields.get("id")
-    if identity_id is None:
-        raise MissingMetadataFieldError("Task Identity.id")
+def _required_identity_field(fields: dict[str, list[str]], name: str) -> str:
+    values = fields.get(name)
+    if not values:
+        raise MissingMetadataFieldError(f"Task Identity.{name}")
+    if len(values) > 1:
+        raise DuplicateMetadataFieldError(f"Task Identity.{name}")
+    return values[0]
+
+
+def _parse_task_identity(body: str, heading_task_id: str, heading_title: str) -> None:
+    fields = _group_by_field_name(_parse_field_lines(body))
+    identity_id = _required_identity_field(fields, "id")
+    identity_title = _required_identity_field(fields, "title")
+
     if identity_id != heading_task_id:
         raise TaskIdentityMismatchError(
             f"heading task id {heading_task_id!r} does not match Task Identity id "
             f"{identity_id!r}"
         )
+    if identity_title != heading_title:
+        raise TaskIdentityMismatchError(
+            f"heading title {heading_title!r} does not match Task Identity title "
+            f"{identity_title!r}"
+        )
+
+
+def _required_provenance_field(fields: dict[str, list[str]], name: str) -> str:
+    values = fields.get(name)
+    if not values:
+        raise MissingProvenanceFieldError(name)
+    if len(values) > 1:
+        raise DuplicateProvenanceFieldError(name)
+    return _strip_backticks(values[0])
+
+
+def _parse_provenance(body: str) -> ContractProvenance:
+    pairs = [
+        (match.group(1).strip(), match.group(2).strip())
+        for match in _PROVENANCE_FIELD_LINE_RE.finditer(body)
+    ]
+    fields = _group_by_field_name(pairs)
+
+    github_issue = _required_provenance_field(fields, "GitHub Issue")
+    if not _GITHUB_ISSUE_RE.match(github_issue):
+        raise MalformedProvenanceFieldError(
+            f"GitHub Issue must be '#<digits>', found {github_issue!r}"
+        )
+
+    branch = _required_provenance_field(fields, "Branch")
+    if not branch:
+        raise MalformedProvenanceFieldError("Branch must not be empty")
+
+    return ContractProvenance(github_issue=github_issue, branch=branch)
 
 
 def _parse_metadata(body: str) -> ContractMetadata:
@@ -307,6 +394,7 @@ def parse_contract_metadata(text: str) -> ContractParseResult:
             task_id=heading_task_id,
             title=title,
             contract_version=None,
+            provenance=None,
             metadata=None,
         )
     if len(version_entries) > 1:
@@ -324,12 +412,14 @@ def parse_contract_metadata(text: str) -> ContractParseResult:
     if len(sections_by_heading.get("References", [])) > 1:
         raise DuplicateSectionError("References")
 
-    _parse_task_identity(sections_by_heading["Task Identity"][0][1], heading_task_id)
+    _parse_task_identity(sections_by_heading["Task Identity"][0][1], heading_task_id, title)
+    provenance = _parse_provenance(sections_by_heading["Provenance"][0][1])
     metadata = _parse_metadata(sections_by_heading["Metadata"][0][1])
 
     return ContractParseResult(
         kind=ContractKind.SCHEMA_V1,
         task_id=heading_task_id,
+        provenance=provenance,
         title=title,
         contract_version=contract_version,
         metadata=metadata,
