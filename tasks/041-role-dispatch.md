@@ -291,5 +291,6 @@ current deployment).
 
 - Task Issue: #87
 - Branch: `task/041-role-dispatch`
+- Pull Request: #88
 - Result: `results/041-role-dispatch.md`
 - Do not create another Issue, Branch, or Pull Request for this Task.
