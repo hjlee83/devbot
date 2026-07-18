@@ -210,6 +210,17 @@ Required evidence:
 - `results/041-role-dispatch.md`
 - `docs/00-roadmap.md` (Task 041 entry)
 
+### CP-041-11 - Agent `id` uniqueness (PR #88 review)
+
+`AgentDescriptor.id` is the operator-facing identity a future Admin UI, dispatch
+history, and enable/disable operations will key on, so `parse_agent_registry` must
+reject a duplicate `id` (fail closed at load time) while still allowing multiple
+Agents to share the same `backend`.
+
+Required tests:
+- `test_parse_agent_registry_rejects_duplicate_agent_ids`
+- `test_parse_agent_registry_allows_same_backend_with_different_ids`
+
 ### CP-041-10 - Validation gate
 
 Required commands:

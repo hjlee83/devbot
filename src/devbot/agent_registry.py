@@ -210,6 +210,17 @@ def parse_agent_registry(raw: dict[str, Any]) -> AgentRegistry:
         raise AgentRegistryError("'agents' must be a list")
     agents = tuple(_parse_agent_entry(entry, index) for index, entry in enumerate(raw_agents))
 
+    # `id` is the operator-facing identity a future Admin UI, dispatch
+    # history, and enable/disable operations will key on - it must be
+    # unique. Multiple Agents sharing the same `backend` (e.g. two
+    # differently-tuned Claude instances) is fine and expected; only a
+    # duplicate `id` is ambiguous, so only that is rejected.
+    seen_ids: set[str] = set()
+    for agent in agents:
+        if agent.id in seen_ids:
+            raise AgentRegistryError(f"duplicate agent id: {agent.id!r}")
+        seen_ids.add(agent.id)
+
     # A Role an Agent claims to support but that has no explicit `roles.
     # <name>` entry defaults to priority routing, so a minimal agents.yaml
     # (agents only, no `roles` section at all) still works.

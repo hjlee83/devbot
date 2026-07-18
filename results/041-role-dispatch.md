@@ -1,5 +1,25 @@
 # Task 041 Result: Role Dispatch and Agent Registry
 
+## 리뷰 반영 (PR #88, hjlee83)
+
+1차 리뷰에서 blocking 지적을 받았다: `AgentDescriptor.id`는 향후 Admin UI/dispatch
+이력/활성화-비활성화 조작이 근거로 삼을 운영자용 고유 식별자인데,
+`parse_agent_registry`가 `id`가 존재하는지는 검증하면서도 **중복 `id`**는
+거부하지 않았다 - 같은 `id`를 가진 Agent 항목 두 개가 config에 들어가면 향후
+관리/원격측정에서 Agent를 유일하게 식별할 수 없게 된다.
+
+반영 내용:
+
+- `parse_agent_registry`에 중복 `id` 거부 로직을 추가했다(`AgentRegistryError`로
+  fail closed) - 같은 `backend`를 여러 다른 `id`로 등록하는 것은 계속 허용한다
+  (리뷰에서 명시적으로 요청한 대로).
+- 회귀 테스트 2개 추가: `test_parse_agent_registry_rejects_duplicate_agent_ids`,
+  `test_parse_agent_registry_allows_same_backend_with_different_ids`.
+- `tasks/041-role-dispatch.md`에 CP-041-11을 추가해 이 변경을 계약에 반영했다.
+- `synthesize_registry_from_config`(하위 호환 합성 경로)는 백엔드별로 정확히
+  하나의 `AgentDescriptor`만 만들므로 애초에 중복 `id`를 생성할 수 없다 - 이번
+  수정은 오직 `config/agents.yaml`을 직접 작성하는 경로에만 영향을 준다.
+
 ## 완료 내용
 
 - `src/devbot/agent_registry.py`를 새로 만들어 Role/Capability/Agent/Router
@@ -130,12 +150,13 @@ API를 바꿀 필요가 없다. 이번 Task는 `_SUPPORTED_ROUTING_STRATEGIES = 
 | CP-041-8 읽기 전용 role/agent CLI | `test_role_list_command_is_wired`, `test_role_resolve_command_is_wired`, `test_role_resolve_unconfigured_role_returns_failure_exit_code`, `test_agent_list_command_is_wired` |
 | CP-041-9 문서와 근거 | 본 Result, `docs/00-roadmap.md` |
 | CP-041-10 검증 게이트 | `uv run ruff check .`, `uv run pytest` |
+| CP-041-11 Agent id 고유성 (PR #88 리뷰) | `test_parse_agent_registry_rejects_duplicate_agent_ids`, `test_parse_agent_registry_allows_same_backend_with_different_ids` |
 
 ## Validation 결과
 
 - `uv run ruff check .`: PASS
-- `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS, 729 passed
-  (기존 697개 + 이번 Task에서 추가한 32개: `tests/test_agent_registry.py` 25개,
+- `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS, 731 passed
+  (기존 697개 + 최초 구현 32개 + 리뷰 반영 2개: `tests/test_agent_registry.py` 27개,
   `tests/test_main.py` 7개)
 
 ## 수동 검증 결과 (읽기 전용, Agent 미호출)

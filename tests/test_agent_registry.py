@@ -282,6 +282,32 @@ def test_parse_agent_registry_rejects_non_list_agents() -> None:
         parse_agent_registry({"agents": {"id": "a"}})
 
 
+def test_parse_agent_registry_rejects_duplicate_agent_ids() -> None:
+    raw = {
+        "agents": [
+            {"id": "codex-local", "backend": "codex", "supported_roles": ["implementer"]},
+            {"id": "codex-local", "backend": "codex", "supported_roles": ["reviewer"]},
+        ]
+    }
+
+    with pytest.raises(AgentRegistryError, match="duplicate agent id: 'codex-local'"):
+        parse_agent_registry(raw)
+
+
+def test_parse_agent_registry_allows_same_backend_with_different_ids() -> None:
+    raw = {
+        "agents": [
+            {"id": "codex-fast", "backend": "codex", "supported_roles": ["implementer"]},
+            {"id": "codex-careful", "backend": "codex", "supported_roles": ["reviewer"]},
+        ]
+    }
+
+    registry = parse_agent_registry(raw)
+
+    assert {agent.id for agent in registry.agents} == {"codex-fast", "codex-careful"}
+    assert {agent.backend for agent in registry.agents} == {"codex"}
+
+
 # --------------------------------------------------------------------------
 # synthesize_registry_from_config: backward compatibility
 # --------------------------------------------------------------------------
