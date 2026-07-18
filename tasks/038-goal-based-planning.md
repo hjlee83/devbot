@@ -234,5 +234,6 @@ a new module with no changes to any existing command, service, or state machine.
 
 - Task Issue: #81
 - Branch: `task/038-goal-based-planning`
+- Pull Request: #82
 - Result: `results/038-goal-based-planning.md`
 - Do not create another Issue, Branch, or Pull Request for this Task.
