@@ -221,6 +221,7 @@ optional and additive; `list_check_runs_for_ref` and its automerge use are untou
 
 - Task Issue: #83
 - Branch: `task/039-release-main-ci-validation`
+- Pull Request: #84
 - Result: `results/039-release-main-ci-validation.md`
 - Do not create another Issue, Branch, or Pull Request for this Task.
 - Do not publish `v0.1.1` as part of this Task.
