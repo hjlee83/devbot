@@ -8,10 +8,11 @@ import pytest
 
 from devbot.agents.base import AgentRunResult
 from devbot.agents.codex import CodexRunner
+from devbot.automerge import AutomergeService
 from devbot.delivery import DeliveryResult, VerificationResult
 from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_retry import GitHubTransientError
-from devbot.github_write_client import GitHubWriteClient, PullRequestInfo
+from devbot.github_write_client import GitHubWriteClient, MergePullRequestResult, PullRequestInfo
 from devbot.issue_state import IssueStateWriter
 from devbot.models import AgentOutcome, DevBotConfig, RepositoryConfig, TaskState
 from devbot.polling import (
@@ -41,12 +42,14 @@ class FakeGitHubClient:
         issues_by_repo: dict[str, list[GitHubIssue]] | None = None,
         comments_by_issue: dict[tuple[str, int], list[PullRequestComment]] | None = None,
         pull_requests_by_repo: dict[str, list[PullRequest]] | None = None,
+        check_runs_by_ref: dict[tuple[str, str], list[dict[str, object]]] | None = None,
         *,
         error: Exception | None = None,
     ) -> None:
         self._issues_by_repo = issues_by_repo or {}
         self._comments_by_issue = comments_by_issue or {}
         self._pull_requests_by_repo = pull_requests_by_repo or {}
+        self._check_runs_by_ref = check_runs_by_ref or {}
         self._error = error
 
     def list_issues(self, repository: RepositoryConfig, *, state: str = "open", **_kwargs: object):
@@ -62,12 +65,32 @@ class FakeGitHubClient:
     def list_pull_requests(self, repository: RepositoryConfig, **_kwargs: object):
         if self._error is not None:
             raise self._error
-        return self._pull_requests_by_repo.get(repository.full_name, [])
+        pull_requests = self._pull_requests_by_repo.get(repository.full_name, [])
+        state = _kwargs.get("state", "open")
+        if state == "closed":
+            return [pull_request for pull_request in pull_requests if pull_request.merged]
+        return [pull_request for pull_request in pull_requests if not pull_request.merged]
+
+    def list_check_runs_for_ref(self, repository: RepositoryConfig, ref: str):
+        if self._error is not None:
+            raise self._error
+        return self._check_runs_by_ref.get((repository.full_name, ref), [])
 
 
 def _repo(name: str, *, enabled: bool = True) -> RepositoryConfig:
     return RepositoryConfig(
         owner="someone", repo=name, enabled=enabled, local_path=Path(f"/tmp/workspace/{name}")
+    )
+
+
+def _automerge_repo(name: str, *, is_self_repo: bool = False) -> RepositoryConfig:
+    return RepositoryConfig(
+        owner="someone",
+        repo=name,
+        enabled=True,
+        local_path=Path(f"/tmp/workspace/{name}"),
+        automerge_allowed=True,
+        is_self_repo=is_self_repo,
     )
 
 
@@ -98,6 +121,7 @@ def _pull_request(
     issue_number: int,
     head_ref: str = "devbot/existing-branch",
     head_sha: str = "deadbeef",
+    merged: bool = False,
 ) -> PullRequest:
     return PullRequest(
         number=number,
@@ -105,6 +129,14 @@ def _pull_request(
         head_sha=head_sha,
         body=f"Closes #{issue_number}",
         html_url=f"https://github.com/someone/myrepo/pull/{number}",
+        merged=merged,
+    )
+
+
+def _ready_to_merge_pull_request(number: int, *, issue_number: int) -> PullRequest:
+    return replace(
+        _pull_request(number, issue_number=issue_number),
+        labels=("devbot:ready-to-merge",),
     )
 
 
@@ -687,6 +719,92 @@ def test_failed_polled_rework_moves_to_blocked_with_reason() -> None:
 
     assert result.status is PollingStatus.BLOCKED
     assert result.message == "blocked: branch mismatch"
+
+def test_ready_to_merge_pr_is_merged_and_issue_marked_done() -> None:
+    repo = _automerge_repo("myrepo")
+    issue = _issue(
+        repo.full_name,
+        42,
+        labels=["devbot:review"],
+        body="Pull Request: #9",
+    )
+    pull_request = _ready_to_merge_pull_request(9, issue_number=42)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]},
+        pull_requests_by_repo={repo.full_name: [pull_request]},
+        check_runs_by_ref={
+            (repo.full_name, pull_request.head_sha): [
+                {"name": "pytest", "status": "completed", "conclusion": "success"}
+            ]
+        },
+    )
+    config = _config([repo], dry_run=False, automerge_enabled=True)
+    write_client = MagicMock(spec=GitHubWriteClient)
+    write_client.merge_pull_request.return_value = MergePullRequestResult(
+        sha="merge-sha", merged=True, message="merged"
+    )
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        state_writer=state_writer,
+        automerge_service=AutomergeService(
+            config=config,
+            write_client=write_client,
+            state_writer=state_writer,
+            list_check_runs_for_ref=github_client.list_check_runs_for_ref,
+        ),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.MERGED
+    write_client.merge_pull_request.assert_called_once_with(
+        repo,
+        9,
+        expected_head_sha=pull_request.head_sha,
+        commit_title="Merge PR #9",
+        commit_message="Merged automatically by DevBot after MERGE READY and green CI.",
+        merge_method="merge",
+    )
+    write_client.set_labels.assert_called_once_with(repo, 42, ["devbot:done"])
+
+
+def test_merged_linked_pr_reconciles_review_issue_to_done() -> None:
+    repo = _automerge_repo("myrepo")
+    issue = _issue(
+        repo.full_name,
+        42,
+        labels=["devbot:review"],
+        body="Pull Request: #9",
+    )
+    merged_pull_request = _pull_request(9, issue_number=42, merged=True)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]},
+        pull_requests_by_repo={repo.full_name: [merged_pull_request]},
+    )
+    config = _config([repo], dry_run=False, automerge_enabled=True)
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        state_writer=state_writer,
+        automerge_service=AutomergeService(
+            config=config,
+            write_client=write_client,
+            state_writer=state_writer,
+            list_check_runs_for_ref=github_client.list_check_runs_for_ref,
+        ),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.MERGED
+    write_client.merge_pull_request.assert_not_called()
+    write_client.set_labels.assert_called_once_with(repo, 42, ["devbot:done"])
 
 
 def test_rework_issue_without_linked_pull_request_escalates_to_manual_action() -> None:

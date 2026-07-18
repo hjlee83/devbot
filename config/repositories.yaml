@@ -3,3 +3,5 @@ repositories:
     repo: devbot
     enabled: true
     default_branch: main
+    automerge_allowed: false
+    is_self_repo: true

@@ -381,6 +381,7 @@ def test_client_exposes_read_operations_only() -> None:
     allowed_public_methods = {
         "get_authenticated_user",
         "get_issue",
+        "list_check_runs_for_ref",
         "list_issues",
         "list_issue_comments",
         "list_pull_requests",
@@ -393,7 +394,6 @@ def test_client_exposes_read_operations_only() -> None:
         "remove_label",
         "create_comment",
         "create_pull_request",
-        "merge_pull_request",
         "create_branch",
         "push",
     }

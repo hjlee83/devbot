@@ -86,6 +86,7 @@ class PullRequest:
     body: str
     html_url: str
     labels: tuple[str, ...] = ()
+    merged: bool = False
 
 
 def _error_message(response: requests.Response) -> str:
@@ -151,6 +152,7 @@ def _parse_pull_request(raw: dict[str, Any]) -> PullRequest:
         body=raw.get("body") or "",
         html_url=raw["html_url"],
         labels=labels,
+        merged=bool(raw.get("merged") or raw.get("merged_at")),
     )
 
 
@@ -288,3 +290,27 @@ class GitHubClient:
             page += 1
 
         return pull_requests
+
+    def list_check_runs_for_ref(
+        self,
+        repository: RepositoryConfig,
+        ref: str,
+        *,
+        per_page: int = DEFAULT_PER_PAGE,
+    ) -> list[dict[str, Any]]:
+        """List Check Runs for a commit ref, following pagination."""
+        check_runs: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = self._get(
+                f"/repos/{repository.owner}/{repository.repo}/commits/{ref}/check-runs",
+                params={"page": page, "per_page": per_page},
+            ).json()
+            raw_page = payload.get("check_runs", [])
+            check_runs.extend(raw_page)
+
+            if len(raw_page) < per_page:
+                break
+            page += 1
+
+        return check_runs

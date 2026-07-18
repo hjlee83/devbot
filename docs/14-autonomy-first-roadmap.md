@@ -88,11 +88,16 @@
 
 ### B2. 자동 머지 (안전 게이트)
 
-매 태스크마다 있던 최대 수동 관문 제거.
+매 태스크마다 있던 최대 수동 관문 제거. *(완료)*
 
-- 대상: 머지 정책. 참조 `docs/06-review-policy.md`, `CONSTITUTION.md`("merge stays manual"은 정책 플래그로 전환)
-- 목표: `리뷰 MERGE READY + CI 초록 + 킬스위치/allowlist`로 게이팅해서 자동 머지.
-- 안전장치: 도그푸딩 재점화 대비, **자기수정 PR(devbot 자신을 바꾸는 PR)은 사람 승인 유지** 레일을 남긴다.
+자동 머지는 manual-only 정책을 대체하지 않고, 정책 게이트를 통과한 경우에만 실행된다. DevBot은 다음 조건을 모두 만족하는 `devbot:ready-to-merge` PR만 머지할 수 있다.
+
+1. `AUTOMERGE_ENABLED=true`.
+2. Repository 설정에 `automerge_allowed: true`.
+3. Repository 설정에 `is_self_repo: true`가 아님.
+4. PR head의 GitHub check-run이 완료됐고 green.
+
+DevBot 자기수정 PR은 항상 사람 머지 레일에 남긴다. 게이트 실패는 `devbot:ready-to-merge` 라벨을 유지하고, 실패 이유를 로그/댓글로 남기며, 기존 수동 머지 경로를 보존한다.
 
 ### B3. 자동 착수 (이슈 → 브랜치/PR)
 

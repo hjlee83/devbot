@@ -29,6 +29,7 @@ _DEFAULTS: dict[str, str] = {
     "DEFAULT_AGENT": "codex",
     "MAX_CONCURRENT_JOBS": "1",
     "DRY_RUN": "true",
+    "AUTOMERGE_ENABLED": "false",
     "LOG_LEVEL": "INFO",
     "REVIEW_LOOP_LIMIT": "3",
 }
@@ -143,6 +144,10 @@ def _load_repositories(
             raise ConfigError(f"repositories[{index}] requires non-empty 'owner' and 'repo'")
 
         enabled = _parse_repository_enabled(entry.get("enabled", True), index)
+        automerge_allowed = _parse_repository_enabled(
+            entry.get("automerge_allowed", False), index
+        )
+        is_self_repo = _parse_repository_enabled(entry.get("is_self_repo", False), index)
         default_branch = str(entry.get("default_branch") or "main")
         repositories.append(
             RepositoryConfig(
@@ -151,6 +156,8 @@ def _load_repositories(
                 enabled=enabled,
                 local_path=workspace_root / str(repo),
                 default_branch=default_branch,
+                automerge_allowed=automerge_allowed,
+                is_self_repo=is_self_repo,
             )
         )
 
@@ -190,6 +197,7 @@ def load_config(
     lock_file = Path(lock_file_raw).expanduser()
     default_agent = _require_nonempty("DEFAULT_AGENT", _get_env("DEFAULT_AGENT"))
     dry_run = _parse_bool("DRY_RUN", _get_env("DRY_RUN"))
+    automerge_enabled = _parse_bool("AUTOMERGE_ENABLED", _get_env("AUTOMERGE_ENABLED"))
     log_level = _require_valid_log_level("LOG_LEVEL", _get_env("LOG_LEVEL"))
 
     # `os.environ.get` (not `_get_env`) here so an *unset* DEFAULT_AGENT is
@@ -225,6 +233,7 @@ def load_config(
         reviewer_agent=reviewer_agent,
         max_concurrent_jobs=max_concurrent_jobs,
         dry_run=dry_run,
+        automerge_enabled=automerge_enabled,
         github_token=github_token,
         repositories=repositories,
         log_level=log_level,
