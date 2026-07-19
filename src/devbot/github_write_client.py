@@ -52,6 +52,16 @@ class IssueInfo:
     html_url: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseInfo:
+    """A created GitHub Release, per `POST /repos/{owner}/{repo}/releases`
+    (Task 049)."""
+
+    id: int
+    tag_name: str
+    html_url: str
+
+
 class GitHubWriteClient:
     """Minimal authenticated GitHub REST API write client."""
 
@@ -214,13 +224,48 @@ class GitHubWriteClient:
     ) -> None:
         """Trigger a `workflow_dispatch` event for `workflow_file` (e.g.
         `release.yml`) on `ref`, with `inputs` as the workflow's declared
-        `workflow_dispatch.inputs` (Task 037). This is the only way DevBot
-        drives release publication - it never creates tags or Releases
-        directly."""
+        `workflow_dispatch.inputs` (Task 037) - the CI-driven release path,
+        which builds artifacts and runs its own tag/Release creation inside
+        the workflow run. `create_release` (Task 049) is the second,
+        deliberate direct path added on top of an already externally
+        prepared and tagged version - see `docs/07-decisions.md`."""
         self._post(
             f"/repos/{repository.owner}/{repository.repo}/actions/workflows/"
             f"{workflow_file}/dispatches",
             json={"ref": ref, "inputs": inputs},
+        )
+
+    def create_release(
+        self,
+        repository: RepositoryConfig,
+        *,
+        tag_name: str,
+        target_commitish: str,
+        name: str,
+        body: str,
+    ) -> ReleaseInfo:
+        """Create a published (non-draft, non-prerelease) GitHub Release for
+        `tag_name` (`POST /repos/{owner}/{repo}/releases`, Task 049).
+
+        If `tag_name` does not already exist as a Git ref, GitHub creates a
+        *lightweight* tag pointing at `target_commitish` as a side effect of
+        this call. `devbot.release_publish` never relies on that - it always
+        creates and pushes an *annotated* tag itself first (matching
+        `.github/workflows/release.yml`'s own convention), so this call only
+        ever targets a tag that already exists."""
+        payload = self._post(
+            f"/repos/{repository.owner}/{repository.repo}/releases",
+            json={
+                "tag_name": tag_name,
+                "target_commitish": target_commitish,
+                "name": name,
+                "body": body,
+                "draft": False,
+                "prerelease": False,
+            },
+        ).json()
+        return ReleaseInfo(
+            id=payload["id"], tag_name=payload["tag_name"], html_url=payload["html_url"]
         )
 
     def merge_pull_request(

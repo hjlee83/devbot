@@ -380,6 +380,142 @@ def test_release_prepare_does_not_call_github(
     mock_github_client.assert_not_called()
 
 
+def _publish_preview(**overrides: object):
+    from devbot.release_publish import ReleasePublishPreview, ReleaseState, TagState
+
+    defaults: dict[str, object] = dict(
+        repository="someone/myrepo",
+        version="1.2.3",
+        tag="v1.2.3",
+        title="v1.2.3",
+        target_branch="main",
+        target_sha="abc123",
+        tag_state=TagState.ABSENT,
+        release_state=ReleaseState.ABSENT,
+    )
+    defaults.update(overrides)
+    return ReleasePublishPreview(**defaults)  # type: ignore[arg-type]
+
+
+def _publish_result(**overrides: object):
+    from devbot.release_publish import PublishOutcome, ReleasePublishResult
+
+    defaults: dict[str, object] = dict(
+        version="1.2.3",
+        tag="v1.2.3",
+        target_sha="abc123",
+        release_url="https://example.invalid/r",
+        outcome=PublishOutcome.PUBLISHED,
+    )
+    defaults.update(overrides)
+    return ReleasePublishResult(**defaults)  # type: ignore[arg-type]
+
+
+def test_release_publish_prepared_dry_run_is_read_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+
+    with (
+        patch(
+            "devbot.main.preview_release_publish", return_value=_publish_preview()
+        ) as mock_preview,
+        patch("devbot.main.publish_prepared_release") as mock_publish,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["release", "publish-prepared", "--notes-file", str(notes_file), "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_preview.assert_called_once()
+    mock_publish.assert_not_called()
+    mock_write_client.assert_not_called()
+    out = capsys.readouterr().out
+    assert "tag: v1.2.3" in out
+    assert "dry-run" in out
+
+
+def test_release_publish_prepared_writes_on_real_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+
+    with patch(
+        "devbot.main.publish_prepared_release", return_value=_publish_result()
+    ) as mock_publish:
+        exit_code = main(
+            ["release", "publish-prepared", "--notes-file", str(notes_file)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_publish.assert_called_once()
+    out = capsys.readouterr().out
+    assert "outcome: published" in out
+    assert "release_url: https://example.invalid/r" in out
+
+
+def test_release_publish_prepared_error_returns_failure_exit_code(tmp_path: Path) -> None:
+    from devbot.release_publish import DirtyWorktreeError
+
+    env_path, repositories_path = _release_env(tmp_path)
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+
+    with patch(
+        "devbot.main.publish_prepared_release",
+        side_effect=DirtyWorktreeError("checkout has uncommitted changes"),
+    ):
+        exit_code = main(
+            ["release", "publish-prepared", "--notes-file", str(notes_file)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+
+
+def test_release_publish_prepared_missing_notes_file_returns_failure_exit_code(
+    tmp_path: Path,
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        ["release", "publish-prepared", "--notes-file", str(tmp_path / "does-not-exist.md")],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+
+
+def test_release_publish_prepared_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+
+    with (
+        patch("devbot.main.preview_release_publish", return_value=_publish_preview()),
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["release", "publish-prepared", "--notes-file", str(notes_file), "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
 def test_goal_plan_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     env_path, repositories_path = _release_env(tmp_path)
     plan = GoalPlan(

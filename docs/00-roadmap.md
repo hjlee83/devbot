@@ -453,3 +453,29 @@
       실행했고, 매 검증 단계마다 `git status`로 실제 버전 파일이
       그대로임을 직접 확인했다(`src/devbot/release_preparation.py`,
       `results/048-release-preparation.md`).
+- [x] Task 049: release publish. Task 048이 준비한 버전을 Git 태그 +
+      GitHub Release로 직접 게시하는 `src/devbot/release_publish.py`를
+      추가한다 - **Task 037이 만든 workflow-dispatch 경로(`release_ops.py`)
+      옆에 의도적으로 추가한 두 번째 경로**다. Task 037의 ADR은
+      "구조적으로(by construction) 태그/Release를 직접 만드는 경로가
+      없다"고 명시했었는데, Task 049의 Contract/Specification이 "Git
+      태그를 직접 만들고 push, GitHub Release를 직접 생성"을 명시적으로
+      요구해 이 가드를 정면으로 건드린다 - 사용자와 이 트레이드오프를
+      먼저 논의하고 명시적으로 승인받은 뒤 구현했다(`docs/07-decisions.md`
+      2026-07-19 항목에 이유와 두 경로의 공존 방식을 기록). 검증(버전
+      일치·깨끗한 worktree·최신 main·notes 존재·태그/Release 충돌 없음)이
+      먼저 전부 통과해야만 쓰기가 일어나고, 기존 태그/Release가 검증된
+      대상과 다른 커밋을 가리키면 절대 옮기거나 덮어쓰지 않고
+      fail closed한다. 태그 push는 성공했는데 Release 생성이 실패하면
+      `PartialPublicationError`로 실패를 정직하게 알리고 태그를 자동
+      삭제하지 않으며, 이후 재호출은 태그를 다시 만들지 않고 누락된
+      Release만 안전하게 완성한다(멱등). `devbot release publish-prepared
+      --notes-file <path> [--dry-run]`을 새 서브커맨드로 추가했다 -
+      기존 `devbot release publish`(Task 037)와 이름과 플래그를 다르게
+      두어 두 경로가 혼동되지 않게 했다. 테스트는 실제 GitHub를 절대
+      건드리지 않지만, 매 테스트마다 만들고 버리는 로컬 bare 저장소를
+      `origin`으로 써서 실제 `git tag`/`git push` 동작 자체는 진짜로
+      검증한다(`git tag -f`/`--force`가 코드 어디에도 없음을 정적 검사와
+      실행 중 호출 기록 둘 다로 고정). `pyproject.toml`/`uv.lock`은 이번에도
+      전혀 건드리지 않았다(`src/devbot/release_publish.py`,
+      `results/049-release-publish.md`).

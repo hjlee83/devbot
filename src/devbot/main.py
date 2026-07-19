@@ -71,6 +71,11 @@ from devbot.release_preparation import (
     plan_release_preparation,
     prepare_release,
 )
+from devbot.release_publish import (
+    ReleasePublishError,
+    preview_release_publish,
+    publish_prepared_release,
+)
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
 from devbot.specification import (
@@ -728,6 +733,29 @@ def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:
         help="계산된 다음 버전만 출력하고 파일을 쓰지 않습니다.",
     )
 
+    publish_prepared_parser = release_subparsers.add_parser(
+        "publish-prepared",
+        help=(
+            "Task 049: 이미 준비된(Task 048) 버전을 Git 태그 + GitHub Release로 직접 "
+            "게시합니다 - 기존 'release publish'(워크플로 dispatch, Task 037)와는 "
+            "별개의 명시적 두 번째 경로입니다. 이름을 다르게 둔 이유는 두 경로가 "
+            "서로 다른 플래그/동작을 가지므로 혼동을 피하기 위함입니다."
+        ),
+    )
+    publish_prepared_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+    publish_prepared_parser.add_argument(
+        "--notes-file",
+        required=True,
+        help="Release Notes 본문이 담긴 파일 경로. 비어 있으면 거부됩니다.",
+    )
+    publish_prepared_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="검증된 미리보기(버전/태그/대상 커밋)만 출력하고 태그/Release를 만들지 않습니다.",
+    )
+
 
 def _run_release_prepare_command(args: argparse.Namespace) -> int:
     """Task 048: purely local - no GitHub client, no `_resolve_repository`
@@ -756,6 +784,55 @@ def _run_release_prepare_command(args: argparse.Namespace) -> int:
     print("changed_paths:")
     for path in result.changed_paths:
         print(f"  - {path}")
+    return 0
+
+
+def _run_release_publish_prepared_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    """Task 049: the direct tag+Release publish path - a second,
+    intentional path alongside Task 037's workflow-dispatch `release
+    publish` (see `docs/07-decisions.md`)."""
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        notes = Path(args.notes_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"release publish-prepared 오류: notes 파일을 읽을 수 없습니다: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    github_client = GitHubClient(config.github_token)
+
+    try:
+        if args.dry_run:
+            preview = preview_release_publish(github_client, repository, notes)
+            print(f"repository: {preview.repository}")
+            print(f"version: {preview.version}")
+            print(f"tag: {preview.tag}")
+            print(f"title: {preview.title}")
+            print(f"target_branch: {preview.target_branch}")
+            print(f"target_sha: {preview.target_sha}")
+            print(f"tag_state: {preview.tag_state}")
+            print(f"release_state: {preview.release_state}")
+            print("dry-run: 태그/Release를 만들지 않았습니다.")
+            return 0
+
+        write_client = GitHubWriteClient(config.github_token)
+        result = publish_prepared_release(github_client, write_client, repository, notes)
+    except (ReleasePublishError, ReleasePreparationError, GitHubClientError) as exc:
+        print(f"release publish-prepared 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"version: {result.version}")
+    print(f"tag: {result.tag}")
+    print(f"target_sha: {result.target_sha}")
+    print(f"release_url: {result.release_url or 'none'}")
+    print(f"outcome: {result.outcome}")
     return 0
 
 
@@ -810,6 +887,8 @@ def _render_release_status(status: ReleaseStatus) -> str:
 def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     if args.release_command == "prepare":
         return _run_release_prepare_command(args)
+    if args.release_command == "publish-prepared":
+        return _run_release_publish_prepared_command(args, config)
 
     try:
         repository = _resolve_repository(config, args.repo)
