@@ -512,3 +512,49 @@
       모두 그대로 남고, 저장소마다 둘 중 하나만 유효하도록 게이트만
       추가했다(`src/devbot/release_publish_strategy.py`,
       `results/050-release-publish-strategy.md`).
+- [x] Task 051: release orchestration. Task 047(추천)·048(준비)·050(전략
+      해석)과 Task 037/049의 기존 두 게시 경로를 정책 로직 중복 없이
+      한 명령으로 엮는 `src/devbot/release_orchestration.py`와
+      `devbot release run --level major|minor|patch|none [--notes-file]
+      [--dry-run]`을 추가했다. PR 리뷰(hjlee83)에서 실제 정합성 문제를
+      두 개 발견해 같은 PR에서 수정했다. **(1) workflow 경로가
+      `--level`을 무시하는 문제**: Task 037의 `publish_release`는 merged
+      PR 히스토리로 자체적으로 increment를 계산하고 로컬 파일을 전혀
+      읽지 않는데, 최초 구현은 workflow 경로에서 Task 048 준비를
+      건너뛰고 계산도 하지 않아 dry-run이 보여주는 target_version과
+      실제 게시 버전이 서로 다를 수 있었다 - `--level patch`를 줘도
+      실제로는 minor/major가 게시되거나 거부될 수 있었다. 수정: plan의
+      current_version/target_version을 이제 workflow 경로에서도 Task
+      037이 실제로 계산한 `ReleasePreview.previous_version`/
+      `next_version`에서 가져오고, 계산된 increment가 요청한
+      recommendation과 다르면 dry-run은 blocker로 보고하고 실제 실행은
+      쓰기 전에 거부한다(`recommendation_conflict`). workflow 경로도
+      이제 `prepare_release()`를 정확히 한 번 호출해 Contract의 "Task
+      048 준비를 정확히 한 번 실행"을 문자 그대로 만족시킨다. **(2)
+      `PREPARED_PENDING_COMMIT`을 "정상 결과"로만 처리한 게 완성
+      계약을 충족 못 한다는 문제**: 최초 구현은 direct 경로의 목표
+      버전을 로컬 파일 기준으로 계산해서, `prepare_release()`가 로컬을
+      바꾸고 나면 다음 호출이 항상 그 위에서 한 단계 더 bump된 새
+      target을 계산해버려 "이미 준비됐는지" 판단이 원천적으로
+      불가능했다 - 그래서 실제 실행이 절대 `DIRECT_PUBLISHED`에 도달할
+      수 없었다. 수정: direct 경로의 current_version/target_version을
+      `build_release_status`(GitHub Releases API, `devbot release
+      status`가 쓰는 것과 같은 소스)가 반환하는 "가장 최근 게시된
+      Release" 기준으로 앵커링했다 - 이 값은 로컬 준비 작업으로는
+      바뀌지 않고 실제 Release가 게시돼야만 바뀐다. `run_release`는
+      로컬 체크아웃의 현재 버전·dirty 여부를 이 안정적인 target과
+      비교해, 이미 일치하면 `prepare_release()`를 건너뛰고 곧바로 실제
+      게시를 진행하고, 아니면 준비(정확히 한 번)만 하고
+      `PREPARED_PENDING_COMMIT`을 보고한다 - 운영자가 커밋·push한 뒤
+      **같은 recommendation으로 다시 실행**하면 이번엔 진짜로
+      `DIRECT_PUBLISHED`까지 도달한다(중복 bump 없이). main에 직접
+      commit+push하는 새 권한을 추가하는 방법은 리뷰 중 다시 검토했지만
+      또 채택하지 않았다 - 대신 기존의 2단계 재실행 경로가 실제로
+      동작하도록 고쳤다. 두 수정 모두 진짜 임시 Git 저장소로 검증하는
+      회귀 테스트로 고정했다(`docs/07-decisions.md` 2026-07-19 항목에
+      두 문제와 수정 근거를 상세히 기록). `ReleaseRunStage`
+      (recommendation/preparation/strategy_resolution/workflow_publish/
+      direct_publish) 5개 값으로 모든 실패를 원인 예외 체이닝과 함께
+      보고하고, 두 게시 경로가 한 실행에서 동시에 호출되지 않음을
+      매트릭스 테스트로 검증했다(`src/devbot/release_orchestration.py`,
+      `results/051-release-orchestration.md`).
