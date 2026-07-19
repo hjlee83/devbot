@@ -717,6 +717,25 @@ and real submission share this one function, there is no way for the two paths t
 enforce this protection differently - what dry-run reports as "the exact intended
 submission" is guaranteed to be what real execution would actually attempt.
 
+**Addendum (2026-07-19, same day, review fix):** the initial version of this check ran
+exactly once, during planning. Review on PR #114 pointed out this leaves a real
+time-of-check-to-time-of-use gap: GitHub's review-submission API has no
+head-SHA-conditional create, so a commit pushed to the PR between planning and the
+actual `write_client.submit_pull_request_review` call could let a review land against a
+`commit_id` that is no longer the PR's head. The read-and-verify logic (head-SHA match,
+open/unmerged state) was pulled out into `_fetch_and_verify_pull_request` and is now
+called a second time, immediately before the write, inside `submit_github_review` - not
+only during planning. A mismatch found on this second read raises `StaleReviewHeadError`
+(or `UnsupportedPullRequestStateError` if the PR closed/merged meanwhile) and aborts
+before any write is attempted, exactly as the first check does. This narrows the race
+window from "however long elapses between report authoring and submission" down to the
+network round-trip between the second read and the POST itself - it does not eliminate
+the window entirely, since GitHub's API still offers no atomic check-and-write primitive.
+Covered by `test_head_changed_between_plan_and_write_blocks_submission`,
+`test_pr_closed_between_plan_and_write_blocks_submission`, and
+`test_pr_merged_between_plan_and_write_blocks_submission` in
+`tests/test_github_review_submission.py`.
+
 **Self-approval is checked proactively, not only reactively.** GitHub's API rejects
 `APPROVE` when the authenticated identity authored the PR (HTTP 422), but relying only
 on that after the fact means an operator only learns why from an opaque GitHub error

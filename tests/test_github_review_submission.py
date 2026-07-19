@@ -541,6 +541,100 @@ def test_real_submission_makes_no_other_write_client_call() -> None:
 
 
 # --------------------------------------------------------------------------
+# Re-verification immediately before write (TOCTOU protection).
+#
+# `build_github_review_submission_plan` reads the PR once while planning.
+# Between that read and the actual write, a new commit could land on the PR
+# (or the PR could be closed/merged) - GitHub's review-submission API has no
+# head-SHA-conditional create, so `submit_github_review` re-reads and
+# re-verifies the PR a second time, immediately before calling
+# `write_client.submit_pull_request_review`, and aborts without writing if
+# anything has changed.
+# --------------------------------------------------------------------------
+
+
+def test_head_changed_between_plan_and_write_blocks_submission() -> None:
+    report = _report()
+    github_client = MagicMock(spec=GitHubClient)
+    github_client.get_pull_request.side_effect = [
+        _pr_detail(head_sha=_HEAD_SHA),  # read during planning: matches
+        _pr_detail(head_sha="moved-sha"),  # re-read right before write: moved on
+    ]
+    write_client = MagicMock(spec=GitHubWriteClient)
+
+    with pytest.raises(StaleReviewHeadError):
+        submit_github_review(
+            github_client, write_client, _repository(), 99, report, dry_run=False
+        )
+
+    write_client.submit_pull_request_review.assert_not_called()
+    assert github_client.get_pull_request.call_count == 2
+
+
+def test_pr_closed_between_plan_and_write_blocks_submission() -> None:
+    report = _report()
+    github_client = MagicMock(spec=GitHubClient)
+    github_client.get_pull_request.side_effect = [
+        _pr_detail(state="open"),  # read during planning: still open
+        _pr_detail(state="closed"),  # re-read right before write: closed since
+    ]
+    write_client = MagicMock(spec=GitHubWriteClient)
+
+    with pytest.raises(UnsupportedPullRequestStateError):
+        submit_github_review(
+            github_client, write_client, _repository(), 99, report, dry_run=False
+        )
+
+    write_client.submit_pull_request_review.assert_not_called()
+    assert github_client.get_pull_request.call_count == 2
+
+
+def test_pr_merged_between_plan_and_write_blocks_submission() -> None:
+    report = _report()
+    github_client = MagicMock(spec=GitHubClient)
+    github_client.get_pull_request.side_effect = [
+        _pr_detail(state="open", merged=False),  # read during planning: still open
+        _pr_detail(  # re-read right before write: merged since
+            state="closed", merged=True, merge_commit_sha="mergesha"
+        ),
+    ]
+    write_client = MagicMock(spec=GitHubWriteClient)
+
+    with pytest.raises(UnsupportedPullRequestStateError):
+        submit_github_review(
+            github_client, write_client, _repository(), 99, report, dry_run=False
+        )
+
+    write_client.submit_pull_request_review.assert_not_called()
+
+
+def test_no_drift_between_plan_and_write_reads_pr_twice_and_succeeds() -> None:
+    report = _report()
+    github_client = _github_client()
+    write_client = MagicMock(spec=GitHubWriteClient)
+    write_client.submit_pull_request_review.return_value = PullRequestReviewInfo(
+        id=7, html_url="https://example.invalid/review/7", state="APPROVED"
+    )
+
+    result = submit_github_review(
+        github_client, write_client, _repository(), 99, report, dry_run=False
+    )
+
+    assert result.submitted is True
+    assert github_client.get_pull_request.call_count == 2
+    write_client.submit_pull_request_review.assert_called_once()
+
+
+def test_dry_run_only_reads_pr_once() -> None:
+    report = _report()
+    github_client = _github_client()
+
+    submit_github_review(github_client, None, _repository(), 99, report, dry_run=True)
+
+    github_client.get_pull_request.assert_called_once()
+
+
+# --------------------------------------------------------------------------
 # GitHub API/permission failures.
 # --------------------------------------------------------------------------
 

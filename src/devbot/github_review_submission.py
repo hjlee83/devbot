@@ -56,6 +56,7 @@ from devbot.github_client import (
     GitHubAuthenticationError,
     GitHubClient,
     GitHubClientError,
+    PullRequestDetail,
 )
 from devbot.github_write_client import GitHubWriteClient
 from devbot.models import RepositoryConfig
@@ -269,18 +270,20 @@ def _build_inline_comments(
     return tuple(comments), body_only_count
 
 
-def build_github_review_submission_plan(
+def _fetch_and_verify_pull_request(
     github_client: GitHubClient,
     repository: RepositoryConfig,
     pr_number: int,
-    report: ReviewReport,
-) -> GitHubReviewSubmissionPlan:
-    """Read-only: no write client, no GitHub write. Reused by both
-    dry-run and as the first step of real submission, so stale-head and
-    self-approval protection can never differ between the two."""
-    reviewed_head_sha = _require_reviewed_head_sha(report)
-    _check_identity_cross_reference(report, repository, pr_number)
-
+    reviewed_head_sha: str,
+) -> PullRequestDetail:
+    """Read-only: fetches the PR's current state and verifies it is open,
+    unmerged, and still at `reviewed_head_sha` - raising before any write.
+    Called once while building the plan, and called again immediately
+    before the actual write in `submit_github_review`. GitHub's review
+    API has no head-SHA-conditional create, so this second read-verify
+    step is what closes - not eliminates; a commit could still land in the
+    instant between this check and the POST call - the TOCTOU window
+    between planning and submission."""
     try:
         pull_request = github_client.get_pull_request(repository, pr_number)
     except GitHubClientError as exc:
@@ -300,6 +303,25 @@ def build_github_review_submission_plan(
             f"head is {pull_request.head_sha!r} - refusing to submit a review against "
             "evidence that is no longer current"
         )
+
+    return pull_request
+
+
+def build_github_review_submission_plan(
+    github_client: GitHubClient,
+    repository: RepositoryConfig,
+    pr_number: int,
+    report: ReviewReport,
+) -> GitHubReviewSubmissionPlan:
+    """Read-only: no write client, no GitHub write. Reused by both
+    dry-run and as the first step of real submission, so stale-head and
+    self-approval protection can never differ between the two."""
+    reviewed_head_sha = _require_reviewed_head_sha(report)
+    _check_identity_cross_reference(report, repository, pr_number)
+
+    pull_request = _fetch_and_verify_pull_request(
+        github_client, repository, pr_number, reviewed_head_sha
+    )
 
     event = _DECISION_TO_EVENT[report.decision]
 
@@ -384,6 +406,14 @@ def submit_github_review(
 
     if write_client is None:
         raise GitHubReviewSubmissionError("write_client is required when dry_run is False")
+
+    # Re-verify immediately before the write, not just once during
+    # planning: GitHub's review-submission API has no head-SHA-conditional
+    # create, so a commit pushed (or the PR closed/merged) between
+    # planning and this call could otherwise let a stale review through.
+    # See `_fetch_and_verify_pull_request`'s docstring for why this
+    # narrows, rather than eliminates, that window.
+    _fetch_and_verify_pull_request(github_client, repository, pr_number, plan.reviewed_head_sha)
 
     try:
         info = write_client.submit_pull_request_review(

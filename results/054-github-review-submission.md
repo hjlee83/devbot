@@ -37,6 +37,49 @@ SHA와 다르면 write client를 만들기도 전에 `StaleReviewHeadError`로
 거부한다. PR이 open이 아니거나(closed) 이미 merged면
 `UnsupportedPullRequestStateError`로 거부한다.
 
+### 리뷰 수정: write 직전 재검증 (TOCTOU)
+
+최초 구현은 이 검사를 `build_github_review_submission_plan`(planning
+단계) 딱 한 번만 했다. hjlee83가 PR #114에서 정확히 지적한 문제:
+GitHub의 review 제출 API는 head-SHA-conditional create를 지원하지
+않으므로, planning과 실제 write(`write_client.submit_pull_request_review`
+호출) 사이의 간격 — 특히 그 사이에 새 커밋이 push되는 경우 — 에는
+`commit_id`로 예전 SHA를 그대로 보내도 GitHub가 이를 그냥 받아들여버릴
+수 있다. 즉 stale-head 검사가 "확인"만 하고 "확인한 대로 쓴다"는
+보장이 없었다 — 전형적인 time-of-check-to-time-of-use 경쟁 조건이다.
+
+고친 방법: 이전에 `build_github_review_submission_plan` 안에 있던
+PR 조회+검증(현재 head SHA 일치 + open/unmerged) 로직을
+`_fetch_and_verify_pull_request()` 헬퍼로 뽑아내고, 이걸 두 번 호출한다
+— 한 번은 기존과 동일하게 planning 중에, 또 한 번은 `submit_github_review`
+안에서 `write_client.submit_pull_request_review`를 호출하기
+**직전**에. 두 번째 호출에서 head SHA가 달라졌으면 `StaleReviewHeadError`,
+그 사이 PR이 closed/merged로 바뀌었으면 `UnsupportedPullRequestStateError`
+로 write를 아예 시도하지 않고 중단한다 — 같은 헬퍼가 두 검사를 모두
+하므로 "closed/merged로 바뀐 경우"도 별도 코드 없이 자동으로 커버된다.
+
+**이건 TOCTOU 창을 좁히는 것이지 없애는 게 아니다** — 재검증과 실제
+POST 사이에도 이론상 아주 짧은 간격은 남는다(GitHub API 자체에
+head-SHA-conditional create가 없는 한 완전히 없앨 수 없음). 하지만
+검사와 write 사이의 간격을 "report 작성부터 제출까지의 임의 시간"에서
+"두 번째 HTTP 호출과 세 번째 HTTP 호출 사이의 네트워크 왕복 시간"으로
+줄인다.
+
+신규 회귀 테스트(`tests/test_github_review_submission.py`): PR을 두
+번 조회하도록 mock해서 두 번째 조회에서만 head SHA가 바뀌는 경우
+(`test_head_changed_between_plan_and_write_blocks_submission`), 두
+번째 조회에서 PR이 closed로 바뀌는 경우
+(`test_pr_closed_between_plan_and_write_blocks_submission`), merged로
+바뀌는 경우
+(`test_pr_merged_between_plan_and_write_blocks_submission`) 각각
+`StaleReviewHeadError`/`UnsupportedPullRequestStateError`가 발생하고
+`write_client.submit_pull_request_review`가 전혀 호출되지 않음을
+검증한다. 드리프트가 없는 정상 경로도 `get_pull_request`가 정확히
+두 번(planning + pre-write) 호출되고 write는 정확히 한 번만 일어남을
+확인하며(`test_no_drift_between_plan_and_write_reads_pr_twice_and_
+succeeds`), dry-run은 애초에 write가 없으므로 재검증 없이 한 번만
+조회함을 별도로 확인한다(`test_dry_run_only_reads_pr_once`).
+
 ## Self-Approval: 선제적으로 차단, 절대 다운그레이드하지 않음
 
 GitHub API는 인증된 identity가 PR 작성자와 같으면 `APPROVE`를 거부한다
@@ -128,20 +171,23 @@ $ uv run ruff check .
 All checks passed!
 
 $ uv run pytest -q
-1276 passed in 63.83s
+1281 passed in 77.22s
 ```
 
-- `tests/test_github_review_submission.py` (신규, 39개): report 신원
-  요구사항(누락/공백/repository·pr_number 불일치/일치), stale-head
-  거부/통과, PR 상태(closed/merged/open) 거부/통과, 세 decision→event
-  매핑 각각, self-approval 선제 차단 + non-APPROVE에는 검사 스킵 +
-  다른 작성자는 통과 + GitHub 422 메시지 인식(다운그레이드 없음),
-  결정론적 body(모든 필드·모든 finding 포함, 반복 호출 간 일관성),
-  inline 변환(위치 없음/path만/멀티라인/단일라인/명시적 side/잘못된
-  side fail-closed), dry-run이 write client 불필요, 실제 제출 없이
-  write_client=None이면 거부, 실제 제출이 정확히 한 번만 호출, 다른
-  write 메서드 호출 없음, GitHubAuthenticationError/GitHubAPIError
-  래핑, PR 조회 실패 래핑, 오류 계층, 렌더링.
+- `tests/test_github_review_submission.py` (44개, TOCTOU 재검증 관련
+  5개 추가): report 신원 요구사항(누락/공백/repository·pr_number
+  불일치/일치), stale-head 거부/통과, PR 상태(closed/merged/open)
+  거부/통과, 세 decision→event 매핑 각각, self-approval 선제 차단 +
+  non-APPROVE에는 검사 스킵 + 다른 작성자는 통과 + GitHub 422 메시지
+  인식(다운그레이드 없음), 결정론적 body(모든 필드·모든 finding 포함,
+  반복 호출 간 일관성), inline 변환(위치 없음/path만/멀티라인/단일라인
+  /명시적 side/잘못된 side fail-closed), dry-run이 write client
+  불필요 + PR을 한 번만 조회, 실제 제출 없이 write_client=None이면
+  거부, 실제 제출이 정확히 한 번만 호출, 다른 write 메서드 호출 없음,
+  **write 직전 재검증**(head 변경/PR closed/PR merged 각각 write 없이
+  중단, 드리프트 없으면 조회 2회·write 1회로 정상 성공),
+  GitHubAuthenticationError/GitHubAPIError 래핑, PR 조회 실패 래핑,
+  오류 계층, 렌더링.
 - `tests/test_github_client.py` (+2개 필드 갱신): `get_pull_request`가
   `head_sha`/`state`/`author_login`을 올바르게 파싱.
 - `tests/test_github_write_client.py` (+2): `submit_pull_request_review`가
@@ -150,7 +196,7 @@ $ uv run pytest -q
 - `tests/test_main.py` (+7): dry-run 시 write client 미생성, 실제 제출
   1회, stale head 실패 종료 코드, metadata 누락 실패, malformed report
   가 GitHub 호출 전에 실패, report 파일 누락 실패, daemon lock 미획득.
-- 전체 스위트 1276개 회귀 없이 통과.
+- 전체 스위트 1281개 회귀 없이 통과.
 
 ## 수정/추가 파일
 
@@ -160,7 +206,7 @@ $ uv run pytest -q
   `PullRequestReviewInfo` 추가)
 - `src/devbot/main.py` (`review submit` 서브커맨드 + 핸들러,
   `_run_review_command`에 `config` 파라미터 추가)
-- `tests/test_github_review_submission.py` (신규, 39개)
+- `tests/test_github_review_submission.py` (44개)
 - `tests/test_github_client.py` (기존 2개 테스트 갱신)
 - `tests/test_github_write_client.py` (+2, 화이트리스트 갱신)
 - `tests/test_main.py` (+7)
