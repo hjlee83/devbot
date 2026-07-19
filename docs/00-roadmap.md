@@ -479,3 +479,36 @@
       실행 중 호출 기록 둘 다로 고정). `pyproject.toml`/`uv.lock`은 이번에도
       전혀 건드리지 않았다(`src/devbot/release_publish.py`,
       `results/049-release-publish.md`).
+- [x] Task 050: release publish strategy. Task 049가 남긴 "두 경로가
+      공존한다"는 위험을 정책 레이어로 닫는다 - 저장소마다 릴리스 게시
+      경로를 정확히 하나로 고정하는 `src/devbot/release_publish_strategy.py`를
+      추가했다. `RepositoryConfig.publish_strategy: str | None`이 새
+      선택 필드이고, 생략하면 기존 모든 저장소가 써 온 `workflow`로
+      안전하게 기본값이 매겨진다(`defaulted=True`로 구분 가능) - 기존
+      `repositories.yaml`은 한 글자도 바꾸지 않아도 그대로 동작한다.
+      값 파싱·기본값 결정·검증은 오직 `resolve_release_publish_strategy()`
+      한 곳에서만 하고 `RepositoryConfig`/`config.py`는 원시 문자열
+      그대로 보관한다 - 로직이 두 곳에 나뉘면 서로 어긋날 수 있기
+      때문이다. `"workflow"`/`"direct"` 둘 중 정확히 일치하지 않는
+      값(대소문자·공백·비문자열 포함)은 절대 조용히 기본값으로
+      떨어지지 않고 `InvalidReleasePublishStrategyError`로 fail
+      closed한다. `require_workflow_strategy()`/`require_direct_strategy()`
+      두 가드는 어떤 설정값에서도 최대 하나만 통과하도록
+      구성으로 보장된다(`test_mutual_exclusivity_matrix`로 세 가지
+      유효 상태 전부 검증). 가드는 각 모듈의 실제 쓰기 관문에
+      둔다 - `release_ops.dispatch_release()`(자신의 기존 docstring이
+      이미 "모든 `release publish` 경로가 거치는 유일한 안전 관문"이라고
+      명시한 함수)와 `release_publish.preview_release_publish()`(
+      `publish_prepared_release()`가 항상 먼저 호출하므로 미리보기와
+      실제 게시를 중복 없이 함께 막는다). `release_ops.py`의 미리보기
+      함수는 게이트 없는 `release preview`와 공유되어 그 안에는 가드를
+      둘 수 없었으므로, `devbot.main`의 `publish` 서브커맨드에만 별도로
+      CLI 레벨 가드를 하나 더 두었다(`GitHubClient` 생성 전에 거부).
+      읽기 전용 `devbot release strategy [--repo]`를 새 서브커맨드로
+      추가했다 - GitHub client를 전혀 만들지 않고 현재 저장소의 유효
+      전략만 조회한다. 버전 계산/실제 태그·Release·workflow dispatch
+      쓰기/두 커맨드 통합/기존 경로 제거는 이번 범위에 없다 - 두
+      `release publish`(Task 037)/`release publish-prepared`(Task 049)
+      모두 그대로 남고, 저장소마다 둘 중 하나만 유효하도록 게이트만
+      추가했다(`src/devbot/release_publish_strategy.py`,
+      `results/050-release-publish-strategy.md`).

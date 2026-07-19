@@ -468,3 +468,71 @@ of `ReleaseReadiness.blockers` is computed by the pure `build_release_preview()`
 `dispatch_release()` ever runs, and `devbot release preview` renders the identical
 computation read-only - so "what would publish do" and "what does it actually check
 before publishing" can never drift apart.
+
+## 2026-07-19 — One authoritative release publish strategy per repository, resolved in exactly one place (Task 050)
+
+Task 049's entry above closes with "두 개의 릴리스 게시 경로가 이제 공존한다" as an
+open risk: `devbot release publish` (workflow-dispatch, `release_ops.py`) and `devbot
+release publish-prepared` (direct tag+Release, `release_publish.py`) both exist, and
+nothing yet stopped an operator from running either one against a repository regardless
+of which path that repository was actually meant to use. Task 050
+(`src/devbot/release_publish_strategy.py`) closes that gap with a policy layer, not by
+removing either path - both remain fully intact and independently useful.
+
+**A repository declares its strategy with one optional config field; an omitted field
+is not ambiguity, it is the documented default.** `RepositoryConfig.publish_strategy:
+str | None` is new in `repositories.yaml`. `None` resolves to `ReleasePublishStrategy
+.WORKFLOW` - the path every existing repository was already using before this task
+existed, so every config file written before Task 050 continues to load and behave
+exactly as before with zero edits required (regression-tested against `tests
+/test_config.py`'s full existing fixture set).
+
+**Exactly one function parses and defaults the raw config value; nothing else is allowed
+to.** `resolve_release_publish_strategy()` is pure (no I/O), and is the only code in the
+repository that reads `RepositoryConfig.publish_strategy` and turns it into a typed
+`ReleasePublishStrategy`. `RepositoryConfig` itself and `config.py`'s loader deliberately
+keep the field as an untyped, unvalidated `str | None` - validating or defaulting it at
+the config-loading boundary would create a second place this logic could drift from the
+resolver. An unrecognized value (anything other than exactly `"workflow"` or `"direct"`,
+including case variants, surrounding whitespace, or a non-string) always raises
+`InvalidReleasePublishStrategyError` - it is never silently coerced to the default,
+because a typo that quietly fell back to `workflow` is exactly the kind of ambiguity this
+task exists to remove.
+
+**Two guard functions make the two paths mutually exclusive by construction, not by
+convention.** `require_workflow_strategy()` and `require_direct_strategy()` both call
+the same resolver and then compare its result against what the caller requires; for any
+possible configuration (omitted, `workflow`, `direct`, or invalid) at most one of the two
+guards can ever succeed, and an invalid configuration fails both
+(`tests/test_release_publish_strategy.py::test_mutual_exclusivity_matrix` parametrizes
+over all three valid states and asserts this directly). Neither guard performs any I/O
+beyond reading the already-loaded `RepositoryConfig`.
+
+**Guards sit at the actual write choke point of each module, not at whichever function
+felt convenient.** `release_ops.dispatch_release()` calls `require_workflow_strategy()`
+as its first line - its own pre-existing docstring already identified it as "the single
+safety choke point every `devbot release publish` path goes through," so this is the one
+place a guard covers every caller, present and future, without being bypassable.
+`release_publish.preview_release_publish()` calls `require_direct_strategy()` as its
+first line for the same reason: `publish_prepared_release()` always calls
+`preview_release_publish()` before any write, so gating the shared preview covers both
+the read-only preview and the real publish call with no duplicated check.
+`release_ops.py`'s equivalent preview function (`fetch_release_preview`) could not host
+the guard the same way, because it is shared with the ungated, read-only `devbot release
+preview` command - gating it there would have incorrectly blocked `release preview` too.
+That one asymmetry is why `devbot.main`'s CLI layer also carries an explicit,
+`publish`-scoped guard check before `GitHubClient` is even constructed: it is
+intentional duplication at the one point where the domain-level guard alone would not
+give a fast, network-free CLI refusal for that specific command.
+
+**Strategy inspection is read-only and never constructs a GitHub client.** `devbot
+release strategy` calls only `resolve_release_publish_strategy()` and prints its result;
+it exists so an operator (or a future orchestration task) can ask "which path would this
+repository actually use" without side effects, matching the read-only posture of `devbot
+release preview`/`status`.
+
+**Explicitly out of scope, left for later tasks:** this task does not touch version
+calculation, does not perform any tag/Release/workflow-dispatch write itself, does not
+merge the two publish commands into one, and does not remove either existing path -
+`devbot release publish` and `devbot release publish-prepared` both remain, gated so that
+only one is ever valid per repository.

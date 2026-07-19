@@ -149,6 +149,8 @@ def _load_repositories(
         )
         is_self_repo = _parse_repository_enabled(entry.get("is_self_repo", False), index)
         default_branch = str(entry.get("default_branch") or "main")
+        raw_publish_strategy = entry.get("publish_strategy")
+        publish_strategy = str(raw_publish_strategy) if raw_publish_strategy is not None else None
         repositories.append(
             RepositoryConfig(
                 owner=str(owner),
@@ -158,6 +160,7 @@ def _load_repositories(
                 default_branch=default_branch,
                 automerge_allowed=automerge_allowed,
                 is_self_repo=is_self_repo,
+                publish_strategy=publish_strategy,
             )
         )
 

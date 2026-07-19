@@ -122,6 +122,14 @@ class RepositoryConfig:
     host_checkout_path: Path | None = None
     automerge_allowed: bool = False
     is_self_repo: bool = False
+    # Task 050: the raw, unvalidated configured release publish strategy
+    # ("workflow"/"direct"/anything else/omitted). Parsing this into the
+    # typed `ReleasePublishStrategy` and defaulting an omitted value to
+    # `workflow` both belong solely to
+    # `devbot.release_publish_strategy.resolve_release_publish_strategy` -
+    # this field is intentionally left as a raw string here so that logic
+    # is never duplicated at the config-loading boundary.
+    publish_strategy: str | None = None
 
     @property
     def full_name(self) -> str:

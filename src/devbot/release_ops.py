@@ -47,6 +47,7 @@ from devbot.release import (
     release_for_target_commit,
     release_increment_for_pr,
 )
+from devbot.release_publish_strategy import require_workflow_strategy
 from devbot.startup import resolve_operator_checkout
 
 RELEASE_WORKFLOW_FILE = "release.yml"
@@ -389,7 +390,13 @@ def dispatch_release(
     """Trigger the existing Release workflow for `preview`'s computed
     increment/commit/notes. Refuses when `preview` is not ready - this is
     the single safety choke point every `devbot release publish` path goes
-    through before anything reaches GitHub."""
+    through before anything reaches GitHub.
+
+    Task 050: also refuses before dispatch unless `repository`'s effective
+    release publish strategy is `workflow` - defense in depth alongside the
+    CLI-level check in `devbot.main`, so any future direct caller of this
+    function is protected too."""
+    require_workflow_strategy(repository)
     if not preview.readiness.ready:
         raise ReleaseOpsError(
             "refusing to publish: " + "; ".join(preview.readiness.blockers)
