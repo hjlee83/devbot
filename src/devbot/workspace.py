@@ -8,20 +8,16 @@ access; cloning repositories is out of scope for this Task.
 
 from __future__ import annotations
 
-import re
 import subprocess
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from devbot.bootstrap import BranchNamingPolicy
 from devbot.github_client import GitHubIssue
 from devbot.models import IssueComment, RepositoryConfig
 
 DEFAULT_PROMPT_TEMPLATE_PATH = Path("prompts/issue-task.md")
-
-_SLUG_INVALID_CHARS = re.compile(r"[^a-z0-9]+")
-_MAX_SLUG_LENGTH = 40
-
 
 class WorkspaceValidationError(RuntimeError):
     """Raised when a repository's local path is not usable."""
@@ -155,16 +151,12 @@ def ensure_repository_present(repository: RepositoryConfig) -> None:
 
 
 def generate_branch_name(repository: RepositoryConfig, issue_number: int, title: str) -> str:
-    """Build a deterministic, Git-ref-safe branch name for an Issue.
+    """Build the canonical Task branch name for an Issue.
 
-    The same repository/issue_number/title always produce the same name;
-    the title is slugified (lowercased, non-alphanumeric runs collapsed to
-    a single `-`, truncated) so the result is a valid branch name
-    regardless of what characters the Issue title contains.
+    Kept as a compatibility wrapper for older call sites; the authoritative
+    policy is `devbot.bootstrap.BranchNamingPolicy`.
     """
-    slug = _SLUG_INVALID_CHARS.sub("-", title.lower()).strip("-")
-    slug = slug[:_MAX_SLUG_LENGTH].strip("-") or "issue"
-    return f"devbot/{repository.repo}-{issue_number}-{slug}"
+    return BranchNamingPolicy().generate(task_number=issue_number, title=title)
 
 
 def build_agent_prompt(

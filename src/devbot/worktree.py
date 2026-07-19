@@ -30,9 +30,15 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
+from devbot.bootstrap import (
+    BootstrapValidationError,
+    build_bootstrap_plan,
+    list_existing_task_branches,
+    materialize_task_contract,
+    validate_bootstrap_issue_metadata,
+)
 from devbot.github_client import GitHubIssue, PullRequest
 from devbot.models import RepositoryConfig
-from devbot.workspace import generate_branch_name
 
 _WORKTREE_DIRNAME = ".devbot-worktrees"
 _REPOSITORY_WORKTREES_DIRNAME = ".worktrees"
@@ -52,6 +58,7 @@ class WorkspacePreparationFailure(StrEnum):
     WORKSPACE_DIRTY = "workspace_dirty"
     STALE_PR_HEAD = "stale_pr_head"
     TASK_BRANCH_CONFLICT = "task_branch_conflict"
+    BOOTSTRAP_VALIDATION_FAILED = "bootstrap_validation_failed"
 
 
 class WorkspacePreparationError(RuntimeError):
@@ -557,6 +564,8 @@ class WorktreeManager:
         if linked_pull_request is not None:
             branch = linked_pull_request.head_ref
             create_branch = False
+            contract_path = parse_contract_path_from_issue_body(issue.body)
+            result_path = parse_result_path_from_issue_body(issue.body)
             expected_branch = parse_branch_from_issue_body(issue.body)
             if expected_branch is not None and expected_branch != branch:
                 raise WorkspacePreparationError(
@@ -567,18 +576,70 @@ class WorktreeManager:
                     f"resolved_pr_head={branch!r}",
                 )
         else:
-            branch = generate_branch_name(repository, issue.number, issue.title)
+            try:
+                validate_bootstrap_issue_metadata(issue.body)
+                target = self.worktree_path(repository, issue.number)
+                matching_entry = next(
+                    (
+                        entry
+                        for entry in self._list_worktrees(repository)
+                        if entry.path == target and entry.branch is not None
+                    ),
+                    None,
+                )
+                existing_branches = tuple(
+                    branch
+                    for branch in list_existing_task_branches(repository.local_path)
+                    if branch != (matching_entry.branch if matching_entry is not None else None)
+                )
+                plan = build_bootstrap_plan(
+                    issue, existing_branches=existing_branches
+                )
+            except BootstrapValidationError as exc:
+                raise WorkspacePreparationError(
+                    WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED,
+                    str(exc),
+                ) from exc
+            branch = plan.branch
             create_branch = True
+            contract_path = plan.contract_path
+            result_path = plan.result_path
+
+        target = self.worktree_path(repository, issue.number)
+        if self.dry_run and create_branch:
+            return PreparedWorkspace(
+                repository=replace(
+                    repository,
+                    local_path=target,
+                    host_checkout_path=repository.host_checkout_path or repository.local_path,
+                ),
+                branch=branch,
+                base_branch=base_branch,
+                issue_number=issue.number,
+                pull_request=linked_pull_request,
+                worktree_path=target,
+                reused=False,
+                dirty=False,
+                contract_path=contract_path,
+                result_path=result_path,
+            )
 
         self._sync_remote(
             repository, branch=None if create_branch else branch, base_branch=base_branch
         )
 
-        target = self.worktree_path(repository, issue.number)
         reused, actual_worktree = self._create_or_reuse(
             repository, target, branch, base_branch, create_branch=create_branch
         )
         target = actual_worktree
+        if linked_pull_request is None:
+            try:
+                materialize_task_contract(target, issue, plan)
+            except BootstrapValidationError as exc:
+                raise WorkspacePreparationError(
+                    WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED,
+                    str(exc),
+                ) from exc
         self._verify_pr_head(target, branch, linked_pull_request)
         if synchronize_with_main:
             self._sync_task_branch_with_main(target, branch, base_branch, linked_pull_request)
@@ -596,8 +657,8 @@ class WorktreeManager:
             worktree_path=target,
             reused=reused,
             dirty=self.is_dirty(target),
-            contract_path=parse_contract_path_from_issue_body(issue.body),
-            result_path=parse_result_path_from_issue_body(issue.body),
+            contract_path=contract_path,
+            result_path=result_path,
             git_dir=_resolve_git_path(target, "--git-dir"),
             git_common_dir=_resolve_git_path(target, "--git-common-dir"),
             git_top_level=_resolve_git_path(target, "--show-toplevel"),

@@ -141,6 +141,17 @@ def _issue(*, number: int, title: str = "Some task", body: str = "") -> GitHubIs
     )
 
 
+def _bootstrap_body() -> str:
+    return (
+        "## Objective\n\nImplement approved work.\n\n"
+        "## Scope\n\nBootstrap missing execution artifacts.\n\n"
+        "## Out of scope\n\nDo not create an initial PR.\n\n"
+        "## Acceptance criteria\n\n- Branch and contract are created.\n\n"
+        "## Verification commands\n\n- `uv run pytest`\n\n"
+        "## Implementation context\n\nUse WorktreeManager.prepare.\n"
+    )
+
+
 def _pull_request(*, head_ref: str, number: int = 1, issue_number: int = 1) -> PullRequest:
     return PullRequest(
         number=number,
@@ -157,7 +168,7 @@ def _pull_request(*, head_ref: str, number: int = 1, issue_number: int = 1) -> P
 def test_host_prepares_remote_branch_before_agent(tmp_path: Path) -> None:
     repository, origin = _make_operator_repo(tmp_path)
     manager = WorktreeManager(workspace_root=tmp_path / "workspace")
-    issue = _issue(number=12)
+    issue = _issue(number=12, title="Bootstrap execution", body=_bootstrap_body())
 
     # Someone else pushes a new commit to `origin`'s `main` *after* the
     # operator checkout was created - the operator's own local
@@ -188,7 +199,7 @@ def test_job_uses_isolated_worktree(tmp_path: Path) -> None:
         "rev-parse", "--abbrev-ref", "HEAD", cwd=repository.local_path
     ).strip()
     manager = WorktreeManager(workspace_root=tmp_path / "workspace")
-    issue = _issue(number=10)
+    issue = _issue(number=10, title="Bootstrap execution", body=_bootstrap_body())
 
     prepared = manager.prepare(repository, issue, None)
 
@@ -207,12 +218,84 @@ def test_job_uses_isolated_worktree(tmp_path: Path) -> None:
 def test_prepared_workspace_preserves_host_checkout_path(tmp_path: Path) -> None:
     repository, _origin = _make_operator_repo(tmp_path)
     manager = WorktreeManager(workspace_root=tmp_path / "workspace")
-    issue = _issue(number=59)
+    issue = _issue(number=59, title="Bootstrap execution", body=_bootstrap_body())
 
     prepared = manager.prepare(repository, issue, None)
 
     assert prepared.repository.local_path == prepared.worktree_path
     assert prepared.repository.host_checkout_path == repository.local_path
+
+
+def test_ready_issue_without_pr_bootstraps_canonical_branch_and_contract(tmp_path: Path) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(
+        number=119,
+        title="Reduce planner bootstrap responsibilities",
+        body=_bootstrap_body(),
+    )
+
+    prepared = manager.prepare(repository, issue, None)
+
+    assert prepared.branch == "task/119-reduce-planner-bootstrap-responsibilities"
+    assert prepared.pull_request is None
+    assert prepared.contract_path == "tasks/119-reduce-planner-bootstrap-responsibilities.md"
+    assert prepared.result_path == "results/119-reduce-planner-bootstrap-responsibilities.md"
+    assert (prepared.worktree_path / prepared.contract_path).exists()
+    assert "## Acceptance Criteria" in (prepared.worktree_path / prepared.contract_path).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_ready_issue_without_pr_reuses_bootstrapped_worktree_without_duplicate_contract(
+    tmp_path: Path,
+) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(
+        number=119,
+        title="Reduce planner bootstrap responsibilities",
+        body=_bootstrap_body(),
+    )
+
+    first = manager.prepare(repository, issue, None)
+    second = manager.prepare(repository, issue, None)
+
+    assert second.reused is True
+    assert second.worktree_path == first.worktree_path
+    assert second.branch == first.branch
+
+
+def test_ready_issue_without_required_metadata_fails_before_branch_creation(tmp_path: Path) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    issue = _issue(
+        number=119,
+        title="Reduce planner bootstrap responsibilities",
+        body="## Objective\n\nOnly.",
+    )
+
+    with pytest.raises(WorkspacePreparationError) as exc_info:
+        manager.prepare(repository, issue, None)
+
+    assert exc_info.value.category is WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED
+    assert not manager.worktree_path(repository, issue.number).exists()
+
+
+def test_bootstrap_dry_run_reports_plan_without_git_writes(tmp_path: Path) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace", dry_run=True)
+    issue = _issue(
+        number=119,
+        title="Reduce planner bootstrap responsibilities",
+        body=_bootstrap_body(),
+    )
+
+    prepared = manager.prepare(repository, issue, None)
+
+    assert prepared.branch == "task/119-reduce-planner-bootstrap-responsibilities"
+    assert prepared.contract_path == "tasks/119-reduce-planner-bootstrap-responsibilities.md"
+    assert not prepared.worktree_path.exists()
 
 
 # ---- CP-023-4: existing branch reuse ----
@@ -482,7 +565,7 @@ def test_prepared_workspace_contains_planner_contract(tmp_path: Path) -> None:
 def test_failed_job_preserves_worktree_for_recovery(tmp_path: Path) -> None:
     repository, _origin = _make_operator_repo(tmp_path)
     manager = WorktreeManager(workspace_root=tmp_path / "workspace")
-    issue = _issue(number=8)
+    issue = _issue(number=8, title="Recover failed work", body=_bootstrap_body())
 
     prepared = manager.prepare(repository, issue, None)
     (prepared.worktree_path / "leftover.txt").write_text(
@@ -502,7 +585,7 @@ def test_failed_job_preserves_worktree_for_recovery(tmp_path: Path) -> None:
 def test_successful_cleanup_removes_worktree(tmp_path: Path) -> None:
     repository, _origin = _make_operator_repo(tmp_path)
     manager = WorktreeManager(workspace_root=tmp_path / "workspace")
-    issue = _issue(number=9)
+    issue = _issue(number=9, title="Cleanup worktree", body=_bootstrap_body())
     prepared = manager.prepare(repository, issue, None)
     assert prepared.worktree_path.is_dir()
 
@@ -539,7 +622,7 @@ def test_conflicting_dirty_worktree_is_rejected(tmp_path: Path) -> None:
 def test_remote_sync_failure_is_classified(tmp_path: Path) -> None:
     repository, origin = _make_operator_repo(tmp_path)
     manager = WorktreeManager(workspace_root=tmp_path / "workspace")
-    issue = _issue(number=13)
+    issue = _issue(number=13, title="Sync failure", body=_bootstrap_body())
 
     # Origin no longer exists - `git fetch` fails outright.
     import shutil
@@ -612,7 +695,7 @@ def test_workspace_dirty_is_classified(tmp_path: Path) -> None:
     rather than silently handed to the Agent."""
     repository, _origin = _make_operator_repo(tmp_path)
     manager = WorktreeManager(workspace_root=tmp_path / "workspace", is_dirty=lambda path: True)
-    issue = _issue(number=17)
+    issue = _issue(number=17, title="Dirty checkout", body=_bootstrap_body())
 
     with pytest.raises(WorkspacePreparationError) as exc_info:
         manager.prepare(repository, issue, None)

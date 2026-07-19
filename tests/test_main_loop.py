@@ -503,7 +503,14 @@ def test_run_once_exits_with_failure_code_when_agent_returncode_is_nonzero(
         repository="someone/myrepo",
         number=1,
         title="Broken issue",
-        body="",
+        body=(
+            "## Objective\n\nExercise the failing agent path.\n\n"
+            "## Scope\n\nRun the implementer after bootstrap.\n\n"
+            "## Out of scope\n\nDo not test delivery success.\n\n"
+            "## Acceptance criteria\n\n- Agent failure is surfaced.\n\n"
+            "## Verification commands\n\n- `uv run pytest`\n\n"
+            "## Implementation context\n\nThis fixture targets main --once error handling.\n"
+        ),
         state="open",
         labels=("devbot:ready",),
         created_at=datetime(2026, 1, 1),

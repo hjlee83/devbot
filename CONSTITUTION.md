@@ -26,15 +26,22 @@ without explicit approval from the project owner.
 ## 2. Planner boundary
 
 After the project owner approves a design, the Planner converts that approved
-design into GitHub artifacts.
+design into a GitHub Issue with enough specification detail for deterministic
+execution bootstrap.
 
 The Planner owns only:
 
 - one Task Issue;
+- initial labels.
+
+DevBot owns deterministic execution bootstrap after the Issue receives
+`devbot:ready`:
+
 - one Task Branch;
 - one Task Contract;
-- one Pull Request;
-- initial labels and cross-links.
+- one Pull Request, created only by delivery after verified implementation
+  output exists;
+- cross-links and execution evidence.
 
 The Planner does not implement the Task and does not create a separate
 Execution Issue.
@@ -50,8 +57,10 @@ Every Task uses exactly:
 - 1 Task Contract;
 - 1 Pull Request.
 
-All implementation, tests, Result updates, review feedback, and rework continue
-on the same Task Branch and Pull Request.
+The Issue may exist before the Branch, Task Contract, and Pull Request. Once
+DevBot bootstraps or discovers those artifacts, all implementation, tests,
+Result updates, review feedback, and rework continue on the same Task Branch
+and Pull Request.
 
 Duplicate Issues, Branches, Contracts, or Pull Requests for the same Task are
 prohibited unless the project owner explicitly approves an exception.

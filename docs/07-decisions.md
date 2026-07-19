@@ -1,5 +1,24 @@
 # Architecture Decision Log
 
+## 2026-07-20 — DevBot bootstraps branch and contract from ready Issues
+Planner 책임은 승인된 Issue 작성과 `devbot:ready` 적용으로 축소한다. Branch,
+Task Contract, PR을 미리 만들 필요는 없다. DevBot host가 ready Issue를 claim한
+뒤 Issue metadata를 검증하고, `task/<NNN>-<slug>` branch와
+`tasks/<NNN>-<slug>.md` Contract를 결정적으로 만든다. PR은 bootstrap 단계에서
+만들지 않고, 기존 delivery 경로가 검증된 구현 commit 이후에만 생성/갱신한다.
+
+Branch naming은 `devbot.bootstrap.BranchNamingPolicy`가 소유한다. 기존 Planner
+패턴과 같은 `task/NNN-slug` 형식을 유지하며, title slug normalization, 반복
+separator 정리, 길이 제한, collision suffix를 중앙에서 처리한다. 기존
+`devbot.workspace.generate_branch_name()`은 호환 wrapper로 남겨 같은 정책을
+호출한다.
+
+Bootstrap 대상 Issue는 objective, scope, constraints/non-goals, acceptance
+criteria, verification, implementation context를 포함해야 한다. 누락되면
+`bootstrap_validation_failed` workspace preparation failure로 중단하고 Agent를
+실행하지 않는다. dry-run에서는 metadata와 naming plan만 보고하고 Git/GitHub/
+filesystem writes를 수행하지 않는다.
+
 ## 2026-07-18 — Automatic merge is policy-gated and self-modification stays manual
 B2 changes the old "merge is always manual" boundary into a policy gate, not
 an unconditional automation step. A `MERGE READY` review may mark a PR with
@@ -773,4 +792,3 @@ _review` is the one new write method, following the same shape as every other wr
 method in that client (`create_pull_request`, `merge_pull_request`, ...): it owns no
 policy of its own and only transports the caller's already-validated `commit_id`/
 `event`/`body`/`comments`.
-
