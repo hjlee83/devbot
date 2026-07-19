@@ -744,12 +744,40 @@ def test_release_run_dry_run_workflow_strategy(
 
     assert exit_code == 0
     mock_plan.assert_called_once()
-    mock_client.assert_not_called()
+    # Task 051 review fix: planning now performs read-only GitHub calls so
+    # the plan matches what real execution would actually publish - a
+    # GitHubClient (read-only) IS constructed even for dry-run, but never a
+    # GitHubWriteClient.
+    mock_client.assert_called_once()
     mock_write_client.assert_not_called()
     out = capsys.readouterr().out
     assert "target_version: 1.2.4" in out
     assert "publish_route: workflow_publish" in out
     assert "dry-run" in out
+
+
+def test_release_run_dry_run_workflow_reports_recommendation_conflict_blocker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    plan = _run_plan(
+        recommendation_conflict=(
+            "the release increment computed from merged PR history is 'minor', "
+            "not 'patch' as requested via --level"
+        )
+    )
+
+    with patch("devbot.main.build_release_run_plan", return_value=plan):
+        exit_code = main(
+            ["release", "run", "--level", "patch", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "blocker" in out
+    assert "minor" in out
 
 
 def test_release_run_dry_run_direct_strategy_reports_notes_blocker(

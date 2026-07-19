@@ -11,7 +11,7 @@ from devbot.github_write_client import GitHubWriteClient
 from devbot.models import RepositoryConfig
 from devbot.release_classification import ReleaseRecommendation
 from devbot.release_ops import PublishOutcome as WorkflowPublishOutcome
-from devbot.release_ops import ReleaseOpsError
+from devbot.release_ops import ReleaseOpsError, ReleasePreview, ReleaseReadiness, ReleaseStatus
 from devbot.release_orchestration import (
     MissingDirectReleaseNotesError,
     NoReleaseRequiredError,
@@ -119,6 +119,36 @@ def _fake_write_client() -> MagicMock:
     return client
 
 
+def _release_status(**overrides: object) -> ReleaseStatus:
+    defaults: dict[str, object] = dict(
+        latest_stable_version="1.2.3",
+        latest_release_url=None,
+        latest_release_published_at=None,
+        last_published_commit=None,
+        latest_workflow_run=None,
+        publication_state="up-to-date",
+    )
+    defaults.update(overrides)
+    return ReleaseStatus(**defaults)  # type: ignore[arg-type]
+
+
+def _release_preview(**overrides: object) -> ReleasePreview:
+    defaults: dict[str, object] = dict(
+        previous_version="1.2.3",
+        next_version="1.2.4",
+        increment="patch",
+        target_commit="deadbeef",
+        target_commit_validated=True,
+        previous_release_commit="cafef00d",
+        readiness=ReleaseReadiness(ready=True, blockers=()),
+        expected_assets=(),
+        changes=(),
+        notes="notes",
+    )
+    defaults.update(overrides)
+    return ReleasePreview(**defaults)  # type: ignore[arg-type]
+
+
 def _preparation_result(**overrides: object) -> ReleasePreparationResult:
     defaults: dict[str, object] = dict(
         recommendation=ReleaseRecommendation.MINOR,
@@ -146,109 +176,161 @@ def _workflow_outcome(**overrides: object) -> WorkflowPublishOutcome:
     defaults: dict[str, object] = dict(
         preview=MagicMock(),
         workflow_run=MagicMock(html_url="https://example.invalid/actions/runs/1"),
-        release_url="https://example.invalid/releases/tag/v1.3.0",
-        tag="v1.3.0",
+        release_url="https://example.invalid/releases/tag/v1.2.4",
+        tag="v1.2.4",
         validated_assets=("SHA256SUMS",),
     )
     defaults.update(overrides)
     return WorkflowPublishOutcome(**defaults)  # type: ignore[arg-type]
 
 
+_OPS = "devbot.release_orchestration"
+
+
 # --------------------------------------------------------------------------
-# build_release_run_plan: pure, read-only, no GitHub, no writes.
+# build_release_run_plan: read-only (no writes), but now performs read-only
+# GitHub calls so the plan is anchored to the latest published release
+# rather than to mutable local file content - see the module docstring.
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("recommendation", "expected_target"),
-    [
-        (ReleaseRecommendation.MAJOR, "2.0.0"),
-        (ReleaseRecommendation.MINOR, "1.3.0"),
-        (ReleaseRecommendation.PATCH, "1.2.4"),
-    ],
-)
-def test_plan_construction_for_each_recommendation(
-    tmp_path: Path, recommendation: ReleaseRecommendation, expected_target: str
-) -> None:
-    _write_project(tmp_path, version="1.2.3")
-    repository = _repository(tmp_path)
-
-    plan = build_release_run_plan(repository, recommendation, local_checkout_path=tmp_path)
-
-    assert plan.current_version == "1.2.3"
-    assert plan.target_version == expected_target
-    assert plan.recommendation is recommendation
-    assert plan.preparation_required is True
 
 
 def test_plan_none_recommendation_raises_before_touching_filesystem(tmp_path: Path) -> None:
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path / "does-not-exist")
 
     with pytest.raises(NoReleaseRequiredError) as excinfo:
         build_release_run_plan(
-            repository, ReleaseRecommendation.NONE, local_checkout_path=tmp_path / "does-not-exist"
+            github_client,
+            repository,
+            ReleaseRecommendation.NONE,
+            local_checkout_path=tmp_path / "does-not-exist",
         )
 
     assert excinfo.value.stage is ReleaseRunStage.RECOMMENDATION
 
 
-def test_plan_workflow_route_when_strategy_omitted(tmp_path: Path) -> None:
+def test_plan_workflow_route_sources_versions_from_preview(tmp_path: Path) -> None:
     _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path)
+    preview = _release_preview(previous_version="1.2.3", next_version="1.2.4", increment="patch")
 
-    plan = build_release_run_plan(
-        repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+    with patch(f"{_OPS}.fetch_release_preview", return_value=preview):
+        plan = build_release_run_plan(
+            github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+        )
+
+    assert plan.current_version == "1.2.3"
+    assert plan.target_version == "1.2.4"
+    assert plan.publish_route is ReleaseRunStage.WORKFLOW_PUBLISH
+    assert plan.recommendation_conflict is None
+
+
+def test_plan_workflow_route_reports_mismatched_increment_as_blocker(tmp_path: Path) -> None:
+    _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
+    repository = _repository(tmp_path)
+    preview = _release_preview(next_version="1.3.0", increment="minor")
+
+    with patch(f"{_OPS}.fetch_release_preview", return_value=preview):
+        plan = build_release_run_plan(
+            github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+        )
+
+    assert plan.recommendation_conflict is not None
+    assert "minor" in plan.recommendation_conflict
+    assert "patch" in plan.recommendation_conflict
+
+
+def test_plan_workflow_route_reports_no_eligible_increment_as_blocker(tmp_path: Path) -> None:
+    _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
+    repository = _repository(tmp_path)
+    preview = _release_preview(
+        increment=None, readiness=ReleaseReadiness(ready=False, blockers=("no eligible PRs",))
     )
 
-    assert plan.publish_route is ReleaseRunStage.WORKFLOW_PUBLISH
-    assert plan.effective_strategy.value == "workflow"
+    with patch(f"{_OPS}.fetch_release_preview", return_value=preview):
+        plan = build_release_run_plan(
+            github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+        )
+
+    assert plan.recommendation_conflict is not None
+    assert "no eligible" in plan.recommendation_conflict
 
 
-def test_plan_direct_route_when_strategy_direct(tmp_path: Path) -> None:
+def test_plan_direct_route_sources_versions_from_github_baseline(tmp_path: Path) -> None:
     _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path, publish_strategy="direct")
 
-    plan = build_release_run_plan(
-        repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
-    )
+    with patch(f"{_OPS}.build_release_status", return_value=_release_status()):
+        plan = build_release_run_plan(
+            github_client, repository, ReleaseRecommendation.MINOR, local_checkout_path=tmp_path
+        )
 
+    assert plan.current_version == "1.2.3"
+    assert plan.target_version == "1.3.0"
     assert plan.publish_route is ReleaseRunStage.DIRECT_PUBLISH
 
 
-def test_plan_direct_notes_available_true_with_notes(tmp_path: Path) -> None:
+def test_plan_direct_route_baseline_defaults_when_no_prior_release(tmp_path: Path) -> None:
     _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path, publish_strategy="direct")
 
-    plan = build_release_run_plan(
-        repository, ReleaseRecommendation.PATCH, notes="notes", local_checkout_path=tmp_path
-    )
+    status = _release_status(latest_stable_version=None)
+    with patch(f"{_OPS}.build_release_status", return_value=status):
+        plan = build_release_run_plan(
+            github_client, repository, ReleaseRecommendation.MAJOR, local_checkout_path=tmp_path
+        )
 
-    assert plan.direct_notes_available is True
+    assert plan.current_version == "0.0.0"
+    assert plan.target_version == "1.0.0"
 
 
-@pytest.mark.parametrize("notes", [None, "", "   "])
-def test_plan_direct_notes_available_false_reported_not_raised(
-    tmp_path: Path, notes: str | None
+def test_plan_direct_route_preparation_required_true_when_not_yet_prepared(
+    tmp_path: Path,
 ) -> None:
-    _write_project(tmp_path)
+    _write_project(tmp_path, version="1.2.3")
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path, publish_strategy="direct")
 
-    # Dry-run reports missing notes as a blocker rather than refusing to
-    # build a plan at all.
-    plan = build_release_run_plan(
-        repository, ReleaseRecommendation.PATCH, notes=notes, local_checkout_path=tmp_path
-    )
+    with patch(f"{_OPS}.build_release_status", return_value=_release_status()):
+        plan = build_release_run_plan(
+            github_client, repository, ReleaseRecommendation.MINOR, local_checkout_path=tmp_path
+        )
 
-    assert plan.direct_notes_available is False
+    assert plan.preparation_required is True
+
+
+def test_plan_direct_route_preparation_required_false_when_already_prepared(
+    tmp_path: Path,
+) -> None:
+    # Local files already hold the target version, and this directory is
+    # not a Git checkout at all - `local_checkout_is_dirty` returns `None`
+    # (not a blocker) for that case, so this exercises the version-match
+    # half of the "already prepared" check in isolation.
+    _write_project(tmp_path, version="1.3.0")
+    github_client = MagicMock(spec=GitHubClient)
+    repository = _repository(tmp_path, publish_strategy="direct")
+
+    with patch(f"{_OPS}.build_release_status", return_value=_release_status()):
+        plan = build_release_run_plan(
+            github_client, repository, ReleaseRecommendation.MINOR, local_checkout_path=tmp_path
+        )
+
+    assert plan.preparation_required is False
 
 
 def test_plan_invalid_strategy_wraps_as_stage_error(tmp_path: Path) -> None:
     _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path, publish_strategy="bogus")
 
     with pytest.raises(ReleaseRunStageError) as excinfo:
         build_release_run_plan(
-            repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+            github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
         )
 
     assert excinfo.value.stage is ReleaseRunStage.STRATEGY_RESOLUTION
@@ -265,11 +347,12 @@ def test_plan_preparation_mismatch_wraps_as_stage_error(tmp_path: Path) -> None:
         'source = { editable = "." }\n',
         encoding="utf-8",
     )
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path)
 
     with pytest.raises(ReleaseRunStageError) as excinfo:
         build_release_run_plan(
-            repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+            github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
         )
 
     assert excinfo.value.stage is ReleaseRunStage.PREPARATION
@@ -286,15 +369,85 @@ def test_plan_malformed_version_wraps_as_stage_error(tmp_path: Path) -> None:
         'source = { editable = "." }\n',
         encoding="utf-8",
     )
+    github_client = MagicMock(spec=GitHubClient)
     repository = _repository(tmp_path)
 
     with pytest.raises(ReleaseRunStageError) as excinfo:
         build_release_run_plan(
-            repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+            github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
         )
 
     assert excinfo.value.stage is ReleaseRunStage.PREPARATION
     assert isinstance(excinfo.value.__cause__, MalformedProjectVersionError)
+
+
+def test_plan_workflow_route_github_error_wraps_as_stage_error(tmp_path: Path) -> None:
+    from devbot.github_client import GitHubAPIError
+
+    _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
+    repository = _repository(tmp_path)
+
+    with patch(f"{_OPS}.fetch_release_preview", side_effect=GitHubAPIError("boom")):
+        with pytest.raises(ReleaseRunStageError) as excinfo:
+            build_release_run_plan(
+                github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+            )
+
+    assert excinfo.value.stage is ReleaseRunStage.WORKFLOW_PUBLISH
+
+
+def test_plan_direct_route_github_error_wraps_as_stage_error(tmp_path: Path) -> None:
+    from devbot.github_client import GitHubAPIError
+
+    _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
+    repository = _repository(tmp_path, publish_strategy="direct")
+
+    with patch(f"{_OPS}.build_release_status", side_effect=GitHubAPIError("boom")):
+        with pytest.raises(ReleaseRunStageError) as excinfo:
+            build_release_run_plan(
+                github_client, repository, ReleaseRecommendation.PATCH, local_checkout_path=tmp_path
+            )
+
+    assert excinfo.value.stage is ReleaseRunStage.DIRECT_PUBLISH
+
+
+@pytest.mark.parametrize("notes", [None, "", "   "])
+def test_plan_direct_notes_available_false_reported_not_raised(
+    tmp_path: Path, notes: str | None
+) -> None:
+    _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
+    repository = _repository(tmp_path, publish_strategy="direct")
+
+    with patch(f"{_OPS}.build_release_status", return_value=_release_status()):
+        plan = build_release_run_plan(
+            github_client,
+            repository,
+            ReleaseRecommendation.PATCH,
+            notes=notes,
+            local_checkout_path=tmp_path,
+        )
+
+    assert plan.direct_notes_available is False
+
+
+def test_plan_direct_notes_available_true_with_notes(tmp_path: Path) -> None:
+    _write_project(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
+    repository = _repository(tmp_path, publish_strategy="direct")
+
+    with patch(f"{_OPS}.build_release_status", return_value=_release_status()):
+        plan = build_release_run_plan(
+            github_client,
+            repository,
+            ReleaseRecommendation.PATCH,
+            notes="notes",
+            local_checkout_path=tmp_path,
+        )
+
+    assert plan.direct_notes_available is True
 
 
 # --------------------------------------------------------------------------
@@ -309,9 +462,9 @@ def test_run_release_none_recommendation_calls_nothing(tmp_path: Path) -> None:
     write_client = MagicMock(spec=GitHubWriteClient)
 
     with (
-        patch("devbot.release_orchestration.prepare_release") as mock_prepare,
-        patch("devbot.release_orchestration.publish_release") as mock_workflow,
-        patch("devbot.release_orchestration.publish_prepared_release") as mock_direct,
+        patch(f"{_OPS}.prepare_release") as mock_prepare,
+        patch(f"{_OPS}.publish_release") as mock_workflow,
+        patch(f"{_OPS}.publish_prepared_release") as mock_direct,
     ):
         with pytest.raises(NoReleaseRequiredError):
             run_release(
@@ -333,7 +486,10 @@ def test_run_release_missing_direct_notes_raises_before_preparation(tmp_path: Pa
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
 
-    with patch("devbot.release_orchestration.prepare_release") as mock_prepare:
+    with (
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.prepare_release") as mock_prepare,
+    ):
         with pytest.raises(MissingDirectReleaseNotesError) as excinfo:
             run_release(
                 github_client,
@@ -348,17 +504,20 @@ def test_run_release_missing_direct_notes_raises_before_preparation(tmp_path: Pa
     mock_prepare.assert_not_called()
 
 
-def test_run_release_workflow_route_success(tmp_path: Path) -> None:
+def test_run_release_workflow_route_success_calls_prepare_and_publish(tmp_path: Path) -> None:
     _write_project(tmp_path)
     repository = _repository(tmp_path)
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
+    preview = _release_preview(increment="patch")
     outcome = _workflow_outcome()
+    prep_result = _preparation_result(old_version="1.2.3", new_version="1.2.4")
 
     with (
-        patch("devbot.release_orchestration.publish_release", return_value=outcome) as mock_wf,
-        patch("devbot.release_orchestration.prepare_release") as mock_prepare,
-        patch("devbot.release_orchestration.publish_prepared_release") as mock_direct,
+        patch(f"{_OPS}.fetch_release_preview", return_value=preview),
+        patch(f"{_OPS}.prepare_release", return_value=prep_result) as mock_prepare,
+        patch(f"{_OPS}.publish_release", return_value=outcome) as mock_wf,
+        patch(f"{_OPS}.publish_prepared_release") as mock_direct,
     ):
         result = run_release(
             github_client,
@@ -370,31 +529,37 @@ def test_run_release_workflow_route_success(tmp_path: Path) -> None:
 
     assert result.outcome is ReleaseRunOutcome.WORKFLOW_PUBLISHED
     assert result.workflow_outcome is outcome
-    assert result.preparation is None
+    assert result.preparation is prep_result
+    mock_prepare.assert_called_once()
     mock_wf.assert_called_once()
-    mock_prepare.assert_not_called()
+    assert mock_wf.call_args.kwargs["preview"] is preview
     mock_direct.assert_not_called()
 
 
-def test_run_release_workflow_route_never_writes_local_files(tmp_path: Path) -> None:
+def test_run_release_workflow_route_conflict_refuses_before_any_write(tmp_path: Path) -> None:
     _write_project(tmp_path)
-    before = (tmp_path / "pyproject.toml").read_text()
     repository = _repository(tmp_path)
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
+    preview = _release_preview(next_version="1.3.0", increment="minor")
 
-    with patch(
-        "devbot.release_orchestration.publish_release", return_value=_workflow_outcome()
+    with (
+        patch(f"{_OPS}.fetch_release_preview", return_value=preview),
+        patch(f"{_OPS}.prepare_release") as mock_prepare,
+        patch(f"{_OPS}.publish_release") as mock_wf,
     ):
-        run_release(
-            github_client,
-            write_client,
-            repository,
-            ReleaseRecommendation.PATCH,
-            local_checkout_path=tmp_path,
-        )
+        with pytest.raises(ReleaseRunStageError) as excinfo:
+            run_release(
+                github_client,
+                write_client,
+                repository,
+                ReleaseRecommendation.PATCH,
+                local_checkout_path=tmp_path,
+            )
 
-    assert (tmp_path / "pyproject.toml").read_text() == before
+    assert excinfo.value.stage is ReleaseRunStage.WORKFLOW_PUBLISH
+    mock_prepare.assert_not_called()
+    mock_wf.assert_not_called()
 
 
 def test_run_release_workflow_route_failure_wraps_stage(tmp_path: Path) -> None:
@@ -402,9 +567,14 @@ def test_run_release_workflow_route_failure_wraps_stage(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
+    preview = _release_preview(increment="patch")
     original = ReleaseOpsError("main is dirty")
 
-    with patch("devbot.release_orchestration.publish_release", side_effect=original):
+    with (
+        patch(f"{_OPS}.fetch_release_preview", return_value=preview),
+        patch(f"{_OPS}.prepare_release", return_value=_preparation_result()),
+        patch(f"{_OPS}.publish_release", side_effect=original),
+    ):
         with pytest.raises(ReleaseRunStageError) as excinfo:
             run_release(
                 github_client,
@@ -418,22 +588,21 @@ def test_run_release_workflow_route_failure_wraps_stage(tmp_path: Path) -> None:
     assert excinfo.value.__cause__ is original
 
 
-def test_run_release_direct_route_success(tmp_path: Path) -> None:
-    _write_project(tmp_path)
+def test_run_release_direct_route_already_prepared_skips_prepare_and_publishes(
+    tmp_path: Path,
+) -> None:
+    _write_project(tmp_path, version="1.3.0")
     repository = _repository(tmp_path, publish_strategy="direct")
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
-    prep_result = _preparation_result()
-    direct_result = _direct_result()
+    direct_result = _direct_result(tag="v1.3.0")
 
     with (
-        patch(
-            "devbot.release_orchestration.prepare_release", return_value=prep_result
-        ) as mock_prepare,
-        patch(
-            "devbot.release_orchestration.publish_prepared_release", return_value=direct_result
-        ) as mock_direct,
-        patch("devbot.release_orchestration.publish_release") as mock_workflow,
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.local_checkout_is_dirty", return_value=False),
+        patch(f"{_OPS}.prepare_release") as mock_prepare,
+        patch(f"{_OPS}.publish_prepared_release", return_value=direct_result) as mock_direct,
+        patch(f"{_OPS}.publish_release") as mock_workflow,
     ):
         result = run_release(
             github_client,
@@ -445,29 +614,26 @@ def test_run_release_direct_route_success(tmp_path: Path) -> None:
         )
 
     assert result.outcome is ReleaseRunOutcome.DIRECT_PUBLISHED
+    assert result.preparation is None
     assert result.direct_result is direct_result
-    assert result.preparation is prep_result
-    mock_prepare.assert_called_once()
+    mock_prepare.assert_not_called()
     mock_direct.assert_called_once()
     mock_workflow.assert_not_called()
 
 
-@pytest.mark.parametrize("failure", [DirtyWorktreeError("dirty"), StaleMainError("stale")])
-def test_run_release_direct_route_reports_prepared_pending_commit(
-    tmp_path: Path, failure: Exception
-) -> None:
-    _write_project(tmp_path)
+def test_run_release_direct_route_not_yet_prepared_calls_prepare_once(tmp_path: Path) -> None:
+    _write_project(tmp_path, version="1.2.3")
     repository = _repository(tmp_path, publish_strategy="direct")
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
-    prep_result = _preparation_result()
+    prep_result = _preparation_result(old_version="1.2.3", new_version="1.3.0")
 
     with (
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.local_checkout_is_dirty", return_value=False),
+        patch(f"{_OPS}.prepare_release", return_value=prep_result) as mock_prepare,
         patch(
-            "devbot.release_orchestration.prepare_release", return_value=prep_result
-        ) as mock_prepare,
-        patch(
-            "devbot.release_orchestration.publish_prepared_release", side_effect=failure
+            f"{_OPS}.publish_prepared_release", side_effect=DirtyWorktreeError("dirty")
         ) as mock_direct,
     ):
         result = run_release(
@@ -481,24 +647,49 @@ def test_run_release_direct_route_reports_prepared_pending_commit(
 
     assert result.outcome is ReleaseRunOutcome.PREPARED_PENDING_COMMIT
     assert result.preparation is prep_result
-    assert result.direct_result is None
     mock_prepare.assert_called_once()
     mock_direct.assert_called_once()
     write_client.create_release.assert_not_called()
 
 
+def test_run_release_direct_route_stale_main_reports_prepared_pending_commit(
+    tmp_path: Path,
+) -> None:
+    _write_project(tmp_path, version="1.2.3")
+    repository = _repository(tmp_path, publish_strategy="direct")
+    github_client = MagicMock(spec=GitHubClient)
+    write_client = MagicMock(spec=GitHubWriteClient)
+
+    with (
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.local_checkout_is_dirty", return_value=False),
+        patch(f"{_OPS}.prepare_release", return_value=_preparation_result()),
+        patch(f"{_OPS}.publish_prepared_release", side_effect=StaleMainError("stale")),
+    ):
+        result = run_release(
+            github_client,
+            write_client,
+            repository,
+            ReleaseRecommendation.MINOR,
+            notes="some notes",
+            local_checkout_path=tmp_path,
+        )
+
+    assert result.outcome is ReleaseRunOutcome.PREPARED_PENDING_COMMIT
+
+
 def test_run_release_direct_route_other_failure_wraps_stage(tmp_path: Path) -> None:
-    _write_project(tmp_path)
+    _write_project(tmp_path, version="1.3.0")
     repository = _repository(tmp_path, publish_strategy="direct")
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
     original = ConflictingTagError("tag points elsewhere")
 
     with (
-        patch(
-            "devbot.release_orchestration.prepare_release", return_value=_preparation_result()
-        ),
-        patch("devbot.release_orchestration.publish_prepared_release", side_effect=original),
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.local_checkout_is_dirty", return_value=False),
+        patch(f"{_OPS}.prepare_release") as mock_prepare,
+        patch(f"{_OPS}.publish_prepared_release", side_effect=original),
     ):
         with pytest.raises(ReleaseRunStageError) as excinfo:
             run_release(
@@ -512,20 +703,55 @@ def test_run_release_direct_route_other_failure_wraps_stage(tmp_path: Path) -> N
 
     assert excinfo.value.stage is ReleaseRunStage.DIRECT_PUBLISH
     assert excinfo.value.__cause__ is original
+    mock_prepare.assert_not_called()
 
 
-def test_run_release_no_publish_when_preparation_fails(tmp_path: Path) -> None:
-    _write_project(tmp_path)
+def test_run_release_direct_route_inconsistent_local_state_wraps_stage_error(
+    tmp_path: Path,
+) -> None:
+    # `prepare_release` (mocked) returns a version other than the plan's
+    # GitHub-anchored target - simulating a stale/abandoned local checkout
+    # inconsistent with the plan. Must fail closed rather than publish a
+    # different version than the plan promised.
+    _write_project(tmp_path, version="1.2.3")
     repository = _repository(tmp_path, publish_strategy="direct")
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
 
     with (
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.local_checkout_is_dirty", return_value=False),
         patch(
-            "devbot.release_orchestration.prepare_release",
-            side_effect=VersionSourceMismatchError("mismatch"),
+            f"{_OPS}.prepare_release",
+            return_value=_preparation_result(old_version="1.2.3", new_version="1.4.0"),
         ),
-        patch("devbot.release_orchestration.publish_prepared_release") as mock_direct,
+        patch(f"{_OPS}.publish_prepared_release") as mock_direct,
+    ):
+        with pytest.raises(ReleaseRunStageError) as excinfo:
+            run_release(
+                github_client,
+                write_client,
+                repository,
+                ReleaseRecommendation.MINOR,
+                notes="some notes",
+                local_checkout_path=tmp_path,
+            )
+
+    assert excinfo.value.stage is ReleaseRunStage.PREPARATION
+    mock_direct.assert_not_called()
+
+
+def test_run_release_no_publish_when_preparation_fails(tmp_path: Path) -> None:
+    _write_project(tmp_path, version="1.2.3")
+    repository = _repository(tmp_path, publish_strategy="direct")
+    github_client = MagicMock(spec=GitHubClient)
+    write_client = MagicMock(spec=GitHubWriteClient)
+
+    with (
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.local_checkout_is_dirty", return_value=False),
+        patch(f"{_OPS}.prepare_release", side_effect=VersionSourceMismatchError("mismatch")),
+        patch(f"{_OPS}.publish_prepared_release") as mock_direct,
     ):
         with pytest.raises(ReleaseRunStageError) as excinfo:
             run_release(
@@ -542,26 +768,26 @@ def test_run_release_no_publish_when_preparation_fails(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("strategy", ["workflow", "direct"])
-def test_run_release_exactly_one_publish_route_ever_called(
-    tmp_path: Path, strategy: str
-) -> None:
-    _write_project(tmp_path)
+def test_run_release_exactly_one_publish_route_ever_called(tmp_path: Path, strategy: str) -> None:
+    _write_project(tmp_path, version="1.2.3")
     repository = _repository(
         tmp_path, publish_strategy=None if strategy == "workflow" else strategy
     )
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
+    preview = _release_preview(previous_version="1.2.3", next_version="1.2.4", increment="patch")
 
     with (
+        patch(f"{_OPS}.fetch_release_preview", return_value=preview),
+        patch(f"{_OPS}.build_release_status", return_value=_release_status()),
+        patch(f"{_OPS}.local_checkout_is_dirty", return_value=False),
         patch(
-            "devbot.release_orchestration.publish_release", return_value=_workflow_outcome()
-        ) as mock_workflow,
-        patch(
-            "devbot.release_orchestration.prepare_release", return_value=_preparation_result()
+            f"{_OPS}.prepare_release",
+            return_value=_preparation_result(old_version="1.2.3", new_version="1.2.4"),
         ),
+        patch(f"{_OPS}.publish_release", return_value=_workflow_outcome()) as mock_workflow,
         patch(
-            "devbot.release_orchestration.publish_prepared_release",
-            return_value=_direct_result(),
+            f"{_OPS}.publish_prepared_release", return_value=_direct_result()
         ) as mock_direct,
     ):
         run_release(
@@ -583,85 +809,115 @@ def test_run_release_exactly_one_publish_route_ever_called(
 
 # --------------------------------------------------------------------------
 # Real end-to-end: a genuine throwaway Git repo + throwaway bare remote,
-# GitHub API fully mocked. Proves the actual safety behaviour discovered
-# while designing this module - see release_orchestration.py's module
-# docstring.
+# GitHub API fully mocked. Proves both reviewer-flagged behaviours for
+# real: the workflow route's `--level` actually governs what would be
+# dispatched, and the direct route genuinely reaches `DIRECT_PUBLISHED` on
+# a second real invocation, without double-bumping.
 # --------------------------------------------------------------------------
 
 
-def test_run_release_direct_route_real_prepare_never_publishes_prematurely(
+def test_run_release_direct_route_real_resume_reaches_direct_published_without_double_bump(
     tmp_path: Path,
 ) -> None:
     local = _init_repo_with_remote(tmp_path, version="1.2.3")
-    main_sha = _rev_parse(local, "main")
     repository = _repository(local, publish_strategy="direct")
-    github_client = _fake_github_client({"main": main_sha})
     write_client = _fake_write_client()
+    status = _release_status()
 
-    result = run_release(
-        github_client,
-        write_client,
-        repository,
-        ReleaseRecommendation.MINOR,
-        notes="some notes",
-        local_checkout_path=local,
-    )
+    # First real invocation: nothing published yet, checkout starts clean.
+    main_sha = _rev_parse(local, "main")
+    github_client_1 = _fake_github_client({"main": main_sha})
+    with patch(f"{_OPS}.build_release_status", return_value=status):
+        result_1 = run_release(
+            github_client_1,
+            write_client,
+            repository,
+            ReleaseRecommendation.MINOR,
+            notes="some notes",
+            local_checkout_path=local,
+        )
 
-    # Regression test for the bug found while designing this module: an
-    # earlier "attempt publish, then prepare on failure" ordering would
-    # publish the CURRENT (un-bumped) 1.2.3 as-is, silently ignoring
-    # `recommendation` entirely, whenever the checkout started clean.
-    assert result.outcome is ReleaseRunOutcome.PREPARED_PENDING_COMMIT
-    assert result.preparation is not None
-    assert result.preparation.old_version == "1.2.3"
-    assert result.preparation.new_version == "1.3.0"
+    assert result_1.outcome is ReleaseRunOutcome.PREPARED_PENDING_COMMIT
+    assert result_1.preparation.new_version == "1.3.0"
     write_client.create_release.assert_not_called()
-    assert "1.3.0" in (local / "pyproject.toml").read_text()
+
+    # Operator commits and pushes the prepared files out of band.
+    _run(local, "add", "-A")
+    _run(local, "commit", "-q", "-m", "chore: prepare 1.3.0")
+    _run(local, "push", "-q", "origin", "main")
+
+    # Second real invocation, same --level: `status` is unchanged (mocked
+    # statically, matching reality since no GitHub Release was actually
+    # created yet), so the plan's target is unchanged too - the checkout
+    # now matches it exactly, so this completes publication for real,
+    # without recomputing a further bump.
+    new_main_sha = _rev_parse(local, "main")
+    github_client_2 = _fake_github_client({"main": new_main_sha})
+    with patch(f"{_OPS}.build_release_status", return_value=status):
+        plan_2 = build_release_run_plan(
+            github_client_2,
+            repository,
+            ReleaseRecommendation.MINOR,
+            notes="some notes",
+            local_checkout_path=local,
+        )
+        assert plan_2.target_version == "1.3.0"
+        assert plan_2.preparation_required is False
+
+        result_2 = run_release(
+            github_client_2,
+            write_client,
+            repository,
+            ReleaseRecommendation.MINOR,
+            notes="some notes",
+            local_checkout_path=local,
+        )
+
+    assert result_2.outcome is ReleaseRunOutcome.DIRECT_PUBLISHED
+    assert result_2.preparation is None
+    assert result_2.direct_result.tag == "v1.3.0"
+    write_client.create_release.assert_called_once()
 
 
-def test_run_release_direct_route_real_prepare_leaves_checkout_dirty(tmp_path: Path) -> None:
-    local = _init_repo_with_remote(tmp_path, version="1.2.3")
-    main_sha = _rev_parse(local, "main")
-    repository = _repository(local, publish_strategy="direct")
-    github_client = _fake_github_client({"main": main_sha})
-    write_client = _fake_write_client()
-
-    run_release(
-        github_client,
-        write_client,
-        repository,
-        ReleaseRecommendation.PATCH,
-        notes="some notes",
-        local_checkout_path=local,
-    )
-
-    status = _run(local, "status", "--porcelain").stdout
-    assert "pyproject.toml" in status
-    assert "uv.lock" in status
-
-
-def test_run_release_workflow_route_real_repo_leaves_files_untouched(tmp_path: Path) -> None:
+def test_run_release_workflow_route_real_repo_recommendation_governs_dispatch(
+    tmp_path: Path,
+) -> None:
     local = _init_repo_with_remote(tmp_path, version="1.2.3")
     before = (local / "pyproject.toml").read_text()
     repository = _repository(local)
     github_client = MagicMock(spec=GitHubClient)
     write_client = MagicMock(spec=GitHubWriteClient)
+    preview = _release_preview(previous_version="1.2.3", next_version="1.3.0", increment="minor")
 
-    with patch(
-        "devbot.release_orchestration.publish_release", return_value=_workflow_outcome()
+    # Requesting patch when the real computed increment is minor must
+    # refuse before any write - proves `--level` is not silently ignored.
+    with patch(f"{_OPS}.fetch_release_preview", return_value=preview):
+        with pytest.raises(ReleaseRunStageError) as excinfo:
+            run_release(
+                github_client,
+                write_client,
+                repository,
+                ReleaseRecommendation.PATCH,
+                local_checkout_path=local,
+            )
+    assert excinfo.value.stage is ReleaseRunStage.WORKFLOW_PUBLISH
+    assert (local / "pyproject.toml").read_text() == before
+
+    # Requesting minor (matching) succeeds and does dispatch.
+    with (
+        patch(f"{_OPS}.fetch_release_preview", return_value=preview),
+        patch(f"{_OPS}.publish_release", return_value=_workflow_outcome()) as mock_publish,
     ):
         result = run_release(
             github_client,
             write_client,
             repository,
-            ReleaseRecommendation.PATCH,
+            ReleaseRecommendation.MINOR,
             local_checkout_path=local,
         )
-
     assert result.outcome is ReleaseRunOutcome.WORKFLOW_PUBLISHED
-    assert (local / "pyproject.toml").read_text() == before
-    status = _run(local, "status", "--porcelain").stdout
-    assert status == ""
+    mock_publish.assert_called_once()
+    assert mock_publish.call_args.kwargs["preview"] is preview
 
 
 # --------------------------------------------------------------------------

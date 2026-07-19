@@ -537,72 +537,84 @@ merge the two publish commands into one, and does not remove either existing pat
 `devbot release publish` and `devbot release publish-prepared` both remain, gated so that
 only one is ever valid per repository.
 
-## 2026-07-19 — `devbot release run` composes existing modules; the direct route deliberately cannot always finish in one call (Task 051)
+## 2026-07-19 — `devbot release run`'s plan is anchored to the latest published Release, not to local file content, for both routes (Task 051)
 
-Task 051 (`src/devbot/release_orchestration.py`) adds one command,
-`devbot release run --level major|minor|patch|none`, that wires Task 047's
-`ReleaseRecommendation`, Task 048's `plan_release_preparation`/`prepare_release`,
-Task 050's `resolve_release_publish_strategy`, and exactly one of Task 037's
-`publish_release` or Task 049's `publish_prepared_release` into one operator-facing
-sequence - without reimplementing any of their policy or safety logic. This entry
-records a real structural conflict discovered while implementing it, and the
-deliberate, discussed choice made to resolve it without adding a new capability.
+Task 051 (`src/devbot/release_orchestration.py`) adds `devbot release run --level
+major|minor|patch|none`, composing Task 047's `ReleaseRecommendation`, Task 048's
+preparation, Task 050's strategy resolution, and exactly one of Task 037's or Task 049's
+publish paths. The first implementation (PR #108) was reviewed and found to have two
+real correctness gaps; both were fixed on the same PR, and this entry replaces the
+original 2026-07-19 Task 051 entry with the design that actually shipped.
 
-**The conflict: chaining "prepare, then publish" in one process can never complete for
-the direct route, given the existing safety boundaries.** Task 049's own design
-principle - "`pyproject.toml`/`uv.lock` are read-only from Task 049's perspective" (see
-the 2026-07-19 Task 049 entry above) - means `preview_release_publish`/
-`publish_prepared_release` always refuse on an uncommitted local change
-(`DirtyWorktreeError`) or a `main` that hasn't been pushed to the version those files
-declare (`StaleMainError`). Task 048's `prepare_release()` necessarily leaves the
-checkout with exactly those two files modified and uncommitted -
-`old_version != new_version` always, for every recommendation this task accepts. There
-is no way to call `prepare_release()` and then immediately publish through the direct
-path without that publish attempt raising `DirtyWorktreeError`, and no way to bypass
-it - unlike the workflow route, `publish_prepared_release` has no "already-computed
-preview" injection point to sidestep a fresh dirty-check.
+**Gap 1: the workflow route silently ignored `--level`.** The original implementation
+skipped Task 048 preparation entirely for the workflow route and dispatched through
+Task 037 unchanged - but Task 037 independently computes its own release increment from
+merged PR labels since the last stable Release (`fetch_release_preview`), never reading
+`--level` at all. `devbot release run --level patch` could therefore publish a `minor`
+or `major` increment, or refuse, regardless of what the operator asked for - and the
+rendered dry-run plan, computed from Task 048's local-file logic, had no way to reflect
+that divergence. **Fix:** `build_release_run_plan` now fetches the same
+`ReleasePreview` the workflow route would actually dispatch, and reports the plan's
+`current_version`/`target_version` from `preview.previous_version`/`preview.next_version`
+- what Task 037 will actually publish, not what a local version bump would compute. If
+`preview.increment` does not match the requested `recommendation`, `recommendation
+_conflict` is set: dry-run reports it as a blocker, real execution
+(`run_release`) refuses before any write. `prepare_release()` is now also called
+(exactly once) for the workflow route, satisfying the Specification's "Task 048
+preparation exactly once" literally for both routes, even though Task 037 never
+consumes the written files.
 
-**An early design attempt (publish first, prepare only as a fallback) was tried,
-found to have a real correctness bug via a throwaway-repo smoke test, and discarded.**
-Attempting `publish_prepared_release` before `prepare_release` "succeeds" whenever the
-checkout happens to start clean - but it then silently publishes whatever *un-bumped*
-version is currently committed, ignoring `recommendation` entirely. `run_release`
-therefore always calls `prepare_release()` before ever attempting a direct publish;
-regression test `test_run_release_direct_route_real_prepare_never_publishes_prematurely`
-(`tests/test_release_orchestration.py`) exercises this exact scenario against a real
-throwaway Git repo and pins the fix.
+**Gap 2: `PREPARED_PENDING_COMMIT` as "the normal direct outcome" did not meet the
+completion contract.** The original implementation anchored the direct route's target
+version to whatever `plan_release_preparation` computed from *local* file content -
+which is always exactly one increment ahead of local `current_version`, by construction
+(`calculate_next_version` never returns its input unchanged). That made "is the
+checkout already prepared for this target" undecidable across separate invocations: a
+second invocation's freshly-recomputed target was always one *further* increment ahead
+of whatever the first invocation had just written, so real execution could never
+recognize its own completed preparation and always stopped short of publishing.
+**Fix:** the direct route's `current_version`/`target_version` are now anchored to
+`build_release_status(...).latest_stable_version` (the GitHub Releases API - the same
+source `devbot release status` already reads) rather than to local file content. That
+baseline does not change merely because a local `prepare_release()` write happened; it
+only changes once an actual Release is published. `run_release` compares the local
+checkout's current version and dirtiness against this stable target: when they already
+match, `prepare_release()` is skipped entirely and the direct publish proceeds for
+real, right away. When they don't, `prepare_release()` runs (exactly once) and
+`run_release` reports `PREPARED_PENDING_COMMIT` - the operator commits and pushes the
+prepared files out of band, then a *second* real invocation with the *same*
+`recommendation` now finds the checkout already matching the (unchanged) target and
+completes publication for real, without recomputing a further bump. A defensive
+consistency check compares `prepare_release()`'s actual output against the plan's
+target and fails closed (a `preparation`-stage error) if a stale or inconsistent local
+checkout would otherwise cause a different version to be prepared than the plan
+promised.
 
-**The resolution: treat the resulting refusal as an expected, reportable outcome, not
-a failure - and do not add a new commit/push capability to reach the alternative.**
-Adding an in-process `git commit`/`git push` to `main` was considered and rejected: it
-is a new, high-blast-radius, hard-to-reverse capability nowhere authorized by Task 051's
-Contract or Specification, on a self-hosted repository where DevBot manages its own
-release history. Instead, when `publish_prepared_release` refuses specifically with
-`DirtyWorktreeError`/`StaleMainError` immediately after a real `prepare_release()` call,
-`run_release` returns `ReleaseRunOutcome.PREPARED_PENDING_COMMIT` (not an exception) -
-the prepared files are on disk, nothing was published, and the operator commits and
-pushes them out of band, then completes publication with the existing, unmodified
-`devbot release publish-prepared` (Task 049) - not by re-running `release run`, which
-would prepare, and therefore bump, a second time.
+**A new capability - `run_release` committing/pushing to `main` itself, to close both
+routes in exactly one call - was considered again during review and rejected again**,
+for the same reason as the first attempt: it is nowhere authorized by Task 051's
+Contract or Specification, and is a high-blast-radius, hard-to-reverse capability on a
+self-hosted repository that manages its own release history. The chosen design instead
+makes the *existing* two-invocation resumption path in the first attempt actually work
+correctly (real, verified `DIRECT_PUBLISHED` on the second invocation - it did not
+before), rather than adding a new write capability to collapse it to one.
 
-**Consequence, stated plainly: for the direct strategy, real `devbot release run`
-execution cannot reach `DIRECT_PUBLISHED` today.** Every real invocation that reaches
-the direct route ends in `PREPARED_PENDING_COMMIT`, by construction, given the existing
-safety boundaries. `ReleaseRunOutcome.DIRECT_PUBLISHED` remains a defined, tested outcome
-(verified at the orchestration-wiring level with mocked downstream calls, since the
-underlying trigger condition needs a capability this task does not have) so that a
-future task adding that capability - or an operator who separately prepared, committed,
-and pushed out of band before some other future entry point calls
-`publish_prepared_release` - has a well-defined result to produce. The workflow route has
-no such limitation: Task 037 computes its version from Git/PR history, never from local
-files, so `run_release` never calls `prepare_release()` for that route at all, and real
-execution completes end-to-end in one call
-(`test_run_release_workflow_route_real_repo_leaves_files_untouched`).
+**Planning now performs read-only GitHub calls.** `build_release_run_plan` (used by
+both `--dry-run` and as the first step of real execution) calls `fetch_release_preview`
+(workflow route) or `build_release_status` (direct route) - both read-only, never
+writes. This is a deliberate, necessary use of the Specification's allowance to create
+a network client during dry-run "when an existing read-only plan absolutely requires
+one": without it, the plan cannot truthfully describe what real execution would do,
+which is exactly the defect this rework fixes. A `GitHubWriteClient` is still never
+constructed during dry-run.
 
-**Every downstream failure is reported with a stable stage identifier and the original
-exception chained (`raise ... from exc`).** `ReleaseRunStage` names exactly the five
-points specified: `recommendation`, `preparation`, `strategy_resolution`,
-`workflow_publish`, `direct_publish`. `resolve_release_publish_strategy` is still the
-only place `publish_strategy` is parsed or defaulted - `run_release` only compares its
-already-typed `.effective` result to select a route, never re-implementing Task 050's
-logic.
+**Regression coverage added for both fixes:**
+`tests/test_release_orchestration.py::test_run_release_workflow_route_real_repo_recommendation_governs_dispatch`
+proves a `--level patch` request against an independently-computed `minor` increment
+refuses before any write, against a real throwaway Git repository; `test_run_release
+_direct_route_real_resume_reaches_direct_published_without_double_bump` proves two real,
+sequential `run_release` invocations (with an out-of-band commit/push between them) reach
+`PREPARED_PENDING_COMMIT` then genuinely `DIRECT_PUBLISHED`, exercising the real
+`publish_prepared_release`/`GitHubWriteClient.create_release` path with exactly one
+Release created.
+

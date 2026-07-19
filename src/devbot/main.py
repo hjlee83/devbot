@@ -980,6 +980,8 @@ def _render_release_run_plan(plan: ReleaseRunPlan) -> str:
     ]
     if plan.publish_route == ReleaseRunStage.DIRECT_PUBLISH and not plan.direct_notes_available:
         lines.append("  blocker: --notes-file 없이는 direct 게시를 진행할 수 없습니다.")
+    if plan.recommendation_conflict is not None:
+        lines.append(f"  blocker: {plan.recommendation_conflict}")
     return "\n".join(lines)
 
 
@@ -1005,14 +1007,20 @@ def _run_release_run_command(args: argparse.Namespace, config: DevBotConfig) -> 
             print(f"release run 오류: notes 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
             return 1
 
+    # Task 051 review fix: planning now performs read-only GitHub calls
+    # (see release_orchestration's module docstring) so the rendered plan
+    # - dry-run or real - always matches what real execution would
+    # actually publish. A write client is still never constructed for
+    # dry-run.
+    github_client = GitHubClient(config.github_token)
+
     try:
         if args.dry_run:
-            plan = build_release_run_plan(repository, recommendation, notes=notes)
+            plan = build_release_run_plan(github_client, repository, recommendation, notes=notes)
             print(_render_release_run_plan(plan))
             print("dry-run: 아무것도 쓰지 않았습니다.")
             return 0
 
-        github_client = GitHubClient(config.github_token)
         write_client = GitHubWriteClient(config.github_token)
         result = run_release(
             github_client, write_client, repository, recommendation, notes=notes
