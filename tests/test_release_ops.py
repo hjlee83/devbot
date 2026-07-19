@@ -32,6 +32,7 @@ from devbot.release_ops import (
     validate_published_release,
     wait_for_dispatched_run,
 )
+from devbot.release_publish_strategy import ReleasePublishStrategyMismatchError
 
 
 def _repository(**overrides: object) -> RepositoryConfig:
@@ -521,6 +522,28 @@ def test_dispatch_release_sends_expected_inputs() -> None:
             "notes": preview.notes,
         },
     )
+
+
+def test_dispatch_release_refuses_direct_strategy_before_any_dispatch() -> None:
+    # Task 050: a repository configured for the direct publish path must
+    # never be dispatched through the workflow path, even when the
+    # preview is otherwise ready.
+    preview = build_release_preview(_context())
+    write_client = MagicMock()
+
+    with pytest.raises(ReleasePublishStrategyMismatchError):
+        dispatch_release(write_client, _repository(publish_strategy="direct"), preview)
+
+    write_client.dispatch_workflow.assert_not_called()
+
+
+def test_dispatch_release_accepts_explicit_workflow_strategy() -> None:
+    preview = build_release_preview(_context())
+    write_client = MagicMock()
+
+    dispatch_release(write_client, _repository(publish_strategy="workflow"), preview)
+
+    write_client.dispatch_workflow.assert_called_once()
 
 
 # --------------------------------------------------------------------------

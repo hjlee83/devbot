@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ from devbot.release_publish import (
     preview_release_publish,
     publish_prepared_release,
 )
+from devbot.release_publish_strategy import ReleasePublishStrategyMismatchError
 
 # --------------------------------------------------------------------------
 # Fixtures: a real, throwaway local git repo + a real, throwaway local bare
@@ -74,8 +76,16 @@ def _local_tags(path: Path) -> list[str]:
 
 
 def _repository(local_path: Path) -> RepositoryConfig:
+    # Task 050: this module's functions require the `direct` publish
+    # strategy - every fixture here opts in explicitly, matching how a real
+    # operator must configure `publish_strategy: direct` to use this path.
     return RepositoryConfig(
-        owner="someone", repo="myrepo", enabled=True, local_path=local_path, default_branch="main"
+        owner="someone",
+        repo="myrepo",
+        enabled=True,
+        local_path=local_path,
+        default_branch="main",
+        publish_strategy="direct",
     )
 
 
@@ -112,6 +122,42 @@ def _fake_write_client(
         info.html_url = html_url
         client.create_release.return_value = info
     return client
+
+
+# --------------------------------------------------------------------------
+# Task 050: this module's functions refuse a repository whose effective
+# publish strategy is not `direct`, before any write.
+# --------------------------------------------------------------------------
+
+
+def test_preview_refuses_workflow_configured_repository(tmp_path: Path) -> None:
+    local = _init_repo_with_remote(tmp_path)
+    main_sha = _rev_parse(local, "main")
+    github_client = _fake_github_client({"main": main_sha})
+    workflow_repository = replace(_repository(local), publish_strategy="workflow")
+
+    with pytest.raises(ReleasePublishStrategyMismatchError):
+        preview_release_publish(
+            github_client, workflow_repository, "notes", local_checkout_path=local
+        )
+
+    assert _local_tags(local) == []
+
+
+def test_publish_refuses_omitted_default_strategy(tmp_path: Path) -> None:
+    local = _init_repo_with_remote(tmp_path)
+    main_sha = _rev_parse(local, "main")
+    github_client = _fake_github_client({"main": main_sha})
+    write_client = _fake_write_client()
+    default_repository = replace(_repository(local), publish_strategy=None)
+
+    with pytest.raises(ReleasePublishStrategyMismatchError):
+        publish_prepared_release(
+            github_client, write_client, default_repository, "notes", local_checkout_path=local
+        )
+
+    assert _local_tags(local) == []
+    write_client.create_release.assert_not_called()
 
 
 # --------------------------------------------------------------------------

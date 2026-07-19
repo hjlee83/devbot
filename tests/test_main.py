@@ -33,10 +33,16 @@ def _config(tmp_path: Path) -> DevBotConfig:
     )
 
 
-def _release_env(tmp_path: Path) -> tuple[Path, Path]:
+def _release_env(
+    tmp_path: Path, *, publish_strategy: str | None = None
+) -> tuple[Path, Path]:
     """`env_path`/`repositories_path` for a full `main()` call with exactly
     one enabled repository (`_resolve_repository`'s implicit-target case),
-    matching the `--once`/`doctor` test fixtures above."""
+    matching the `--once`/`doctor` test fixtures above.
+
+    Task 050: `publish_strategy` is omitted from `repositories.yaml` by
+    default, matching every existing config in this file - this is what
+    proves backward compatibility for configs written before this task."""
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     env_path = tmp_path / ".env"
@@ -46,8 +52,11 @@ def _release_env(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     repositories_path = tmp_path / "repositories.yaml"
+    strategy_line = (
+        f"\n    publish_strategy: {publish_strategy}" if publish_strategy is not None else ""
+    )
     repositories_path.write_text(
-        "repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true\n",
+        f"repositories:\n  - owner: someone\n    repo: myrepo\n    enabled: true{strategy_line}\n",
         encoding="utf-8",
     )
     return env_path, repositories_path
@@ -514,6 +523,167 @@ def test_release_publish_prepared_does_not_acquire_daemon_lock(tmp_path: Path) -
 
     assert exit_code == 0
     mock_lock.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# Task 050: `devbot release strategy` inspection, and both `release publish`
+# and `release publish-prepared` refusing a repository whose effective
+# publish strategy doesn't match what the command requires.
+# --------------------------------------------------------------------------
+
+
+def test_release_strategy_command_reports_omitted_configuration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        ["release", "strategy"], env_path=env_path, repositories_path=repositories_path
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "repository: someone/myrepo" in out
+    assert "configured: omitted" in out
+    assert "effective: workflow" in out
+    assert "defaulted: yes" in out
+
+
+def test_release_strategy_command_reports_explicit_workflow(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="workflow")
+
+    exit_code = main(
+        ["release", "strategy"], env_path=env_path, repositories_path=repositories_path
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "configured: workflow" in out
+    assert "effective: workflow" in out
+    assert "defaulted: no" in out
+
+
+def test_release_strategy_command_reports_explicit_direct(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="direct")
+
+    exit_code = main(
+        ["release", "strategy"], env_path=env_path, repositories_path=repositories_path
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "configured: direct" in out
+    assert "effective: direct" in out
+    assert "defaulted: no" in out
+
+
+def test_release_strategy_command_rejects_invalid_configuration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="bogus")
+
+    exit_code = main(
+        ["release", "strategy"], env_path=env_path, repositories_path=repositories_path
+    )
+
+    assert exit_code == 1
+    assert "release strategy 오류" in capsys.readouterr().err
+
+
+def test_release_strategy_command_does_not_construct_github_client(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with (
+        patch("devbot.main.GitHubClient") as mock_client,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["release", "strategy"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_client.assert_not_called()
+    mock_write_client.assert_not_called()
+    mock_lock.assert_not_called()
+
+
+def test_release_publish_refuses_direct_configured_repository_before_github_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="direct")
+
+    with (
+        patch("devbot.main.GitHubClient") as mock_client,
+        patch("devbot.main.fetch_release_preview") as mock_preview,
+        patch("devbot.main.publish_release") as mock_publish,
+    ):
+        exit_code = main(
+            ["release", "publish"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 1
+    mock_client.assert_not_called()
+    mock_preview.assert_not_called()
+    mock_publish.assert_not_called()
+    assert "release publish 오류" in capsys.readouterr().err
+
+
+def test_release_publish_dry_run_still_enforces_strategy_mismatch(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="direct")
+
+    with patch("devbot.main.fetch_release_preview") as mock_preview:
+        exit_code = main(
+            ["release", "publish", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+    mock_preview.assert_not_called()
+
+
+def test_release_publish_prepared_refuses_default_strategy_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No mocks on preview_release_publish/publish_prepared_release/GitHubClient
+    # on purpose: Task 050's guard is the very first line of
+    # `preview_release_publish`, which `publish_prepared_release` always
+    # calls first, so this refuses before any filesystem or Git access -
+    # this test exercises that real call chain end to end.
+    env_path, repositories_path = _release_env(tmp_path)
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+
+    exit_code = main(
+        ["release", "publish-prepared", "--notes-file", str(notes_file)],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+    assert "release publish-prepared 오류" in capsys.readouterr().err
+
+
+def test_release_publish_prepared_dry_run_still_enforces_strategy_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="workflow")
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+
+    exit_code = main(
+        ["release", "publish-prepared", "--notes-file", str(notes_file), "--dry-run"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+    assert "release publish-prepared 오류" in capsys.readouterr().err
 
 
 def test_goal_plan_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

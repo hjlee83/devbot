@@ -45,6 +45,7 @@ from devbot.github_write_client import GitHubWriteClient
 from devbot.models import RepositoryConfig
 from devbot.release_ops import local_checkout_is_dirty
 from devbot.release_preparation import read_current_version
+from devbot.release_publish_strategy import require_direct_strategy
 from devbot.startup import resolve_operator_checkout
 
 
@@ -197,7 +198,14 @@ def preview_release_publish(
 ) -> ReleasePublishPreview:
     """Read-only: validates every publication precondition and returns the
     computed preview. Raises on the first failing precondition - no
-    external write ever happens in this function."""
+    external write ever happens in this function.
+
+    Task 050: also refuses unless `repository`'s effective release publish
+    strategy is `direct` - checked first, before any version read or Git
+    call, so both a dry-run preview and a real `publish_prepared_release`
+    call (which always calls this function first) correctly refuse a
+    `workflow`-configured repository."""
+    require_direct_strategy(repository)
     project_root = local_checkout_path or resolve_operator_checkout()
 
     version = read_current_version(project_root)

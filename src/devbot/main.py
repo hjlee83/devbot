@@ -76,6 +76,11 @@ from devbot.release_publish import (
     preview_release_publish,
     publish_prepared_release,
 )
+from devbot.release_publish_strategy import (
+    ReleasePublishStrategyError,
+    require_workflow_strategy,
+    resolve_release_publish_strategy,
+)
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
 from devbot.specification import (
@@ -714,6 +719,17 @@ def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
 
+    strategy_parser = release_subparsers.add_parser(
+        "strategy",
+        help=(
+            "Task 050: 이 저장소의 릴리스 게시 전략(workflow/direct)을 조회합니다 "
+            "(읽기 전용, write client 생성 없음)."
+        ),
+    )
+    strategy_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
     prepare_parser = release_subparsers.add_parser(
         "prepare",
         help=(
@@ -824,7 +840,12 @@ def _run_release_publish_prepared_command(args: argparse.Namespace, config: DevB
 
         write_client = GitHubWriteClient(config.github_token)
         result = publish_prepared_release(github_client, write_client, repository, notes)
-    except (ReleasePublishError, ReleasePreparationError, GitHubClientError) as exc:
+    except (
+        ReleasePublishError,
+        ReleasePublishStrategyError,
+        ReleasePreparationError,
+        GitHubClientError,
+    ) as exc:
         print(f"release publish-prepared 오류: {exc}", file=sys.stderr)
         return 1
 
@@ -884,17 +905,48 @@ def _render_release_status(status: ReleaseStatus) -> str:
     return "\n".join(lines)
 
 
+def _run_release_strategy_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    """Task 050: read-only strategy inspection - no GitHub client is ever
+    constructed."""
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        resolution = resolve_release_publish_strategy(repository)
+    except ReleasePublishStrategyError as exc:
+        print(f"release strategy 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"repository: {resolution.repository}")
+    print(f"configured: {resolution.configured.value if resolution.configured else 'omitted'}")
+    print(f"effective: {resolution.effective}")
+    print(f"defaulted: {'yes' if resolution.defaulted else 'no'}")
+    return 0
+
+
 def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     if args.release_command == "prepare":
         return _run_release_prepare_command(args)
     if args.release_command == "publish-prepared":
         return _run_release_publish_prepared_command(args, config)
+    if args.release_command == "strategy":
+        return _run_release_strategy_command(args, config)
 
     try:
         repository = _resolve_repository(config, args.repo)
     except ConfigError as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 1
+
+    if args.release_command == "publish":
+        try:
+            require_workflow_strategy(repository)
+        except ReleasePublishStrategyError as exc:
+            print(f"release publish 오류: {exc}", file=sys.stderr)
+            return 1
 
     github_client = GitHubClient(config.github_token)
 
