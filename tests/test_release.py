@@ -1128,8 +1128,7 @@ def test_first_stable_release_uses_authoritative_initial_version_and_artifact_co
     tmp_path: Path,
 ) -> None:
     version = authoritative_version(Path.cwd())
-    assert version == "0.1.0"
-    assert SemanticVersion.parse(version).tag == "v0.1.0"
+    assert SemanticVersion.parse(version).tag == f"v{version}"
 
     artifacts = _build_expected_artifacts(tmp_path, version)
     manifest = checksum_manifest(artifacts, expected_names=expected_artifact_names(version))

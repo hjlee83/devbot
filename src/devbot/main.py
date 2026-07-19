@@ -57,6 +57,7 @@ from devbot.observability import (
 )
 from devbot.polling import PollingService, PollingStatus, run_forever
 from devbot.release import authoritative_version
+from devbot.release_classification import ReleaseRecommendation
 from devbot.release_ops import (
     ReleaseOpsError,
     ReleasePreview,
@@ -64,6 +65,11 @@ from devbot.release_ops import (
     build_release_status,
     fetch_release_preview,
     publish_release,
+)
+from devbot.release_preparation import (
+    ReleasePreparationError,
+    plan_release_preparation,
+    prepare_release,
 )
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
@@ -703,6 +709,55 @@ def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
 
+    prepare_parser = release_subparsers.add_parser(
+        "prepare",
+        help=(
+            "Task 048: 로컬 pyproject.toml/uv.lock 버전을 다음 버전으로 준비합니다 "
+            "(Git 태그/GitHub Release/push/PR 없음, GitHub 호출 없음)."
+        ),
+    )
+    prepare_parser.add_argument(
+        "--level",
+        choices=("major", "minor", "patch"),
+        required=True,
+        help="릴리스 수준. none은 준비할 것이 없으므로 지원하지 않습니다.",
+    )
+    prepare_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="계산된 다음 버전만 출력하고 파일을 쓰지 않습니다.",
+    )
+
+
+def _run_release_prepare_command(args: argparse.Namespace) -> int:
+    """Task 048: purely local - no GitHub client, no `_resolve_repository`
+    call. Operates on the current working directory's `pyproject.toml`/
+    `uv.lock` only."""
+    recommendation = ReleaseRecommendation(args.level)
+    project_root = Path(".")
+
+    try:
+        if args.dry_run:
+            plan = plan_release_preparation(project_root, recommendation)
+            print(f"recommendation: {plan.recommendation}")
+            print(f"old_version: {plan.old_version}")
+            print(f"new_version: {plan.new_version}")
+            print("dry-run: 파일을 쓰지 않았습니다.")
+            return 0
+
+        result = prepare_release(project_root, recommendation)
+    except ReleasePreparationError as exc:
+        print(f"release prepare 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"recommendation: {result.recommendation}")
+    print(f"old_version: {result.old_version}")
+    print(f"new_version: {result.new_version}")
+    print("changed_paths:")
+    for path in result.changed_paths:
+        print(f"  - {path}")
+    return 0
+
 
 def _render_release_preview(preview: ReleasePreview) -> str:
     lines = [
@@ -753,6 +808,9 @@ def _render_release_status(status: ReleaseStatus) -> str:
 
 
 def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    if args.release_command == "prepare":
+        return _run_release_prepare_command(args)
+
     try:
         repository = _resolve_repository(config, args.repo)
     except ConfigError as exc:

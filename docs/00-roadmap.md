@@ -430,3 +430,26 @@
       추천은 이번에 전혀 구현하지 않았다(`src/devbot/
       release_classification.py`,
       `results/047-release-classification-policy.md`).
+- [x] Task 048: release preparation. Task 047의 `ReleaseRecommendation`을
+      받아 `pyproject.toml`(권위 있는 버전 소스)과 `uv.lock`의 `devbot`
+      패키지 항목을 같은 다음 버전으로 함께 준비하는 `src/devbot/
+      release_preparation.py`를 추가한다 - Git 태그/GitHub Release/
+      push/PR/패키지 배포는 전혀 만들지 않는다. `major`(X+1.0.0)/
+      `minor`(X.Y+1.0)/`patch`(X.Y.Z+1) 계산은 순수 함수이고, `none`은
+      "준비할 것이 없다"는 전용 에러로 거부한다. 쓰기 전에 항상 먼저
+      검증한다(`plan_release_preparation`) - `pyproject.toml`과
+      `uv.lock`의 현재 버전이 서로 다르면 절대 자동으로 맞추지 않고
+      `VersionSourceMismatchError`로 실패하며, 두 파일 모두 임시
+      파일에 먼저 쓴 뒤 `os.replace`로 원자적으로 교체해 검증 실패나
+      두 번째 쓰기 실패 시 파일이 부분적으로/불일치 상태로 남지
+      않는다. 새 TOML 쓰기 의존성을 추가하지 않고 stdlib `tomllib`로
+      읽기/검증만 하고, 실제 파일 쓰기는 정확한 버전 줄 하나만 문자열
+      치환해 나머지 포맷·주석·다른 패키지 항목은 바이트 단위로 보존한다
+      (실제 diff로 각 파일에서 정확히 한 줄만 바뀜을 확인). 읽기 전용
+      `devbot release prepare --level major|minor|patch [--dry-run]`을
+      추가했다 - GitHub API를 호출하지 않고 daemon lock도 잡지 않는다.
+      구현 중 실제 저장소의 `pyproject.toml`/`uv.lock`은 한 번도
+      건드리지 않았다 - 모든 쓰기 테스트는 임시 디렉터리 사본에서만
+      실행했고, 매 검증 단계마다 `git status`로 실제 버전 파일이
+      그대로임을 직접 확인했다(`src/devbot/release_preparation.py`,
+      `results/048-release-preparation.md`).

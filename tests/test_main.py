@@ -237,6 +237,149 @@ def test_release_command_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
     mock_lock.assert_not_called()
 
 
+_RELEASE_PREP_PYPROJECT = """[project]
+name = "devbot"
+version = "{version}"
+requires-python = ">=3.13,<3.14"
+"""
+
+_RELEASE_PREP_UV_LOCK = """version = 1
+requires-python = "==3.13.*"
+
+[[package]]
+name = "devbot"
+version = "{version}"
+source = {{ editable = "." }}
+"""
+
+
+def _write_release_prep_project(directory: Path, version: str = "0.1.2") -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "pyproject.toml").write_text(
+        _RELEASE_PREP_PYPROJECT.format(version=version), encoding="utf-8"
+    )
+    (directory / "uv.lock").write_text(
+        _RELEASE_PREP_UV_LOCK.format(version=version), encoding="utf-8"
+    )
+
+
+def test_release_prepare_dry_run_does_not_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    project_dir = tmp_path / "project"
+    _write_release_prep_project(project_dir)
+    monkeypatch.chdir(project_dir)
+
+    exit_code = main(
+        ["release", "prepare", "--level", "patch", "--dry-run"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "old_version: 0.1.2" in out
+    assert "new_version: 0.1.3" in out
+    assert 'version = "0.1.2"' in (project_dir / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.1.2"' in (project_dir / "uv.lock").read_text(encoding="utf-8")
+
+
+def test_release_prepare_writes_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    project_dir = tmp_path / "project"
+    _write_release_prep_project(project_dir)
+    monkeypatch.chdir(project_dir)
+
+    exit_code = main(
+        ["release", "prepare", "--level", "minor"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "new_version: 0.2.0" in out
+    assert 'version = "0.2.0"' in (project_dir / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.2.0"' in (project_dir / "uv.lock").read_text(encoding="utf-8")
+
+
+def test_release_prepare_rejects_none_level(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            ["release", "prepare", "--level", "none"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_release_prepare_error_returns_failure_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        _RELEASE_PREP_PYPROJECT.format(version="0.1.2"), encoding="utf-8"
+    )
+    (project_dir / "uv.lock").write_text(
+        _RELEASE_PREP_UV_LOCK.format(version="0.1.1"), encoding="utf-8"
+    )
+    monkeypatch.chdir(project_dir)
+
+    exit_code = main(
+        ["release", "prepare", "--level", "patch"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+
+
+def test_release_prepare_does_not_acquire_daemon_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    project_dir = tmp_path / "project"
+    _write_release_prep_project(project_dir)
+    monkeypatch.chdir(project_dir)
+
+    with patch("devbot.main.ProcessLock") as mock_lock:
+        exit_code = main(
+            ["release", "prepare", "--level", "patch", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
+def test_release_prepare_does_not_call_github(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    project_dir = tmp_path / "project"
+    _write_release_prep_project(project_dir)
+    monkeypatch.chdir(project_dir)
+
+    with patch("devbot.main.GitHubClient") as mock_github_client:
+        exit_code = main(
+            ["release", "prepare", "--level", "patch", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_github_client.assert_not_called()
+
+
 def test_goal_plan_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     env_path, repositories_path = _release_env(tmp_path)
     plan = GoalPlan(
