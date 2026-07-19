@@ -121,6 +121,12 @@ Use the existing write-client construction path for now. Do not encode assumptio
 - `docs/00-roadmap.md`
 - `docs/07-decisions.md` only when an ADR is required
 
+## Dependencies
+
+- `src/devbot/review_decision.py` (Task 053) - `review_report_from_dict`, `ReviewDecision`, `ReviewReport`, and the typed error hierarchy are reused, never reimplemented.
+- `src/devbot/github_client.py` - reused for reading current PR head SHA and state; extended only for missing read-only data.
+- `src/devbot/github_write_client.py` - extended with the review-submission endpoint if absent; owns no policy of its own.
+
 ## Constraints
 
 - Task 053 remains provider-neutral.

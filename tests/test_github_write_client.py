@@ -137,6 +137,54 @@ def test_merge_pull_request_sends_put_and_parses_response() -> None:
     }
 
 
+def test_submit_pull_request_review_sends_post_and_parses_response() -> None:
+    session = MagicMock()
+    session.post.return_value = _mock_response(
+        json_data={
+            "id": 777,
+            "html_url": "https://github.com/someone/myrepo/pull/99#pullrequestreview-777",
+            "state": "APPROVED",
+        }
+    )
+    client = GitHubWriteClient("token123", session=session)
+
+    result = client.submit_pull_request_review(
+        _repository(),
+        99,
+        commit_id="head-sha",
+        event="APPROVE",
+        body="Looks good.",
+        comments=[{"path": "a.py", "line": 5, "side": "RIGHT", "body": "nit"}],
+    )
+
+    assert result.id == 777
+    assert result.html_url == "https://github.com/someone/myrepo/pull/99#pullrequestreview-777"
+    assert result.state == "APPROVED"
+    args, kwargs = session.post.call_args
+    assert args[0].endswith("/repos/someone/myrepo/pulls/99/reviews")
+    assert kwargs["json"] == {
+        "commit_id": "head-sha",
+        "event": "APPROVE",
+        "body": "Looks good.",
+        "comments": [{"path": "a.py", "line": 5, "side": "RIGHT", "body": "nit"}],
+    }
+
+
+def test_submit_pull_request_review_omits_comments_key_when_empty() -> None:
+    session = MagicMock()
+    session.post.return_value = _mock_response(
+        json_data={"id": 778, "html_url": "https://example.invalid/778", "state": "COMMENTED"}
+    )
+    client = GitHubWriteClient("token123", session=session)
+
+    client.submit_pull_request_review(
+        _repository(), 99, commit_id="head-sha", event="COMMENT", body="fyi"
+    )
+
+    _, kwargs = session.post.call_args
+    assert "comments" not in kwargs["json"]
+
+
 def test_write_client_exposes_write_operations_only() -> None:
     allowed_public_methods = {
         "add_reaction_to_comment",
@@ -159,6 +207,11 @@ def test_write_client_exposes_write_operations_only() -> None:
         # created and pushed itself via local `git`. See
         # docs/07-decisions.md for why this coexists with `dispatch_workflow`.
         "create_release",
+        # Task 054: submits exactly one official PR review. Owns no event
+        # mapping or validation policy of its own - devbot.github_review
+        # _submission does that and always binds commit_id to a
+        # pre-validated head SHA.
+        "submit_pull_request_review",
     }
 
     public_attrs = {

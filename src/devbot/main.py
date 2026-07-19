@@ -39,6 +39,12 @@ from devbot.config import ConfigError, load_config
 from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
 from devbot.github_client import GitHubClient, GitHubClientError, GitHubIssue, PullRequestComment
+from devbot.github_review_submission import (
+    GitHubReviewSubmissionError,
+    build_github_review_submission_plan,
+    render_github_review_submission_plan,
+    submit_github_review,
+)
 from devbot.github_write_client import GitHubWriteClient
 from devbot.goal_executor import (
     ExecutionPlan,
@@ -98,6 +104,7 @@ from devbot.release_recommendation_aggregation import (
 from devbot.review import ReviewService
 from devbot.review_decision import (
     ReviewDecisionError,
+    ReviewReport,
     render_review_report,
     review_report_from_dict,
     review_report_to_dict,
@@ -500,9 +507,10 @@ def _run_specification_command(args: argparse.Namespace, config: DevBotConfig) -
 
 def _build_review_parser(subparsers: argparse._SubParsersAction) -> None:
     """Task 053: provider-neutral review decision model - a read-only
-    validate/render boundary for an existing report payload. Never
-    inspects a PR, invokes an AI, or writes to GitHub."""
-    review_parser = subparsers.add_parser("review", help="리뷰 결정 모델(Task 053)을 다룹니다.")
+    validate/render boundary for an existing report payload. Task 054
+    adds `submit`, the only subcommand that writes to GitHub. Neither
+    subcommand invokes an AI or inspects a PR beyond reading its state."""
+    review_parser = subparsers.add_parser("review", help="리뷰 결정 모델(Task 053/054)을 다룹니다.")
     review_subparsers = review_parser.add_subparsers(dest="review_command", required=True)
 
     report_parser = review_subparsers.add_parser(
@@ -516,26 +524,55 @@ def _build_review_parser(subparsers: argparse._SubParsersAction) -> None:
         "--format", choices=("text", "json"), default="text", help="출력 형식 (기본값: text)."
     )
 
+    submit_parser = review_subparsers.add_parser(
+        "submit",
+        help=(
+            "Task 054: 검증된 리뷰 report를 정확히 하나의 공식 GitHub PR 리뷰로 제출합니다 "
+            "(dry-run 시 write client를 전혀 생성하지 않음)."
+        ),
+    )
+    submit_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+    submit_parser.add_argument("--pr", type=int, required=True, help="Pull Request 번호.")
+    submit_parser.add_argument("--report", required=True, help="리뷰 report JSON 파일 경로.")
+    submit_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="실제로 제출하지 않고 의도된 event/body/inline comment만 출력합니다.",
+    )
 
-def _run_review_report_command(args: argparse.Namespace) -> int:
-    """Task 053: reads only the explicit `--input` file - no GitHub client,
-    no network call, no other filesystem mutation."""
+
+def _load_review_report(path: str, *, error_prefix: str) -> ReviewReport | None:
+    """Reads and validates a review report JSON file through Task 053's
+    own parsing/validation APIs - never re-implemented here. Returns
+    `None` (having already printed a clean error) on any failure, so
+    callers can just check for that instead of duplicating try/except
+    blocks."""
     try:
-        raw_text = Path(args.input).read_text(encoding="utf-8")
+        raw_text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
-        print(f"review report 오류: --input 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
-        return 1
+        print(f"{error_prefix}: 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
+        return None
 
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        print(f"review report 오류: --input 파일이 올바른 JSON이 아닙니다: {exc}", file=sys.stderr)
-        return 1
+        print(f"{error_prefix}: 파일이 올바른 JSON이 아닙니다: {exc}", file=sys.stderr)
+        return None
 
     try:
-        report = review_report_from_dict(payload)
+        return review_report_from_dict(payload)
     except ReviewDecisionError as exc:
-        print(f"review report 오류: {exc}", file=sys.stderr)
+        print(f"{error_prefix}: {exc}", file=sys.stderr)
+        return None
+
+
+def _run_review_report_command(args: argparse.Namespace) -> int:
+    """Task 053: reads only the explicit `--input` file - no GitHub client,
+    no network call, no other filesystem mutation."""
+    report = _load_review_report(args.input, error_prefix="review report 오류")
+    if report is None:
         return 1
 
     if args.format == "json":
@@ -546,9 +583,53 @@ def _run_review_report_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_review_command(args: argparse.Namespace) -> int:
+def _run_review_submit_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    """Task 054: reads the current PR head SHA (read-only, via
+    `GitHubClient`) before any `GitHubWriteClient` is ever constructed -
+    `--dry-run` never constructs one at all."""
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    report = _load_review_report(args.report, error_prefix="review submit 오류")
+    if report is None:
+        return 1
+
+    github_client = GitHubClient(config.github_token)
+
+    try:
+        if args.dry_run:
+            plan = build_github_review_submission_plan(github_client, repository, args.pr, report)
+            print(render_github_review_submission_plan(plan))
+            print("dry-run: 아무것도 제출하지 않았습니다.")
+            return 0
+
+        write_client = GitHubWriteClient(config.github_token)
+        result = submit_github_review(
+            github_client, write_client, repository, args.pr, report, dry_run=False
+        )
+    except GitHubReviewSubmissionError as exc:
+        print(f"review submit 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"repository: {result.repository}")
+    print(f"pr_number: {result.pr_number}")
+    print(f"head_sha: {result.head_sha}")
+    print(f"event: {result.event.value}")
+    print(f"submitted: {'yes' if result.submitted else 'no'}")
+    print(f"review_id: {result.review_id if result.review_id is not None else 'none'}")
+    print(f"review_url: {result.review_url or 'none'}")
+    print(f"inline_comment_count: {result.inline_comment_count}")
+    return 0
+
+
+def _run_review_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     if args.review_command == "report":
         return _run_review_report_command(args)
+    if args.review_command == "submit":
+        return _run_review_submit_command(args, config)
     return 1
 
 
@@ -1543,7 +1624,7 @@ def main(
         return _run_specification_command(args, config)
 
     if args.command == "review":
-        return _run_review_command(args)
+        return _run_review_command(args, config)
 
     if args.command == "doctor":
         if not args.ci and not _run_startup_self_update(config, logger):
