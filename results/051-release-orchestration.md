@@ -31,7 +31,7 @@ major|minor|patch|none [--repo] [--notes-file] [--dry-run]`을 추가했다.
   가짐) → `NoReleaseRequiredError`, `MissingDirectReleaseNotesError`,
   `ReleaseRunStageError`(원인 예외를 `from exc`로 체이닝).
 
-## 리뷰에서 발견된 두 가지 문제와 수정
+## 리뷰에서 발견된 문제와 수정 (2라운드)
 
 ### 문제 1: workflow 경로가 `--level`을 무시함
 
@@ -114,6 +114,29 @@ Releases API 기준 - `devbot release status`가 읽는 것과 같은 소스)에
 False`가 되고 실제로 `publish_prepared_release`/
 `write_client.create_release`까지 정확히 한 번 호출되어
 `DIRECT_PUBLISHED`에 도달함을 end-to-end로 직접 검증한다.
+
+### 문제 3 (재리뷰): `prepare_release()` 실제 출력과 `preview`의 불일치를 검사하지 않음
+
+문제 1의 수정(계산된 increment와 recommendation 비교)만으로는 충분하지
+않았다. `prepare_release()`는 로컬 파일 기준으로, `preview`는 "가장 최근
+게시된 Release" 기준으로 **서로 독립적으로** target을 계산하기 때문에,
+increment(예: 둘 다 "patch")는 같아도 정확한 버전은 다를 수 있다 - 로컬
+파일이 어떤 이유로든 이미 최근 게시본보다 앞서 있으면 그렇다. 이건
+이론적인 우려가 아니었다: 리뷰 시점에 실제로 이 저장소의
+`pyproject.toml`은 `0.1.2`였는데 가장 최근 게시된 GitHub Release는
+`v0.1.1`이었다.
+
+**수정**: `run_release`가 `prepare_release()` 호출 직후, 그 실제 결과
+(`preparation_result.new_version`)를 dispatch 직전에 다시 읽은
+`preview.next_version`과 비교한다. 다르면 어떤 dispatch도 하지 않고
+`preparation` stage 오류로 즉시 실패한다(원인 예외 체이닝은 없음 - 이건
+하위 실패를 감싸는 게 아니라 사후 정합성 검사이므로).
+
+검증: `test_run_release_workflow_route_local_preparation_diverges_from_published_baseline`
+(mock 기반, 두 baseline이 다를 때 `publish_release`가 호출되지 않음을
+확인)과 `test_run_release_workflow_route_real_repo_local_ahead_of_published
+_baseline_refuses`(진짜 Git 저장소로, 이 저장소에서 실제 관찰된 것과
+같은 드리프트 패턴을 재현해 검증).
 
 ## 실행 순서 (Real Execution Order)
 
@@ -212,24 +235,25 @@ $ uv run ruff check .
 All checks passed!
 
 $ uv run pytest -q
-1118 passed in 74.21s
+1120 passed in 69.83s
 ```
 
-- `tests/test_release_orchestration.py` (34개): plan 구성(workflow/direct
+- `tests/test_release_orchestration.py` (36개): plan 구성(workflow/direct
   두 경로의 GitHub 앵커링된 버전 소스, recommendation 불일치/부재 blocker
   보고, `preparation_required`가 이미 준비된 상태를 올바르게 반영),
   `none` 거부, 잘못된 전략/버전 불일치/손상된 버전 stage 래핑, GitHub
   조회 실패 stage 래핑, `run_release`의 각 경로 성공/실패/
   prepared_pending_commit/일관성 검사, 준비 실패 시 게시 미호출, 상호
-  배타성 매트릭스, 진짜 Git 저장소를 쓰는 2개의 end-to-end 테스트(두
-  리뷰 발견 사항 각각의 회귀 테스트), 오류 계층 검증.
+  배타성 매트릭스, `prepare_release()`와 `preview` 간 baseline 불일치
+  검사(mock + 진짜 저장소), 진짜 Git 저장소를 쓰는 4개의 end-to-end
+  테스트(세 리뷰 발견 사항 각각의 회귀 테스트), 오류 계층 검증.
 - `tests/test_main.py` (+10): dry-run 출력(workflow/direct, notes
   blocker, recommendation_conflict blocker 신규), `none` 실패 종료
   코드, notes 파일 누락 실패, workflow/direct 성공 출력,
   `prepared_pending_commit` 다음 단계 안내 출력, stage 오류 종료 코드,
   daemon lock 미획득, dry-run 시 GitHubClient는 생성되지만
   GitHubWriteClient는 생성되지 않음.
-- 전체 스위트 1118개 회귀 없이 통과.
+- 전체 스위트 1120개 회귀 없이 통과.
 
 ## 범위 제외 사항
 
@@ -238,23 +262,25 @@ Contract/Specification이 명시한 대로 다음은 이번 태스크에 포함�
 히스토리로부터의 release notes 생성, release PR 생성/승인/병합, 패키지
 배포, 기존 release 명령들의 공개 동작 변경, 실패한 release의 자동
 재시도, review-loop/workflow-engine/agent-dispatch 변경. main에 직접
-commit/push하는 새 권한도 두 차례 검토 후 채택하지 않았다(위 "리뷰에서
-발견된 두 가지 문제와 수정" 참고).
+commit/push하는 새 권한도 세 차례(1차 구현, 1차 리뷰, 재리뷰) 검토 후
+채택하지 않았다(위 "리뷰에서 발견된 문제와 수정" 참고).
 
 ## 아키텍처 결정 업데이트
 
 `docs/07-decisions.md`의 2026-07-19 Task 051 항목을 리뷰 수정을 반영해
-전면 교체했다 - 두 문제의 정확한 원인, 수정 방법, 왜 새 git 쓰기 권한을
-다시 검토하고도 채택하지 않았는지를 기록했다. `docs/00-roadmap.md`의
-Task 051 항목도 같은 내용으로 갱신했다.
+전면 교체하고, 재리뷰에서 발견된 세 번째 문제(간 `prepare_release()`와
+`preview` baseline 불일치)에 대한 절을 추가했다 - 세 문제의 정확한 원인,
+수정 방법, 왜 새 git 쓰기 권한을 다시 검토하고도 채택하지 않았는지를
+기록했다. `docs/00-roadmap.md`의 Task 051 항목도 같은 내용으로 갱신했다.
 
 ## 수정/추가 파일 (리뷰 수정 포함 최종)
 
-- `src/devbot/release_orchestration.py` (신규, 리뷰 수정으로 전면 재작성)
+- `src/devbot/release_orchestration.py` (신규, 두 차례 리뷰 수정으로
+  전면 재작성)
 - `src/devbot/main.py` (`release run` 서브커맨드 + 핸들러, dry-run도
   GitHubClient 생성하도록 수정)
-- `tests/test_release_orchestration.py` (신규, 34개, 리뷰 수정으로
-  전면 재작성)
+- `tests/test_release_orchestration.py` (신규, 36개, 두 차례 리뷰
+  수정으로 전면 재작성)
 - `tests/test_main.py` (+10)
 - `specifications/051-release-orchestration.md` (canonical 8-섹션
   구조로 재구성)

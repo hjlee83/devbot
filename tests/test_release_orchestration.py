@@ -572,7 +572,10 @@ def test_run_release_workflow_route_failure_wraps_stage(tmp_path: Path) -> None:
 
     with (
         patch(f"{_OPS}.fetch_release_preview", return_value=preview),
-        patch(f"{_OPS}.prepare_release", return_value=_preparation_result()),
+        patch(
+            f"{_OPS}.prepare_release",
+            return_value=_preparation_result(old_version="1.2.3", new_version="1.2.4"),
+        ),
         patch(f"{_OPS}.publish_release", side_effect=original),
     ):
         with pytest.raises(ReleaseRunStageError) as excinfo:
@@ -586,6 +589,81 @@ def test_run_release_workflow_route_failure_wraps_stage(tmp_path: Path) -> None:
 
     assert excinfo.value.stage is ReleaseRunStage.WORKFLOW_PUBLISH
     assert excinfo.value.__cause__ is original
+
+
+def test_run_release_workflow_route_local_preparation_diverges_from_published_baseline(
+    tmp_path: Path,
+) -> None:
+    # `prepare_release` (local-file-anchored) and `preview` (anchored to
+    # the latest *published* Release) can genuinely disagree - not
+    # theoretical, see the module docstring. Must refuse before dispatch
+    # rather than publish `preview` while reporting an unrelated
+    # `preparation` result.
+    _write_project(tmp_path, version="1.2.3")
+    repository = _repository(tmp_path)
+    github_client = MagicMock(spec=GitHubClient)
+    write_client = MagicMock(spec=GitHubWriteClient)
+    preview = _release_preview(previous_version="1.1.0", next_version="1.2.0", increment="patch")
+    # Local files already ahead of the published baseline `preview` used -
+    # prepare_release will compute 1.2.4, not the 1.2.0 `preview` targets.
+    prep_result = _preparation_result(old_version="1.2.3", new_version="1.2.4")
+
+    with (
+        patch(f"{_OPS}.fetch_release_preview", return_value=preview),
+        patch(f"{_OPS}.prepare_release", return_value=prep_result) as mock_prepare,
+        patch(f"{_OPS}.publish_release") as mock_publish,
+    ):
+        with pytest.raises(ReleaseRunStageError) as excinfo:
+            run_release(
+                github_client,
+                write_client,
+                repository,
+                ReleaseRecommendation.PATCH,
+                local_checkout_path=tmp_path,
+            )
+
+    assert excinfo.value.stage is ReleaseRunStage.PREPARATION
+    assert "1.2.4" in str(excinfo.value)
+    assert "1.2.0" in str(excinfo.value)
+    mock_prepare.assert_called_once()
+    mock_publish.assert_not_called()
+
+
+def test_run_release_workflow_route_real_repo_local_ahead_of_published_baseline_refuses(
+    tmp_path: Path,
+) -> None:
+    # Mirrors this very repository's actual state at the time this Task
+    # was implemented: local pyproject.toml (0.1.2) ahead of the latest
+    # published GitHub Release (v0.1.1). A real throwaway checkout, real
+    # `prepare_release` call - only `fetch_release_preview`/`publish_release`
+    # (the GitHub-facing calls) are mocked.
+    local = _init_repo_with_remote(tmp_path, version="1.2.3")
+    repository = _repository(local)
+    github_client = MagicMock(spec=GitHubClient)
+    write_client = MagicMock(spec=GitHubWriteClient)
+    # The "latest published Release" is behind local: previous_version
+    # 1.1.0 -> next_version 1.2.0, while local prepare_release will derive
+    # 1.2.4 from the real 1.2.3 already on disk.
+    preview = _release_preview(previous_version="1.1.0", next_version="1.2.0", increment="patch")
+
+    with (
+        patch(f"{_OPS}.fetch_release_preview", return_value=preview),
+        patch(f"{_OPS}.publish_release") as mock_publish,
+    ):
+        with pytest.raises(ReleaseRunStageError) as excinfo:
+            run_release(
+                github_client,
+                write_client,
+                repository,
+                ReleaseRecommendation.PATCH,
+                local_checkout_path=local,
+            )
+
+    assert excinfo.value.stage is ReleaseRunStage.PREPARATION
+    mock_publish.assert_not_called()
+    # prepare_release did write locally (that part is real and intentional -
+    # see the module docstring), but nothing was ever dispatched.
+    assert "1.2.4" in (local / "pyproject.toml").read_text()
 
 
 def test_run_release_direct_route_already_prepared_skips_prepare_and_publishes(

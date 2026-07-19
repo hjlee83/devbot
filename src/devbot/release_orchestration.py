@@ -53,6 +53,21 @@ The workflow route needs no such resumption: Task 037 computes its version
 from Git/PR history, and prepared local files are never consumed by it, so
 whether preparation is required is unconditionally re-derived by
 `prepare_release()` on every real workflow-route invocation.
+
+Architecture note - why the workflow route checks `prepare_release()`'s
+actual output against the dispatched `preview`, not just `recommendation`
+against `preview.increment`: `prepare_release()` derives its target from
+local file content, while `preview` derives its target independently from
+the latest *published* Release - and those two baselines can genuinely
+disagree even when `recommendation` and `preview.increment` already agree.
+This is not a theoretical case: this repository's own `pyproject.toml` can
+be, and has been, ahead of its latest published GitHub Release (Task 048/
+049's direct-publish path writes local files independently of what Task 037
+has published). Dispatching `preview` while returning a `preparation`
+result computed from a different baseline would describe two different
+releases in one `ReleaseRunResult`. `run_release` therefore compares
+`preparation_result.new_version` against `preview.next_version` after
+preparing and refuses, before any dispatch, when they differ.
 """
 
 from __future__ import annotations
@@ -319,6 +334,25 @@ def run_release(
             preparation_result = prepare_release(checkout, recommendation)
         except ReleasePreparationError as exc:
             raise ReleaseRunStageError(ReleaseRunStage.PREPARATION, str(exc)) from exc
+
+        # `prepare_release` derives its target from local file content;
+        # `preview` (what is about to be dispatched) derives its target
+        # independently from the latest published Release. These two
+        # baselines can genuinely disagree - e.g. local files already
+        # ahead of the latest Release for an unrelated reason - in which
+        # case dispatching `preview` while reporting `preparation_result`
+        # would describe two different releases in one result. Refuse
+        # before any dispatch rather than let that happen silently.
+        if preparation_result.new_version != preview.next_version:
+            raise ReleaseRunStageError(
+                ReleaseRunStage.PREPARATION,
+                f"prepared {preparation_result.new_version!r} locally, but the "
+                f"workflow route independently computed {preview.next_version!r} as "
+                "the next version from the latest published Release - local "
+                "pyproject.toml/uv.lock are not anchored to the same baseline as the "
+                "latest published Release, so dispatching would publish a different "
+                "release than the one just prepared locally",
+            )
 
         try:
             outcome = publish_release(

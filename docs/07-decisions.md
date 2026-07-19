@@ -618,3 +618,22 @@ sequential `run_release` invocations (with an out-of-band commit/push between th
 `publish_prepared_release`/`GitHubWriteClient.create_release` path with exactly one
 Release created.
 
+**Re-review found a third, related gap in the same PR: matching `recommendation` against
+`preview.increment` was not sufficient, because `prepare_release()`'s actual local
+output was never checked against what `preview` would actually publish.** These are two
+independently-computed baselines - `prepare_release()` derives its target from local
+`pyproject.toml`/`uv.lock`, `preview` derives its target from the latest *published*
+Release - that can agree on `increment` while still disagreeing on the exact version,
+whenever local files are already ahead of (or behind) the latest publication for an
+unrelated reason. This was confirmed non-theoretical against this very repository:
+`pyproject.toml` read `0.1.2` while the latest published Release was `v0.1.1` at the
+time of review. `run_release` now compares `preparation_result.new_version` against
+`preview.next_version` immediately after preparing and refuses, before any dispatch,
+when they differ - `preparation` stage, no exception chained (this is a consistency
+violation detected after the fact, not a wrapped downstream failure). Regression tests:
+`test_run_release_workflow_route_local_preparation_diverges_from_published_baseline`
+(mocked wiring) and `test_run_release_workflow_route_real_repo_local_ahead_of_published
+_baseline_refuses` (real throwaway Git checkout, mirroring the actual repository's
+observed drift) both confirm `publish_release` is never called when the two baselines
+disagree.
+
