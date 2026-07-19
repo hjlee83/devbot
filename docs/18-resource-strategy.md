@@ -7,11 +7,55 @@ why these extend Task 041's Role/Agent model rather than replacing it, and
 for the rejected alternatives (weighted routing, a single global budget,
 overloading `capabilities`).
 
+## Five distinct axes (added 2026-07-20, second CTO review round on PR #117)
+
+The first version of this document under-separated these into a single
+`agent` identifier plus an `execution_mode` tag. Review flagged that as
+conflating concepts that need to stay independently selectable. This model
+now names five axes explicitly, and none of them determines another:
+
+```text
+input/conversation channel   - where a Goal's 다음/리뷰 commands arrive
+                               from (ChatGPT, Claude, Slack, PWA) - ADR-003's
+                               existing concept; never selects an Agent
+role assignment                - which Role (planner/implementer/reviewer/
+                                 ...) a call fills - the `roles:` map key,
+                                 already structurally independent of
+                                 everything else
+execution_mode                   - subscription_assisted | subscription
+                                   _runtime | local_runtime | api |
+                                   deterministic (ADR-007) - chosen FIRST,
+                                   before which specific resource/runtime
+                                   is picked
+resource                          - which subscription/credential pool a
+                                   call draws from within that execution
+                                   mode (a ChatGPT Plus account, a Claude
+                                   Pro account, an OpenAI API key, a local
+                                   GPU pool) - orthogonal to Role; more
+                                   than one Role can share one resource
+runtime / model                    - the concrete execution vehicle within
+                                    that resource (Codex CLI, Claude Code
+                                    CLI, a web chat session, a specific API
+                                    client) and, where the runtime exposes
+                                    a choice, which underlying model
+```
+
+**Selection order is fixed: `execution_mode` -> `resource` -> `runtime`/
+`model`.** A Role's policy first commits to an execution mode (does this
+call need to be autonomous, or is it a human-triggered checkpoint), only
+then does it pick which resource within that mode, only then which
+concrete runtime/model within that resource. Subscription-assisted
+resources (GPT Plus, Claude Pro) and metered API models are never treated
+as interchangeable entries in one flat provider list - they sit under
+different `execution_mode` branches by construction, because they answer
+the prior, more fundamental question (can this be invoked unattended)
+differently.
+
 ## Execution Policy
 
 The configuration a Role resolves against - the Goal-grain equivalent of
-what Task 041's `RoleRoutingConfig` already does per-Role today, now with
-Execution Mode and per-Role budget attached:
+what Task 041's `RoleRoutingConfig` already does per-Role today, now
+carrying the layered selection above:
 
 ```text
 Execution Policy
@@ -20,10 +64,18 @@ Execution Policy
       primary: AgentSelection
       fallback: AgentSelection | none
       AgentSelection
-        agent               - Task 041 AgentDescriptor.id, unchanged
-        execution_mode        - subscription_assisted | subscription_runtime
-                                | local_runtime | api | deterministic
-                                (new, ADR-007)
+        execution_mode        - chosen first (see "Five distinct axes"
+                                above)
+        resource                - which subscription/credential pool,
+                                  within that execution_mode
+        runtime                   - the concrete execution vehicle within
+                                    that resource
+        model                       - optional; which underlying model,
+                                     where the runtime exposes a choice
+        agent                        - Task 041 AgentDescriptor.id,
+                                       unchanged - shorthand for a specific
+                                       (resource, runtime, model) triple,
+                                       not a sixth independent concept
   routing_strategy            - "priority" (Task 041's only implemented
                                 value; kept as the only required strategy,
                                 weighted/performance-based explicitly
@@ -46,10 +98,11 @@ be a configuration-time validation error, not a runtime stall.
 
 This is additive over `src/devbot/agent_registry.py`'s existing
 `RoleRoutingConfig`/`AgentDescriptor` - an Execution Policy with no
-`execution_mode` set for any Agent defaults every Agent to `api` (the
-safest, fully-budgeted assumption), so a pre-ADR-007 `config/agents.yaml`
-resolves identically to how Task 041 already resolves it, per ADR-007's
-Implementation Guidance.
+`execution_mode`/`resource`/`runtime` set for any Agent defaults every
+Agent to `execution_mode: api` (the safest, fully-budgeted assumption) with
+`resource`/`runtime` read from the existing `agent` id unchanged, so a
+pre-ADR-007 `config/agents.yaml` resolves identically to how Task 041
+already resolves it, per ADR-007's Implementation Guidance.
 
 ## Resource Strategy
 

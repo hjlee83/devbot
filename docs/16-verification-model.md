@@ -130,6 +130,40 @@ per node re-evaluated later - and classifying "this invariant needs a rule"
 is far cheaper than running the AI review that rule replaces, especially
 across every subsequent Goal that reuses the same rule once it exists.
 
+#### Power boundary (added 2026-07-20, second CTO review round on PR #117)
+
+**The Architecture gate detects and reports. It never decides.** For a
+flagged node, its AI review call returns exactly one of four typed
+outcomes - it does not, and structurally cannot, edit the approved Goal
+Specification, a Task Specification, or any `docs/adr/` decision itself:
+
+```text
+Architecture Gate Outcome
+  PASS       - no blocking findings; node's Architecture gate satisfied
+  FAIL       - blocking findings, all within the node's already-approved
+              Scope; routes to REVISING (an implementation fix is expected
+              to resolve it, same as today's REQUEST CHANGES)
+  RETRY      - the review call itself was inconclusive (errored, produced
+              an invalid ReviewReport) - re-attempt the call, bounded by
+              the same Budget as any other Architecture-gate call; not a
+              finding about the code, a finding about the check itself
+  ESCALATE   - a finding implies the approved Specification, an accepted
+              ADR, or the Goal's Scope itself would need to change to
+              resolve it. The gate does not decide this - it cannot
+              approve a scope change, and it must not silently treat the
+              implementation as wrong when the actual problem is that the
+              approved contract no longer fits. ESCALATE routes to a Goal
+              Amendment (`docs/17-execution-revision-loop.md`), never to
+              REVISING.
+```
+
+This applies to every AI-judgment call this document defines, not only the
+Architecture gate proper - the Contract gate's scope-creep judgment uses
+the same four outcomes for the same reason: a classification call is
+read-only with respect to the Specification it is checking against. No
+gate anywhere in this Verification Plan has write access to the artifact
+it verifies.
+
 ### Goal gate detail
 
 Purely an aggregation function over every *required* node's already

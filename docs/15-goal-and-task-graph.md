@@ -1,12 +1,21 @@
 # Goal Aggregate and Task Graph
 
 Architecture document for devbot/devbot#116. Defines the **Goal**, **Goal
-Specification**, **Definition of Done**, **Task Graph**, and **Completion
-Report** models required by that Goal's Scope. See
+Specification**, **Definition of Done**, **Goal Execution Plan**, **Task
+Graph**, and **Completion Report** models required by that Goal's Scope. See
 [ADR-006](adr/ADR-006-goal-driven-execution.md) for why Goal is the
 user-facing unit while Task stays the internal execution unit unchanged, and
 `docs/17-execution-revision-loop.md` for the Goal State Machine these models
 live inside.
+
+**Correction (2026-07-20, second CTO review round on PR #117):** the first
+version of this document treated Task Graph, Verification Plan, Execution
+Policy, Resource Strategy, and Budget as independently-attached fields on
+`Goal`, populated at different times by different mechanisms. Review
+flagged this as under-specifying `PLANNING`'s actual responsibility:
+`PLANNING` must produce all of these together, as **one** frozen "Goal
+Execution Plan," not as loose fields that could drift out of sync with each
+other. See the new "Goal Execution Plan" section below.
 
 ## Relationship to existing code
 
@@ -38,22 +47,70 @@ Goal
   id                    - stable identifier (e.g. the originating Issue/
                            request that proposed it)
   title                  - short human-facing summary
-  specification          - Goal Specification (below)
+  specification          - Goal Specification (below) - the human-approved
+                           intent, frozen at GOAL_APPROVED
   state                   - current Goal State Machine state
                             (docs/17-execution-revision-loop.md)
-  task_graph              - Task Graph (below)
-  resource_strategy        - Resource Strategy (docs/18-resource-strategy.md)
-  budget                   - AI/Token Budget (docs/18-resource-strategy.md)
-  verification_plan        - Verification Plan (docs/16-verification-model.md)
+  execution_plan           - Goal Execution Plan (below) - null until
+                            PLANNING completes; the concrete, frozen
+                            contract EXECUTING/VERIFYING/AUDITING all read
+                            from
   completion_report         - Completion Report (below), present only once
                               REVIEW_REQUESTED is reached
   created_at, updated_at
 ```
 
-A Goal owns exactly one Task Graph. It does not own Tasks directly - Tasks
-are owned the same way they always have been (by their Issue/Branch/
-Contract/PR), and the Task Graph is only a typed index over which existing
-Tasks belong to this Goal and in what order.
+A Goal owns exactly one Task Graph, reached through its `execution_plan`.
+It does not own Tasks directly - Tasks are owned the same way they always
+have been (by their Issue/Branch/Contract/PR), and the Task Graph is only a
+typed index over which existing Tasks belong to this Goal and in what
+order.
+
+## Goal Execution Plan
+
+`PLANNING`'s actual output. Not merely a Task Graph - a single frozen bundle
+covering everything `EXECUTING`, `VERIFYING`, and `AUDITING` need, produced
+together so none of its parts can silently drift out of sync with each
+other:
+
+```text
+Goal Execution Plan
+  task_graph               - Task Graph (below)
+  verification_plan         - Verification Plan (docs/16-verification
+                             -model.md), concretized per node - includes
+                             every node's Invariant Classification, not
+                             just the Goal Specification's abstract
+                             verification_requirements
+  execution_policy           - Execution Policy (docs/18-resource
+                              -strategy.md), resolved Role -> Agent
+                              assignments
+  resource_strategy            - Resource Strategy (docs/18-resource
+                                -strategy.md)
+  budget                        - AI/Token Budget (docs/18-resource
+                                 -strategy.md)
+  definition_of_done             - Definition of Done (below), carried
+                                  unchanged from the Goal Specification -
+                                  PLANNING does not redefine it, only
+                                  attaches it to the same frozen bundle
+                                  everything else lives in
+```
+
+`PLANNING` produces this as one atomic unit, not five independent writes:
+a Goal cannot enter `EXECUTING` with a Goal Execution Plan whose parts are
+inconsistent with each other - for example, a Verification Plan whose
+Invariant Classification flags more nodes `ai_review_required` than the
+attached Budget's `max_architecture_review_calls_per_goal` can cover is a
+`PLANNING`-time inconsistency, caught and escalated before any node
+materializes, never discovered partway through `EXECUTING`. The Goal
+Specification (human-approved at `GOAL_APPROVED`) supplies the *intent* -
+Scope, Non-goals, Definition of Done, and high-level verification/resource
+preferences; `PLANNING` resolves that intent, together with the
+deployment's configured Resource Strategy defaults
+(`config/agents.yaml`-equivalent, Task 041), into this one concrete,
+Goal-specific execution contract. This mirrors the same "resolve intent
+into an executable contract" relationship
+[ADR-002](adr/ADR-002-specification-first-architecture.md) already
+establishes between a Task and its Specification, one level up.
 
 ## Goal Specification
 

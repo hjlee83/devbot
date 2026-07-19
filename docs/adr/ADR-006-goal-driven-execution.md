@@ -101,6 +101,26 @@ ADR-007's Execution Mode correction for why `subscription_assisted` (the
 mode this checkpoint necessarily runs in) cannot be queued automatically
 the way the first version of `REVIEW_REQUESTED` assumed.
 
+### Architectural Invariant
+
+**Added 2026-07-20, second CTO review round on PR #117**, at the
+reviewer's explicit request to pin the two-checkpoint shape as an
+invariant, not merely describe it:
+
+> `다음` is the only user approval point that starts a Goal
+> (`GOAL_PROPOSED -> GOAL_APPROVED`). `리뷰` is the only user approval
+> point that concludes one, and it runs as a conversation-agent-executed
+> audit (`AUDITING`, `docs/17-execution-revision-loop.md`), not a personal
+> human read of every node. No other user approval point exists in this
+> state machine. **An implementation that reintroduces Task- or Pull
+> -Request-level user approval as a required gate on the Goal's forward
+> progress is an architecture violation**, not an acceptable variation -
+> it collapses the Goal-grain checkpoint this whole ADR exists to
+> establish back to Task-grain, defeating the reduction in human and AI
+> touchpoints that is Issue #116's actual product intent. This does not
+> restrict a human from looking at any Task PR at any time; it restricts
+> making that look a required gate.
+
 ### Why this does not violate Human-first Planning
 
 `GOAL_APPROVED` is the same kind of gate `CONSTITUTION.md` §1 already

@@ -235,17 +235,33 @@ Agents -> Execution Mode, exactly as ADR-001 requires.
 ```yaml
 # example: subscription-first configuration (GPT Plus + Codex CLI) -
 # DevBot's actual current default shape (Task 011's ClaudeRunner/CodexRunner
-# are both CLI tools run under a subscription plan, not metered API calls)
+# are both CLI tools run under a subscription plan, not metered API calls).
+# Shown fully layered (execution_mode -> resource -> runtime) per the
+# five-axis model in docs/18-resource-strategy.md; `agent` is unchanged
+# shorthand for the same (resource, runtime) pair where the layering isn't
+# the point being illustrated.
 roles:
   planner:
     # subscription_assisted here binds GOAL_PROPOSED's design conversation
     # and AUDITING's Goal audit - never PLANNING itself, which stays
     # deterministic (Task 038) and needs no execution_mode call at all
-    primary: { agent: gpt_plus, execution_mode: subscription_assisted }
-    fallback: { agent: claude_pro, execution_mode: subscription_assisted }
+    primary:
+      execution_mode: subscription_assisted
+      resource: chatgpt_plus_account
+      runtime: chatgpt_web_chat
+    fallback:
+      execution_mode: subscription_assisted
+      resource: claude_pro_account
+      runtime: claude_pro_chat
   implementer:
-    primary: { agent: codex, execution_mode: subscription_runtime }
-    fallback: { agent: claude_code, execution_mode: subscription_runtime }
+    primary:
+      execution_mode: subscription_runtime
+      resource: chatgpt_plus_account
+      runtime: codex_cli
+    fallback:
+      execution_mode: subscription_runtime
+      resource: claude_pro_account
+      runtime: claude_code_cli
   reviewer:
     primary: { agent: codex, execution_mode: subscription_runtime }
     fallback: { agent: gpt_api, execution_mode: api }
@@ -257,7 +273,7 @@ budget:
   api_usage: allowed
   exhaustion_behavior: escalate
 
-# example: Claude-first configuration
+# example: Claude-first configuration (agent shorthand)
 roles:
   planner:   { primary: { agent: claude_pro, execution_mode: subscription_assisted } }
   implementer: { primary: { agent: claude_code, execution_mode: subscription_runtime } }
@@ -268,7 +284,8 @@ budget:
 
 # example: API-first configuration (no subscription product involved,
 # e.g. headless CI-style deployment - planner conversation still needs a
-# human at GOAL_PROPOSED/AUDITING; nothing here makes that step unattended)
+# human at GOAL_PROPOSED/AUDITING; nothing here makes that step unattended;
+# agent shorthand)
 roles:
   planner:     { primary: { agent: gpt_plus, execution_mode: subscription_assisted } }
   implementer: { primary: { agent: claude_api, execution_mode: api } }

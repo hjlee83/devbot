@@ -36,6 +36,25 @@ supposed to shrink.
 
 ## Decision
 
+**Core principle (added 2026-07-20, second CTO review round on PR #117,
+at the reviewer's explicit request to state this as a first-class
+principle rather than leave it implied by the rest of this document):**
+the four-gate split is not verification added for its own sake. It exists
+specifically **to keep human involvement at exactly one `다음` and one
+`리뷰` per Goal, and to minimize intermediate AI (GPT/Claude, or any other
+Agent) calls in between.** A deterministic gate does not substitute for AI
+judgment where judgment is genuinely required - ADR-001 never claimed
+determinism could replace architectural reasoning. What a deterministic
+gate does is **eliminate an AI call everywhere judgment is *not* required**,
+and that eliminated cost is what makes removing per-Task human review
+affordable, and what bounds the autonomous loop (`docs/17
+-execution-revision-loop.md`) to a knowable number of AI calls per Goal
+instead of an open-ended one. Every specific gate design choice below - the
+Architecture gate's selective invocation, the Contract gate's narrow
+scope-creep judgment, the Budget's per-node and per-Goal ceilings
+(ADR-007) - exists in service of this principle, not as an independent
+design preference.
+
 Verification is decomposed into four gates, each independently satisfiable
 and each explicit about how much of it is deterministic versus AI judgment.
 A Goal only reaches `REVIEW_REQUESTED` once every Task Graph node it depends
@@ -114,6 +133,17 @@ applying unchanged. The AI call itself uses `subscription_runtime` or `api`
 execution mode (`docs/adr/ADR-007-ai-resource-subscription-strategy.md`) -
 never `subscription_assisted`, since it must complete without a human
 present.
+
+**Power boundary (added 2026-07-20, second CTO review round on PR #117):**
+this gate, and every other AI-judgment call this ADR defines, detects and
+reports - it never has write access to the Specification, an accepted ADR,
+or the Goal's Scope it is checking against. Its outcome is one of four
+typed values (`PASS`/`FAIL`/`RETRY`/`ESCALATE`,
+`docs/16-verification-model.md`'s "Power boundary"); `ESCALATE` means a
+finding implies the approved contract itself needs to change, and routes
+to a **Goal Amendment** (`docs/17-execution-revision-loop.md`) - a
+`GOAL_APPROVED`-grade human re-approval of the delta, never something a
+gate or a rework cycle resolves by itself.
 
 ### Goal gate (deterministic aggregation)
 
