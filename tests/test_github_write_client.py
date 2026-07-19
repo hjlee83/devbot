@@ -154,6 +154,11 @@ def test_write_client_exposes_write_operations_only() -> None:
         "create_issue",
         "create_branch",
         "create_file",
+        # Task 049: the second, deliberate direct publish path - creates a
+        # published GitHub Release for a tag `release_publish` already
+        # created and pushed itself via local `git`. See
+        # docs/07-decisions.md for why this coexists with `dispatch_workflow`.
+        "create_release",
     }
 
     public_attrs = {

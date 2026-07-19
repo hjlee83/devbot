@@ -196,6 +196,19 @@ Requirements:
 - The CLI must present the target version, tag, and SHA before publishing.
 - Existing repository selection conventions should be reused.
 
+## Files Expected to Change
+
+- `src/devbot/release_publish.py` (new)
+- `src/devbot/github_write_client.py` (new `create_release` write method)
+- `src/devbot/release_preparation.py` (safe reuse only - expose the shared
+  current-version reader Task 048 already validates against)
+- `src/devbot/main.py` (CLI wiring)
+- `tests/test_release_publish.py` (new)
+- `docs/07-decisions.md` (record the second publish path as an intentional
+  decision)
+- `results/049-release-publish.md`
+- `docs/00-roadmap.md`
+
 ## Dependencies
 
 - Existing authoritative version reader and Task 048 version consistency logic.

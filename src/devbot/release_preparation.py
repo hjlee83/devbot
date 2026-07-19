@@ -86,6 +86,16 @@ class ReleasePreparationResult:
     changed_paths: tuple[str, ...]
 
 
+def _validate_stable_version_format(version: str) -> tuple[int, int, int]:
+    match = _SEMVER_RE.match(version.strip())
+    if match is None:
+        raise MalformedProjectVersionError(
+            f"only stable three-component numeric versions are supported, found {version!r}"
+        )
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
 def calculate_next_version(current: str, recommendation: ReleaseRecommendation) -> str:
     """Pure: `X.Y.Z` -> the next `X.Y.Z` per `recommendation`.
     `ReleaseRecommendation.NONE` always raises `NoReleaseRequiredError` -
@@ -95,12 +105,7 @@ def calculate_next_version(current: str, recommendation: ReleaseRecommendation) 
             "ReleaseRecommendation.NONE requires no release preparation"
         )
 
-    match = _SEMVER_RE.match(current.strip())
-    if match is None:
-        raise MalformedProjectVersionError(
-            f"only stable three-component numeric versions are supported, found {current!r}"
-        )
-    major, minor, patch = (int(part) for part in match.groups())
+    major, minor, patch = _validate_stable_version_format(current)
 
     if recommendation is ReleaseRecommendation.MAJOR:
         return f"{major + 1}.0.0"
@@ -213,6 +218,35 @@ def _replace_version_in_span(
     return text[:start] + new_span_text + text[end:]
 
 
+def read_current_version(project_root: Path) -> str:
+    """Reads and cross-validates the current version: `pyproject.toml`'s
+    `[project].version` must exist and exactly match `uv.lock`'s `devbot`
+    package entry. Read-only, no version calculation. Raises
+    `VersionSourceNotFoundError`/`MalformedProjectVersionError`/
+    `VersionSourceMismatchError` on any inconsistency. Shared by
+    `plan_release_preparation` (Task 048) and Task 049's release-publish
+    boundary, which must read the already-prepared version without
+    duplicating this cross-check."""
+    pyproject_path = project_root / PYPROJECT_FILENAME
+    uv_lock_path = project_root / UV_LOCK_FILENAME
+    if not pyproject_path.is_file():
+        raise VersionSourceNotFoundError(f"{pyproject_path} does not exist")
+    if not uv_lock_path.is_file():
+        raise VersionSourceNotFoundError(f"{uv_lock_path} does not exist")
+
+    pyproject_version = _read_pyproject_version(pyproject_path.read_text(encoding="utf-8"))
+    uv_lock_version = _read_uv_lock_devbot_version(uv_lock_path.read_text(encoding="utf-8"))
+
+    _validate_stable_version_format(pyproject_version)
+
+    if pyproject_version != uv_lock_version:
+        raise VersionSourceMismatchError(
+            f"pyproject.toml version {pyproject_version!r} does not match uv.lock "
+            f"devbot version {uv_lock_version!r}"
+        )
+    return pyproject_version
+
+
 def plan_release_preparation(
     project_root: Path, recommendation: ReleaseRecommendation
 ) -> ReleasePreparationResult:
@@ -227,25 +261,12 @@ def plan_release_preparation(
 
     pyproject_path = project_root / PYPROJECT_FILENAME
     uv_lock_path = project_root / UV_LOCK_FILENAME
-    if not pyproject_path.is_file():
-        raise VersionSourceNotFoundError(f"{pyproject_path} does not exist")
-    if not uv_lock_path.is_file():
-        raise VersionSourceNotFoundError(f"{uv_lock_path} does not exist")
-
-    pyproject_version = _read_pyproject_version(pyproject_path.read_text(encoding="utf-8"))
-    uv_lock_version = _read_uv_lock_devbot_version(uv_lock_path.read_text(encoding="utf-8"))
-
-    if pyproject_version != uv_lock_version:
-        raise VersionSourceMismatchError(
-            f"pyproject.toml version {pyproject_version!r} does not match uv.lock "
-            f"devbot version {uv_lock_version!r}"
-        )
-
-    new_version = calculate_next_version(pyproject_version, recommendation)
+    current_version = read_current_version(project_root)
+    new_version = calculate_next_version(current_version, recommendation)
 
     return ReleasePreparationResult(
         recommendation=recommendation,
-        old_version=pyproject_version,
+        old_version=current_version,
         new_version=new_version,
         changed_paths=(str(pyproject_path), str(uv_lock_path)),
     )

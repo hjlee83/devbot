@@ -391,6 +391,64 @@ hand-written notes (there is no `Improvements` section content, for example) in
 exchange for being fully deterministic and auditable back to `merged PRs, Task
 contracts, Result documents`.
 
+## 2026-07-19 — A second, direct release-publish path is added deliberately, alongside (not replacing) the workflow-dispatch path (Task 049)
+
+The entry above states that `release_ops.py` has "no local fallback path that creates a
+tag or Release directly, by construction, not just by convention" - that guarantee no
+longer describes the whole repository. Task 049 (`src/devbot/release_publish.py`)
+implements exactly that second path: DevBot's own process creates and pushes an
+annotated Git tag, then calls `GitHubWriteClient.create_release` directly, without
+dispatching or waiting on `.github/workflows/release.yml`. This section documents why
+the second path was added and how the two are kept from conflicting with each other.
+
+**This was a deliberate, discussed decision, not an oversight.** Task 049's own Task
+Contract and Specification explicitly required "Create and push the Git tag" and
+"Create the GitHub Release using explicit release notes supplied by the caller" -
+requirements that only make sense for a direct, two-step local publish (its own
+required-tests list includes "GitHub Release creation failure after successful tag
+push," a failure mode that cannot occur from DevBot's perspective when it only
+dispatches a workflow that does both steps atomically inside one CI job). Implementing
+Task 049 as written meant knowingly introducing the second path the original ADR was
+written to prevent. The operator confirmed this tradeoff explicitly before
+implementation began, having weighed how an incomplete/still-maturing implementation
+should fail: never silently claim success, never auto-delete or force-move a real
+pushed tag, and always leave a safe, explicit retry path - see Task 049's "Publication
+Order and Partial Failure" and "Idempotency" sections
+(`specifications/049-release-publish.md`), which `release_publish.py` implements
+exactly.
+
+**The two paths are named distinctly so they are never invoked interchangeably.**
+`devbot release publish` (Task 037, `release_ops.py`) is unchanged: it still only
+calls `dispatch_workflow`, builds artifacts, and waits on CI. The new path is
+`devbot release publish-prepared` (Task 049, `release_publish.py`) - a different
+subcommand with a different, non-overlapping flag set (`--notes-file` is required;
+there is no `--poll-interval-seconds`/`--timeout-seconds`, since there is no workflow
+run to wait on). Neither command's code path can invoke the other's write operation.
+
+**The new path reuses the version Task 048 already prepared - it never computes one.**
+`release_publish.read_current_version` (promoted from `release_preparation`, the same
+function `plan_release_preparation` itself uses) is the only version source Task 049
+reads; it is never allowed to calculate a version like Task 048 does. `pyproject.toml`
+and `uv.lock` are read-only from Task 049's perspective (regression-tested).
+
+**Never overwrite, never force, never silently repair.** An existing tag or Release
+that disagrees with the verified target commit fails closed
+(`ConflictingTagError`/`ConflictingReleaseError`); no `git` invocation in
+`release_publish.py` ever passes `-f`/`--force` (statically and behaviourally
+regression-tested). If the tag push succeeds but Release creation fails,
+`PartialPublicationError` identifies the pushed tag and the tag is never deleted -
+`publish_prepared_release` is safe to call again and will only create the missing
+Release, never re-tag or move it.
+
+**Tests never touch a real GitHub remote or the real devbot tag/Release history.**
+`tests/test_release_publish.py` runs real `git tag`/`git push` against a throwaway
+local bare repository created and destroyed per test (`tmp_path`) standing in for
+`origin` - this exercises actual `git` semantics (annotated-tag dereferencing, `git
+push` failure modes) more rigorously than mocking `subprocess` would, while never
+creating a tag or Release that touches this project's real history. All GitHub API
+interaction (`GitHubClient`/`GitHubWriteClient`) is a `MagicMock` with no network
+access.
+
 **`release.yml` gained one new optional `workflow_dispatch` input, `notes`, rather than
 a second workflow or a post-hoc `gh release edit`.** The existing manual dispatch path
 (`manual_release_plan`) still defaults to its one-line notes when `notes` is absent or
