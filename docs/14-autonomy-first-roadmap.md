@@ -128,12 +128,19 @@ DevBot 자기수정 PR은 항상 사람 머지 레일에 남긴다. 게이트 �
 무인 루프가 신뢰되기 전까지 **열지 않는다.** 전부 위 구조에 additive.
 
 - [ ] 도그푸딩 재점화 (Phase B 완료가 전제)
-- [ ] 동적 프로바이더/키 레지스트리 (어드민에서 키 추가 → 런타임 등록)
-- [ ] 라우팅 전략 고도화: 뺑뺑이 / drain-then-failover는 B4에 근접, **사용량 추적 기반(곧 끝날 애 후순위)** 만 여기
-- [ ] 어드민 UI (얇은 뷰)
+- [ ] 동적 프로바이더/키 레지스트리 (어드민에서 키 추가 → 런타임 등록) — 아키텍처 청사진: `docs/18-resource-strategy.md`
+- [ ] 라우팅 전략 고도화: 뺑뺑이 / drain-then-failover는 B4에 근접, **사용량 추적 기반(곧 끝날 애 후순위)** 만 여기 — weighted/performance 기반 라우팅은 `docs/adr/ADR-007-ai-resource-subscription-strategy.md`가 명시적으로 범위 밖으로 재확인
+- [ ] 어드민 UI (얇은 뷰) — `docs/adr/ADR-004-pwa-as-devbot-control-center.md`
 - [ ] 자기업데이트(main 최신화 → 즉시 반영), 안전장치(last-known-good, 테스트 게이트) 동반
 - [ ] `bot init` (대상 repo 부트스트랩)
 - [ ] 음성 입구
+- [ ] Goal-driven·verification-first 루프 (devbot/devbot#116): Task 단위
+      착수·리뷰를 Goal 단위 `다음`/`리뷰`로 압축. 이 로드맵의 순서를
+      바꾸지 않음 — Phase B(무인 루프 신뢰)가 끝난 뒤에만 착수하는 Phase
+      C 항목이며, 여기 나열된 다른 Phase C 항목들과 마찬가지로 아직 열지
+      않는다. 아키텍처/계약은 `docs/adr/ADR-005~007`,
+      `docs/15-goal-and-task-graph.md`~`docs/18-resource-strategy.md`에
+      이미 확정되어 있고, 실행 엔진 구현은 별도의 후속 구현 Goal이다.
 
 ## 리팩터 원칙 (드리프트 청산)
 
