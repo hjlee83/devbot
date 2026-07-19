@@ -66,6 +66,14 @@ from devbot.release_ops import (
     fetch_release_preview,
     publish_release,
 )
+from devbot.release_orchestration import (
+    ReleaseOrchestrationError,
+    ReleaseRunOutcome,
+    ReleaseRunPlan,
+    ReleaseRunStage,
+    build_release_run_plan,
+    run_release,
+)
 from devbot.release_preparation import (
     ReleasePreparationError,
     plan_release_preparation,
@@ -772,6 +780,39 @@ def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:
         help="검증된 미리보기(버전/태그/대상 커밋)만 출력하고 태그/Release를 만들지 않습니다.",
     )
 
+    run_parser = release_subparsers.add_parser(
+        "run",
+        help=(
+            "Task 051: 추천값(Task 047)부터 준비(Task 048)·전략 해석(Task 050)·게시까지 "
+            "기존 두 게시 경로 중 정확히 하나로 한 번에 안전하게 실행합니다."
+        ),
+    )
+    run_parser.add_argument(
+        "--level",
+        choices=("major", "minor", "patch", "none"),
+        required=True,
+        help="릴리스 수준. none은 이 명령이 즉시 거부합니다(준비할 것이 없음).",
+    )
+    run_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+    run_parser.add_argument(
+        "--notes-file",
+        default=None,
+        help=(
+            "direct 전략일 때 필요한 Release Notes 파일 경로. workflow 전략에는 쓰이지 "
+            "않습니다."
+        ),
+    )
+    # Deliberately the same `dry_run` dest as the top-level `--dry-run` and
+    # `release publish`'s own flag (see that parser's comment): this command
+    # can reach either write path, so the global flag protects it too.
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="전체 실행 계획만 출력하고 아무것도 쓰지 않습니다.",
+    )
+
 
 def _run_release_prepare_command(args: argparse.Namespace) -> int:
     """Task 048: purely local - no GitHub client, no `_resolve_repository`
@@ -927,6 +968,79 @@ def _run_release_strategy_command(args: argparse.Namespace, config: DevBotConfig
     return 0
 
 
+def _render_release_run_plan(plan: ReleaseRunPlan) -> str:
+    lines = [
+        f"repository: {plan.repository}",
+        f"recommendation: {plan.recommendation}",
+        f"current_version: {plan.current_version}",
+        f"target_version: {plan.target_version}",
+        f"effective_strategy: {plan.effective_strategy}",
+        f"preparation_required: {'yes' if plan.preparation_required else 'no'}",
+        f"publish_route: {plan.publish_route}",
+    ]
+    if plan.publish_route == ReleaseRunStage.DIRECT_PUBLISH and not plan.direct_notes_available:
+        lines.append("  blocker: --notes-file 없이는 direct 게시를 진행할 수 없습니다.")
+    return "\n".join(lines)
+
+
+def _run_release_run_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    """Task 051: composes recommendation, preparation, strategy resolution,
+    and exactly one existing publish path (workflow or direct) into one
+    command - see `devbot.release_orchestration`'s module docstring for why
+    the direct route may stop at `prepared_pending_commit` instead of
+    completing publication in the same invocation."""
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    recommendation = ReleaseRecommendation(args.level)
+
+    notes: str | None = None
+    if args.notes_file is not None:
+        try:
+            notes = Path(args.notes_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"release run 오류: notes 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
+            return 1
+
+    try:
+        if args.dry_run:
+            plan = build_release_run_plan(repository, recommendation, notes=notes)
+            print(_render_release_run_plan(plan))
+            print("dry-run: 아무것도 쓰지 않았습니다.")
+            return 0
+
+        github_client = GitHubClient(config.github_token)
+        write_client = GitHubWriteClient(config.github_token)
+        result = run_release(
+            github_client, write_client, repository, recommendation, notes=notes
+        )
+    except ReleaseOrchestrationError as exc:
+        print(f"release run 오류 [stage={exc.stage}]: {exc}", file=sys.stderr)
+        return 1
+
+    print(_render_release_run_plan(result.plan))
+    print(f"outcome: {result.outcome}")
+    if result.preparation is not None:
+        print(f"old_version: {result.preparation.old_version}")
+        print(f"new_version: {result.preparation.new_version}")
+    if result.workflow_outcome is not None:
+        print(f"tag: {result.workflow_outcome.tag}")
+        print(f"release_url: {result.workflow_outcome.release_url}")
+    if result.direct_result is not None:
+        print(f"tag: {result.direct_result.tag}")
+        print(f"release_url: {result.direct_result.release_url or 'none'}")
+    if result.outcome == ReleaseRunOutcome.PREPARED_PENDING_COMMIT:
+        print(
+            "다음 단계: 준비된 버전 파일을 커밋하고 push한 뒤 "
+            "'devbot release publish-prepared'로 게시를 완료하세요 "
+            "(이 명령을 다시 실행하면 버전이 한 번 더 올라갑니다)."
+        )
+    return 0
+
+
 def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     if args.release_command == "prepare":
         return _run_release_prepare_command(args)
@@ -934,6 +1048,8 @@ def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
         return _run_release_publish_prepared_command(args, config)
     if args.release_command == "strategy":
         return _run_release_strategy_command(args, config)
+    if args.release_command == "run":
+        return _run_release_run_command(args, config)
 
     try:
         repository = _resolve_repository(config, args.repo)

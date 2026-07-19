@@ -536,3 +536,73 @@ calculation, does not perform any tag/Release/workflow-dispatch write itself, do
 merge the two publish commands into one, and does not remove either existing path -
 `devbot release publish` and `devbot release publish-prepared` both remain, gated so that
 only one is ever valid per repository.
+
+## 2026-07-19 — `devbot release run` composes existing modules; the direct route deliberately cannot always finish in one call (Task 051)
+
+Task 051 (`src/devbot/release_orchestration.py`) adds one command,
+`devbot release run --level major|minor|patch|none`, that wires Task 047's
+`ReleaseRecommendation`, Task 048's `plan_release_preparation`/`prepare_release`,
+Task 050's `resolve_release_publish_strategy`, and exactly one of Task 037's
+`publish_release` or Task 049's `publish_prepared_release` into one operator-facing
+sequence - without reimplementing any of their policy or safety logic. This entry
+records a real structural conflict discovered while implementing it, and the
+deliberate, discussed choice made to resolve it without adding a new capability.
+
+**The conflict: chaining "prepare, then publish" in one process can never complete for
+the direct route, given the existing safety boundaries.** Task 049's own design
+principle - "`pyproject.toml`/`uv.lock` are read-only from Task 049's perspective" (see
+the 2026-07-19 Task 049 entry above) - means `preview_release_publish`/
+`publish_prepared_release` always refuse on an uncommitted local change
+(`DirtyWorktreeError`) or a `main` that hasn't been pushed to the version those files
+declare (`StaleMainError`). Task 048's `prepare_release()` necessarily leaves the
+checkout with exactly those two files modified and uncommitted -
+`old_version != new_version` always, for every recommendation this task accepts. There
+is no way to call `prepare_release()` and then immediately publish through the direct
+path without that publish attempt raising `DirtyWorktreeError`, and no way to bypass
+it - unlike the workflow route, `publish_prepared_release` has no "already-computed
+preview" injection point to sidestep a fresh dirty-check.
+
+**An early design attempt (publish first, prepare only as a fallback) was tried,
+found to have a real correctness bug via a throwaway-repo smoke test, and discarded.**
+Attempting `publish_prepared_release` before `prepare_release` "succeeds" whenever the
+checkout happens to start clean - but it then silently publishes whatever *un-bumped*
+version is currently committed, ignoring `recommendation` entirely. `run_release`
+therefore always calls `prepare_release()` before ever attempting a direct publish;
+regression test `test_run_release_direct_route_real_prepare_never_publishes_prematurely`
+(`tests/test_release_orchestration.py`) exercises this exact scenario against a real
+throwaway Git repo and pins the fix.
+
+**The resolution: treat the resulting refusal as an expected, reportable outcome, not
+a failure - and do not add a new commit/push capability to reach the alternative.**
+Adding an in-process `git commit`/`git push` to `main` was considered and rejected: it
+is a new, high-blast-radius, hard-to-reverse capability nowhere authorized by Task 051's
+Contract or Specification, on a self-hosted repository where DevBot manages its own
+release history. Instead, when `publish_prepared_release` refuses specifically with
+`DirtyWorktreeError`/`StaleMainError` immediately after a real `prepare_release()` call,
+`run_release` returns `ReleaseRunOutcome.PREPARED_PENDING_COMMIT` (not an exception) -
+the prepared files are on disk, nothing was published, and the operator commits and
+pushes them out of band, then completes publication with the existing, unmodified
+`devbot release publish-prepared` (Task 049) - not by re-running `release run`, which
+would prepare, and therefore bump, a second time.
+
+**Consequence, stated plainly: for the direct strategy, real `devbot release run`
+execution cannot reach `DIRECT_PUBLISHED` today.** Every real invocation that reaches
+the direct route ends in `PREPARED_PENDING_COMMIT`, by construction, given the existing
+safety boundaries. `ReleaseRunOutcome.DIRECT_PUBLISHED` remains a defined, tested outcome
+(verified at the orchestration-wiring level with mocked downstream calls, since the
+underlying trigger condition needs a capability this task does not have) so that a
+future task adding that capability - or an operator who separately prepared, committed,
+and pushed out of band before some other future entry point calls
+`publish_prepared_release` - has a well-defined result to produce. The workflow route has
+no such limitation: Task 037 computes its version from Git/PR history, never from local
+files, so `run_release` never calls `prepare_release()` for that route at all, and real
+execution completes end-to-end in one call
+(`test_run_release_workflow_route_real_repo_leaves_files_untouched`).
+
+**Every downstream failure is reported with a stable stage identifier and the original
+exception chained (`raise ... from exc`).** `ReleaseRunStage` names exactly the five
+points specified: `recommendation`, `preparation`, `strategy_resolution`,
+`workflow_publish`, `direct_publish`. `resolve_release_publish_strategy` is still the
+only place `publish_strategy` is parsed or defaulted - `run_release` only compares its
+already-typed `.effective` result to select a route, never re-implementing Task 050's
+logic.

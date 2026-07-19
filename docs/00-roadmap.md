@@ -512,3 +512,37 @@
       모두 그대로 남고, 저장소마다 둘 중 하나만 유효하도록 게이트만
       추가했다(`src/devbot/release_publish_strategy.py`,
       `results/050-release-publish-strategy.md`).
+- [x] Task 051: release orchestration. Task 047(추천)·048(준비)·050(전략
+      해석)과 Task 037/049의 기존 두 게시 경로를 정책 로직 중복 없이
+      한 명령으로 엮는 `src/devbot/release_orchestration.py`와
+      `devbot release run --level major|minor|patch|none [--notes-file]
+      [--dry-run]`을 추가했다. 구현 중 실제 구조적 충돌을 하나
+      발견했다 - Task 049는 "pyproject.toml/uv.lock을 읽기 전용으로
+      취급"하도록 설계돼 있어 커밋되지 않은 변경이면 무조건 거부하는데
+      (`DirtyWorktreeError`), Task 048의 `prepare_release()`는 언제나
+      그 두 파일을 커밋 안 된 상태로 남긴다 - 즉 direct 경로에서
+      "준비 후 곧바로 게시"를 한 프로세스 안에서 이어붙이면 게시
+      시도가 항상 실패한다. 처음엔 "게시를 먼저 시도하고 실패하면
+      준비"하는 순서로 구현했다가, 임시 Git 저장소로 직접 검증하는
+      과정에서 실제 버그(체크아웃이 깨끗하면 `recommendation`을 완전히
+      무시하고 아직 올리지 않은 버전을 그대로 게시해버림)를 발견해
+      순서를 뒤집었다(`prepare_release()`를 먼저, 게시 시도는 그 다음).
+      main에 직접 commit+push하는 새 권한을 추가하는 방법도 검토했지만
+      Contract/Spec 어디에도 근거가 없고 self-hosted 봇에게는 파급력이
+      너무 커서 채택하지 않았다 - 대신 준비 직후의 게시 거부를 실패가
+      아니라 `PREPARED_PENDING_COMMIT`이라는 정상 결과로 보고하고,
+      운영자가 준비된 파일을 커밋·push한 뒤 기존
+      `devbot release publish-prepared`로 게시를 마치도록 안내한다
+      (`release run`을 다시 실행하면 버전이 한 번 더 올라간다). 그
+      결과 direct 전략의 실제(non-dry-run) 실행은 현재 한 번의 호출로
+      `DIRECT_PUBLISHED`까지 도달하지 못한다 - 이 사실을
+      `docs/07-decisions.md`(2026-07-19 항목)에 그대로 기록했다.
+      workflow 전략은 이런 제약이 없다 - Task 037의 버전은 로컬
+      파일이 아니라 Git/PR 히스토리로 계산되므로 `run_release`는 이
+      경로에서 로컬 파일을 전혀 쓰지 않고 한 번의 호출로 끝까지
+      완료된다. `ReleaseRunStage`(recommendation/preparation/
+      strategy_resolution/workflow_publish/direct_publish) 5개 값으로
+      모든 실패를 원인 예외 체이닝과 함께 보고하고, 두 게시 경로가
+      한 실행에서 동시에 호출되지 않음을 매트릭스 테스트로
+      검증했다(`src/devbot/release_orchestration.py`,
+      `results/051-release-orchestration.md`).

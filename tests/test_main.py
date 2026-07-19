@@ -686,6 +686,268 @@ def test_release_publish_prepared_dry_run_still_enforces_strategy_mismatch(
     assert "release publish-prepared 오류" in capsys.readouterr().err
 
 
+# --------------------------------------------------------------------------
+# Task 051: `devbot release run` - composes recommendation, preparation,
+# strategy resolution, and exactly one existing publish path.
+# --------------------------------------------------------------------------
+
+
+def _run_plan(**overrides: object):
+    from devbot.release_classification import ReleaseRecommendation
+    from devbot.release_orchestration import ReleaseRunPlan, ReleaseRunStage
+    from devbot.release_publish_strategy import ReleasePublishStrategy
+
+    defaults: dict[str, object] = dict(
+        repository="someone/myrepo",
+        recommendation=ReleaseRecommendation.PATCH,
+        current_version="1.2.3",
+        target_version="1.2.4",
+        effective_strategy=ReleasePublishStrategy.WORKFLOW,
+        preparation_required=True,
+        publish_route=ReleaseRunStage.WORKFLOW_PUBLISH,
+        direct_notes_available=False,
+    )
+    defaults.update(overrides)
+    return ReleaseRunPlan(**defaults)  # type: ignore[arg-type]
+
+
+def _run_result(**overrides: object):
+    from devbot.release_orchestration import ReleaseRunOutcome, ReleaseRunResult
+
+    defaults: dict[str, object] = dict(
+        plan=_run_plan(),
+        outcome=ReleaseRunOutcome.WORKFLOW_PUBLISHED,
+        preparation=None,
+        workflow_outcome=None,
+        direct_result=None,
+    )
+    defaults.update(overrides)
+    return ReleaseRunResult(**defaults)  # type: ignore[arg-type]
+
+
+def test_release_run_dry_run_workflow_strategy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    plan = _run_plan()
+
+    with (
+        patch("devbot.main.build_release_run_plan", return_value=plan) as mock_plan,
+        patch("devbot.main.GitHubClient") as mock_client,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        exit_code = main(
+            ["release", "run", "--level", "patch", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_plan.assert_called_once()
+    mock_client.assert_not_called()
+    mock_write_client.assert_not_called()
+    out = capsys.readouterr().out
+    assert "target_version: 1.2.4" in out
+    assert "publish_route: workflow_publish" in out
+    assert "dry-run" in out
+
+
+def test_release_run_dry_run_direct_strategy_reports_notes_blocker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devbot.release_orchestration import ReleaseRunStage
+    from devbot.release_publish_strategy import ReleasePublishStrategy
+
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="direct")
+    plan = _run_plan(
+        effective_strategy=ReleasePublishStrategy.DIRECT,
+        publish_route=ReleaseRunStage.DIRECT_PUBLISH,
+        direct_notes_available=False,
+    )
+
+    with patch("devbot.main.build_release_run_plan", return_value=plan):
+        exit_code = main(
+            ["release", "run", "--level", "patch", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "blocker" in out
+    assert "--notes-file" in out
+
+
+def test_release_run_none_recommendation_returns_failure_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        ["release", "run", "--level", "none"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "release run 오류" in err
+    assert "recommendation" in err
+
+
+def test_release_run_missing_notes_file_returns_failure_exit_code(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        [
+            "release",
+            "run",
+            "--level",
+            "patch",
+            "--notes-file",
+            str(tmp_path / "does-not-exist.md"),
+        ],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+
+
+def test_release_run_workflow_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devbot.release_ops import PublishOutcome as WorkflowPublishOutcome
+
+    env_path, repositories_path = _release_env(tmp_path)
+    outcome = WorkflowPublishOutcome(
+        preview=object(),
+        workflow_run=object(),
+        release_url="https://example.invalid/releases/tag/v1.2.4",
+        tag="v1.2.4",
+        validated_assets=("SHA256SUMS",),
+    )
+    result = _run_result(workflow_outcome=outcome)
+
+    with patch("devbot.main.run_release", return_value=result) as mock_run:
+        exit_code = main(
+            ["release", "run", "--level", "patch"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_run.assert_called_once()
+    out = capsys.readouterr().out
+    assert "outcome: workflow_published" in out
+    assert "tag: v1.2.4" in out
+    assert "release_url: https://example.invalid/releases/tag/v1.2.4" in out
+
+
+def test_release_run_direct_success(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from devbot.release_orchestration import ReleaseRunOutcome
+    from devbot.release_publish import PublishOutcome as DirectPublishOutcome
+    from devbot.release_publish import ReleasePublishResult
+
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="direct")
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+    direct_result = ReleasePublishResult(
+        version="1.2.4",
+        tag="v1.2.4",
+        target_sha="abc123",
+        release_url="https://example.invalid/r",
+        outcome=DirectPublishOutcome.PUBLISHED,
+    )
+    result = _run_result(outcome=ReleaseRunOutcome.DIRECT_PUBLISHED, direct_result=direct_result)
+
+    with patch("devbot.main.run_release", return_value=result):
+        exit_code = main(
+            ["release", "run", "--level", "patch", "--notes-file", str(notes_file)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "outcome: direct_published" in out
+    assert "tag: v1.2.4" in out
+
+
+def test_release_run_prepared_pending_commit_prints_next_step(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devbot.release_classification import ReleaseRecommendation as _ReleaseRecommendation
+    from devbot.release_orchestration import ReleaseRunOutcome
+    from devbot.release_preparation import ReleasePreparationResult
+
+    env_path, repositories_path = _release_env(tmp_path, publish_strategy="direct")
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("some notes", encoding="utf-8")
+    preparation = ReleasePreparationResult(
+        recommendation=_ReleaseRecommendation.PATCH,
+        old_version="1.2.3",
+        new_version="1.2.4",
+        changed_paths=("pyproject.toml", "uv.lock"),
+    )
+    result = _run_result(
+        outcome=ReleaseRunOutcome.PREPARED_PENDING_COMMIT, preparation=preparation
+    )
+
+    with patch("devbot.main.run_release", return_value=result):
+        exit_code = main(
+            ["release", "run", "--level", "patch", "--notes-file", str(notes_file)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "outcome: prepared_pending_commit" in out
+    assert "publish-prepared" in out
+
+
+def test_release_run_stage_error_returns_failure_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devbot.release_orchestration import ReleaseRunStage, ReleaseRunStageError
+
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with patch(
+        "devbot.main.run_release",
+        side_effect=ReleaseRunStageError(ReleaseRunStage.WORKFLOW_PUBLISH, "boom"),
+    ):
+        exit_code = main(
+            ["release", "run", "--level", "patch"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "release run 오류" in err
+    assert "workflow_publish" in err
+
+
+def test_release_run_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    plan = _run_plan()
+
+    with (
+        patch("devbot.main.build_release_run_plan", return_value=plan),
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["release", "run", "--level", "patch", "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
 def test_goal_plan_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     env_path, repositories_path = _release_env(tmp_path)
     plan = GoalPlan(
