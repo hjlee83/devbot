@@ -74,16 +74,68 @@ def workspace_validation_env(
     return env
 
 
+def _references_host_checkout_outside_workspace(
+    output: str, *, host_checkout_path: str, workspace_path: str
+) -> bool:
+    """True if `output` references `host_checkout_path` somewhere that is
+    not itself inside `workspace_path`.
+
+    A prepared worktree conventionally lives *under* the host checkout
+    (`<host_checkout>/.worktrees/issue-<N>`, `devbot.worktree`), so
+    `host_checkout_path` is a literal string prefix of every legitimate
+    in-workspace path too - naive substring containment (the previous
+    implementation) therefore flags any output that merely names a
+    workspace-local file, e.g. a pytest traceback line. This checks each
+    occurrence's real path boundary instead:
+
+    - An occurrence is only a genuine match if `host_checkout_path` ends at
+      a path boundary (`/`, a quote, whitespace, or end of string) - not
+      merely a text prefix of a differently-named sibling directory (e.g.
+      `host_checkout_path` ending in `.../devbot` must not match inside
+      `.../devbot-2/...`).
+    - A boundary-valid occurrence only counts as a *forbidden* fallback if
+      it is not itself a prefix of `workspace_path` - i.e. it references
+      something outside the current prepared workspace (the operator's own
+      `.venv`, a host-only file, ...), not merely a workspace-local path
+      that happens to start with the host checkout's own path.
+    """
+
+    host = os.path.normpath(host_checkout_path)
+    workspace = os.path.normpath(workspace_path)
+    boundary_chars = "/\\\"' \t\r\n)>"
+    search_from = 0
+    while True:
+        index = output.find(host, search_from)
+        if index == -1:
+            return False
+        search_from = index + 1
+
+        end = index + len(host)
+        trailing_char = output[end] if end < len(output) else ""
+        if trailing_char and trailing_char not in boundary_chars:
+            continue
+
+        if output[index : index + len(workspace)] == workspace:
+            continue
+
+        return True
+
+
 def classify_validation_failure(
     *,
     command: Sequence[str],
     returncode: int,
     output: str,
     host_checkout_path: str | None = None,
+    workspace_path: str | None = None,
 ) -> ValidationFailureCategory:
     """Classify validation failures without hiding repository-fixable errors."""
 
-    if host_checkout_path and host_checkout_path in output:
+    if host_checkout_path and _references_host_checkout_outside_workspace(
+        output,
+        host_checkout_path=host_checkout_path,
+        workspace_path=workspace_path or host_checkout_path,
+    ):
         return ValidationFailureCategory.FORBIDDEN_HOST_FALLBACK
     lowered_output = output.lower()
     if tuple(command) == ENVIRONMENT_PREPARATION_COMMAND:

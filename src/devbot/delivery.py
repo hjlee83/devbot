@@ -43,6 +43,7 @@ class VerificationResult:
     workspace_path: str = ""
     commands: tuple[tuple[str, ...], ...] = ()
     failure_category: ValidationFailureCategory | None = None
+    exit_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +95,9 @@ def run_verification_commands(
                     returncode=execution.returncode,
                     output=execution.output,
                     host_checkout_path=str(host_checkout_path),
+                    workspace_path=str(repository.local_path),
                 ),
+                exit_code=execution.returncode,
             )
     return VerificationResult(
         passed=True,

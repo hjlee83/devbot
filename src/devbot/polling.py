@@ -2134,10 +2134,17 @@ class PollingService:
             )
 
         if not delivery_result.verification.passed:
-            failure_category = delivery_result.verification.failure_category
+            verification = delivery_result.verification
+            failure_category = verification.failure_category
+            category_text = failure_category.value if failure_category else "unknown"
+            exit_code_text = (
+                verification.exit_code if verification.exit_code is not None else "unknown"
+            )
             reason = (
                 f"검증 실패: {delivery_result.message}\n"
-                f"failure_category={failure_category.value if failure_category else 'unknown'}"
+                f"failure_category={category_text}\n"
+                f"exit_code={exit_code_text}"
+                f"\n\n{verification.output}"
             )
             if failure_category is ValidationFailureCategory.VALIDATION_COMMAND_FAILED:
                 self.logger.error(

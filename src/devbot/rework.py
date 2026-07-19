@@ -394,10 +394,12 @@ class ReworkService:
                 if verification.failure_category
                 else "unknown"
             )
+            exit_code = verification.exit_code if verification.exit_code is not None else "unknown"
             reason = (
                 "PR 피드백 반영 후 검증 실패: "
                 f"{' '.join(verification.failed_command or ())}\n"
-                f"failure_category={category}"
+                f"failure_category={category}\n"
+                f"exit_code={exit_code}"
                 f"\n\n{verification.output}"
             )
             if verification.failure_category is ValidationFailureCategory.VALIDATION_COMMAND_FAILED:

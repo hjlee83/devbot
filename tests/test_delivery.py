@@ -187,6 +187,159 @@ def test_validation_rejects_host_checkout_environment_fallback() -> None:
     assert result.failed_command == ("uv", "sync")
 
 
+# --------------------------------------------------------------------------
+# Regression: a prepared worktree conventionally lives *under* the host
+# checkout (`<host>/.worktrees/issue-<N>`, `devbot.worktree.worktree_path`),
+# so `host_checkout_path` is a literal string prefix of every legitimate
+# in-workspace path too. A pytest failure whose output merely names its own
+# worktree-local files must not be misclassified as FORBIDDEN_HOST_FALLBACK.
+# --------------------------------------------------------------------------
+
+_HOST_CHECKOUT = Path("/Users/luna/workspace/devbot")
+_NESTED_WORKTREE = _HOST_CHECKOUT / ".worktrees" / "issue-119"
+
+
+def _nested_worktree_repo() -> RepositoryConfig:
+    return RepositoryConfig(
+        owner="hjlee83",
+        repo="devbot",
+        enabled=True,
+        local_path=_NESTED_WORKTREE,
+        host_checkout_path=_HOST_CHECKOUT,
+    )
+
+
+def test_worktree_local_pytest_failure_is_not_forbidden_host_fallback() -> None:
+    """The exact reported scenario: `.worktrees/issue-119` nested under the
+    host checkout, a real pytest failure whose traceback only names files
+    inside the worktree."""
+    repository = _nested_worktree_repo()
+    pytest_output = (
+        f"{_NESTED_WORKTREE}/tests/test_foo.py::test_bar FAILED\n"
+        ">       assert 1 == 2\n"
+        "E       assert 1 == 2\n\n"
+        f"{_NESTED_WORKTREE}/tests/test_foo.py:12: AssertionError\n"
+        "1 failed in 0.12s\n"
+    )
+
+    with patch("devbot.validation.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # uv sync
+            MagicMock(returncode=0, stdout="", stderr=""),  # ruff check
+            MagicMock(returncode=1, stdout=pytest_output, stderr=""),  # pytest
+        ]
+        result = run_verification_commands(repository)
+
+    assert result.failure_category is ValidationFailureCategory.VALIDATION_COMMAND_FAILED
+    assert result.failed_command == ("uv", "run", "pytest")
+    # Requirement 4: the real pytest output and exit code must survive,
+    # not be replaced by a generic host-fallback message.
+    assert result.output == pytest_output
+    assert result.exit_code == 1
+
+
+def test_nested_worktree_still_detects_real_host_venv_fallback() -> None:
+    """A genuine escape to the host checkout's own `.venv` (a path that is
+    *not* inside the prepared worktree) must still be caught."""
+    repository = _nested_worktree_repo()
+
+    with patch("devbot.validation.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr=f"attempted to use {_HOST_CHECKOUT}/.venv/bin/python",
+        )
+        result = run_verification_commands(repository)
+
+    assert result.failure_category is ValidationFailureCategory.FORBIDDEN_HOST_FALLBACK
+    assert result.failed_command == ("uv", "sync")
+
+
+def test_similar_prefix_sibling_path_is_not_confused_with_host_checkout() -> None:
+    """`/Users/luna/workspace/devbot` must not match inside
+    `/Users/luna/workspace/devbot-backup/...` - a text-prefix match that is
+    not a real path-boundary match."""
+    repository = _nested_worktree_repo()
+    sibling_output = "error in /Users/luna/workspace/devbot-backup/some/file.py\n1 failed\n"
+
+    with patch("devbot.validation.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # uv sync
+            MagicMock(returncode=0, stdout="", stderr=""),  # ruff check
+            MagicMock(returncode=1, stdout=sibling_output, stderr=""),  # pytest
+        ]
+        result = run_verification_commands(repository)
+
+    assert result.failure_category is ValidationFailureCategory.VALIDATION_COMMAND_FAILED
+
+
+def test_delivery_bootstrap_path_without_linked_pr_is_not_forbidden_host_fallback() -> None:
+    """No-PR bootstrap path (`linked_pull_request=None`, Task 016 CP-016-10):
+    a fresh Issue with no existing branch/PR to reuse still must not
+    misclassify a worktree-local pytest failure."""
+    client = MagicMock(spec=GitHubWriteClient)
+    pytest_output = f"{_NESTED_WORKTREE}/tests/test_foo.py:1: AssertionError\n1 failed\n"
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=run_verification_commands,
+    )
+
+    with patch("devbot.validation.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # uv sync
+            MagicMock(returncode=0, stdout="", stderr=""),  # ruff check
+            MagicMock(returncode=1, stdout=pytest_output, stderr=""),  # pytest
+        ]
+        result = service.deliver(
+            _nested_worktree_repo(),
+            _issue(),
+            "devbot/devbot-119-add-feature",
+            [],
+            linked_pull_request=None,
+        )
+
+    expected_category = ValidationFailureCategory.VALIDATION_COMMAND_FAILED
+    assert result.verification.failure_category is expected_category
+    assert result.verification.output == pytest_output
+    assert result.verification.exit_code == 1
+    client.create_pull_request.assert_not_called()
+
+
+def test_delivery_existing_pr_path_is_not_forbidden_host_fallback() -> None:
+    """Existing prepared Branch/PR path (`linked_pull_request` set, a
+    retried IMPLEMENT or REWORK job reusing an open PR's branch) must also
+    not misclassify a worktree-local pytest failure."""
+    client = MagicMock(spec=GitHubWriteClient)
+    pytest_output = f"{_NESTED_WORKTREE}/tests/test_foo.py:1: AssertionError\n1 failed\n"
+    linked_pr = _linked_pull_request(number=119, head_ref="devbot/devbot-119-add-feature")
+    service = DeliveryService(
+        client=client,
+        dry_run=False,
+        run_verification=run_verification_commands,
+    )
+
+    with patch("devbot.validation.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # uv sync
+            MagicMock(returncode=0, stdout="", stderr=""),  # ruff check
+            MagicMock(returncode=1, stdout=pytest_output, stderr=""),  # pytest
+        ]
+        result = service.deliver(
+            _nested_worktree_repo(),
+            _issue(),
+            "devbot/devbot-119-add-feature",
+            [],
+            linked_pull_request=linked_pr,
+        )
+
+    expected_category = ValidationFailureCategory.VALIDATION_COMMAND_FAILED
+    assert result.verification.failure_category is expected_category
+    assert result.verification.output == pytest_output
+    assert result.verification.exit_code == 1
+    client.create_pull_request.assert_not_called()
+
+
 def test_validation_executes_contract_commands_literally() -> None:
     repository = _repo(Path("/tmp/prepared-workspace/myrepo"))
     calls: list[list[str]] = []
