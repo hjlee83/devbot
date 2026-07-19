@@ -15,6 +15,7 @@ configured.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -95,6 +96,12 @@ from devbot.release_recommendation_aggregation import (
     render_release_recommendation_aggregation,
 )
 from devbot.review import ReviewService
+from devbot.review_decision import (
+    ReviewDecisionError,
+    render_review_report,
+    review_report_from_dict,
+    review_report_to_dict,
+)
 from devbot.rework import ReworkService
 from devbot.specification import (
     SpecificationError,
@@ -489,6 +496,60 @@ def _run_specification_command(args: argparse.Namespace, config: DevBotConfig) -
         print(specification.content)
 
     return 0
+
+
+def _build_review_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Task 053: provider-neutral review decision model - a read-only
+    validate/render boundary for an existing report payload. Never
+    inspects a PR, invokes an AI, or writes to GitHub."""
+    review_parser = subparsers.add_parser("review", help="리뷰 결정 모델(Task 053)을 다룹니다.")
+    review_subparsers = review_parser.add_subparsers(dest="review_command", required=True)
+
+    report_parser = review_subparsers.add_parser(
+        "report",
+        help=(
+            "기존 리뷰 report JSON을 검증하고 렌더링합니다 (읽기 전용, GitHub/AI 호출 없음)."
+        ),
+    )
+    report_parser.add_argument("--input", required=True, help="리뷰 report JSON 파일 경로.")
+    report_parser.add_argument(
+        "--format", choices=("text", "json"), default="text", help="출력 형식 (기본값: text)."
+    )
+
+
+def _run_review_report_command(args: argparse.Namespace) -> int:
+    """Task 053: reads only the explicit `--input` file - no GitHub client,
+    no network call, no other filesystem mutation."""
+    try:
+        raw_text = Path(args.input).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"review report 오류: --input 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        print(f"review report 오류: --input 파일이 올바른 JSON이 아닙니다: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        report = review_report_from_dict(payload)
+    except ReviewDecisionError as exc:
+        print(f"review report 오류: {exc}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        payload = review_report_to_dict(report)
+        print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+    else:
+        print(render_review_report(report))
+    return 0
+
+
+def _run_review_command(args: argparse.Namespace) -> int:
+    if args.review_command == "report":
+        return _run_review_report_command(args)
+    return 1
 
 
 def _render_goal_plan(plan: GoalPlan) -> str:
@@ -1223,6 +1284,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     _build_role_parser(subparsers)
     _build_agent_parser(subparsers)
     _build_specification_parser(subparsers)
+    _build_review_parser(subparsers)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help=(
@@ -1479,6 +1541,9 @@ def main(
 
     if args.command == "specification":
         return _run_specification_command(args, config)
+
+    if args.command == "review":
+        return _run_review_command(args)
 
     if args.command == "doctor":
         if not args.ci and not _run_startup_self_update(config, logger):

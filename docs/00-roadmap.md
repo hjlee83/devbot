@@ -594,3 +594,29 @@
       전체 과정이 읽기 전용이다 - write client를 한 번도 만들지
       않는다(`src/devbot/release_recommendation_aggregation.py`,
       `results/052-release-recommendation-aggregation.md`).
+- [x] Task 053: review decision model. GitHub-무관·결정론적·타입 있는
+      리뷰 결과 모델 `src/devbot/review_decision.py`와 읽기 전용
+      `devbot review report --input report.json [--format text|json]`을
+      추가했다. `ReviewDecision`(approved/changes_required/comment_only)과
+      `ReviewSeverity`(blocker/warning/comment)는 닫힌 StrEnum이고,
+      최종 decision과 severity별 counts는 findings로부터만 파생된다 -
+      호출자가 임의로 지정할 수 없다. 이 불변식은 `build_review_report`
+      (권장 생성 경로)뿐 아니라 `ReviewReport.__post_init__` 자체에서도
+      다시 검증한다 - `ReviewReport`를 직접 생성해서 우회해도 findings와
+      모순되는 decision/counts는 `ReviewReportDerivationMismatchError`로
+      거부된다. `ReviewLocation`(경로/줄/시작줄/side/symbol)은 절대
+      경로·`..` 상위 탐색·범위를 벗어난 start_line·path 없는 line 등을
+      생성 시점에 즉시 거부한다. 완전히 동일한(severity/code/message/
+      location 모두 같은) finding 중복은 모호하다고 보고
+      `AmbiguousReviewFindingsError`로 거부하지만, code만 같고 message나
+      location이 다르면 서로 다른 finding으로 허용한다. 결정론적 정렬은
+      severity 우선순위(blocker→warning→comment) 후 code/location/message
+      순으로 한다. JSON 직렬화/역직렬화는 완전 왕복 가능하고, 페이로드가
+      `decision`/`counts`를 스스로 선언하면 파생값과 대조해 모순되면
+      거부한다(값을 신뢰하지 않고 항상 재파생해서 비교). CLI는 기존
+      report JSON 파일을 읽어 검증·렌더링만 한다 - PR을 조회하지도, AI를
+      호출하지도, GitHub에 쓰지도 않는다(`--input` 파일 하나만 읽음,
+      GitHub client/write client 미생성). GitHub Review API 제출
+      매핑(approved→APPROVE 등)은 이 태스크에 포함하지 않았다 - 다음
+      태스크를 위한 순수 결정 모델만 정의한다(`src/devbot/review_decision.py`,
+      `results/053-review-decision-model.md`).
