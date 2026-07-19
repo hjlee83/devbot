@@ -976,6 +976,128 @@ def test_release_run_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
     mock_lock.assert_not_called()
 
 
+# --------------------------------------------------------------------------
+# Task 052: `devbot release recommend` - aggregates every merged Task PR's
+# Contract since the latest stable Release into one recommendation.
+# --------------------------------------------------------------------------
+
+
+def _recommend_aggregation(**overrides: object):
+    from devbot.release_classification import ReleaseRecommendation
+    from devbot.release_recommendation_aggregation import ReleaseRecommendationAggregation
+
+    defaults: dict[str, object] = dict(
+        repository="someone/myrepo",
+        boundary_version="1.2.3",
+        boundary_tag="v1.2.3",
+        boundary_commit="boundarysha",
+        inspected_pr_count=0,
+        evidence=(),
+        excluded=(),
+        recommendation=ReleaseRecommendation.NONE,
+    )
+    defaults.update(overrides)
+    return ReleaseRecommendationAggregation(**defaults)  # type: ignore[arg-type]
+
+
+def test_release_recommend_command_is_wired(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    aggregation = _recommend_aggregation()
+
+    with patch(
+        "devbot.main.build_release_recommendation_aggregation", return_value=aggregation
+    ) as mock_build:
+        exit_code = main(
+            ["release", "recommend"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_build.assert_called_once()
+    out = capsys.readouterr().out
+    assert "boundary_version: 1.2.3" in out
+    assert "recommendation: none" in out
+
+
+def test_release_recommend_never_constructs_write_client(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    aggregation = _recommend_aggregation()
+
+    with (
+        patch(
+            "devbot.main.build_release_recommendation_aggregation", return_value=aggregation
+        ),
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["release", "recommend"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    mock_write_client.assert_not_called()
+    mock_lock.assert_not_called()
+
+
+def test_release_recommend_error_returns_failure_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devbot.release_recommendation_aggregation import MissingContractError
+
+    env_path, repositories_path = _release_env(tmp_path)
+
+    with patch(
+        "devbot.main.build_release_recommendation_aggregation",
+        side_effect=MissingContractError("PR #1: expected Contract 'tasks/001-x.md' missing"),
+    ):
+        exit_code = main(
+            ["release", "recommend"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "release recommend 오류" in err
+    assert "tasks/001-x.md" in err
+
+
+def test_release_recommend_renders_evidence_and_final_recommendation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    from devbot.release_classification import ReleaseRecommendation
+    from devbot.release_recommendation_aggregation import ReleaseRecommendationEvidence
+
+    env_path, repositories_path = _release_env(tmp_path)
+    evidence = ReleaseRecommendationEvidence(
+        pr_number=1,
+        pr_url="https://example.invalid/pull/1",
+        merge_commit_sha="sha1",
+        merged_at=datetime(2026, 7, 19, tzinfo=UTC),
+        task_number=1,
+        contract_path="tasks/001-test-task.md",
+        recommendation=ReleaseRecommendation.MINOR,
+        classification_reasons=("release_impact=feature",),
+    )
+    aggregation = _recommend_aggregation(
+        evidence=(evidence,), recommendation=ReleaseRecommendation.MINOR
+    )
+
+    with patch(
+        "devbot.main.build_release_recommendation_aggregation", return_value=aggregation
+    ):
+        exit_code = main(
+            ["release", "recommend"], env_path=env_path, repositories_path=repositories_path
+        )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "PR #1" in out
+    assert "release_impact=feature" in out
+    assert "recommendation: minor" in out
+
+
 def test_goal_plan_command_is_wired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     env_path, repositories_path = _release_env(tmp_path)
     plan = GoalPlan(

@@ -195,6 +195,57 @@ def test_list_pull_requests_follows_pagination_and_parses_head_ref() -> None:
     assert first_call.kwargs["params"]["state"] == "open"
 
 
+def test_get_pull_request_parses_full_detail() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response(
+        json_data={
+            "number": 52,
+            "html_url": "https://github.com/someone/myrepo/pull/52",
+            "body": "## Contract\n\n- `tasks/052-slug.md`\n",
+            "head": {"ref": "task/052-slug", "sha": "headsha"},
+            "base": {"ref": "main"},
+            "merged_at": "2026-07-19T01:02:03Z",
+            "merge_commit_sha": "mergesha",
+        }
+    )
+    client = GitHubClient("token123", session=session)
+
+    detail = client.get_pull_request(_repository(), 52)
+
+    assert detail.number == 52
+    assert detail.html_url == "https://github.com/someone/myrepo/pull/52"
+    assert detail.head_ref == "task/052-slug"
+    assert detail.base_ref == "main"
+    assert detail.merged is True
+    assert detail.merge_commit_sha == "mergesha"
+    assert detail.merged_at is not None
+    assert detail.merged_at.isoformat() == "2026-07-19T01:02:03+00:00"
+    session.get.assert_called_once()
+    assert session.get.call_args.args[0].endswith("/repos/someone/myrepo/pulls/52")
+
+
+def test_get_pull_request_unmerged_reports_merged_false() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response(
+        json_data={
+            "number": 53,
+            "html_url": "https://github.com/someone/myrepo/pull/53",
+            "body": "",
+            "head": {"ref": "task/053-slug", "sha": "headsha"},
+            "base": {"ref": "main"},
+            "merged_at": None,
+            "merge_commit_sha": None,
+        }
+    )
+    client = GitHubClient("token123", session=session)
+
+    detail = client.get_pull_request(_repository(), 53)
+
+    assert detail.merged is False
+    assert detail.merged_at is None
+    assert detail.merge_commit_sha is None
+
+
 def test_github_error_is_translated() -> None:
     session = MagicMock()
     session.get.return_value = _mock_response(status_code=404, json_data={"message": "Not Found"})
@@ -398,6 +449,8 @@ def test_client_exposes_read_operations_only() -> None:
         # Task 040: goal executor idempotent-write-detection reads.
         "get_branch_ref",
         "get_file_content",
+        # Task 052: release recommendation aggregation - full PR detail.
+        "get_pull_request",
     }
     forbidden_names = {
         "create_issue",

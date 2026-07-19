@@ -89,6 +89,11 @@ from devbot.release_publish_strategy import (
     require_workflow_strategy,
     resolve_release_publish_strategy,
 )
+from devbot.release_recommendation_aggregation import (
+    ReleaseRecommendationAggregationError,
+    build_release_recommendation_aggregation,
+    render_release_recommendation_aggregation,
+)
 from devbot.review import ReviewService
 from devbot.rework import ReworkService
 from devbot.specification import (
@@ -813,6 +818,17 @@ def _build_release_parser(subparsers: argparse._SubParsersAction) -> None:
         help="전체 실행 계획만 출력하고 아무것도 쓰지 않습니다.",
     )
 
+    recommend_parser = release_subparsers.add_parser(
+        "recommend",
+        help=(
+            "Task 052: 최근 stable Release 이후 병합된 모든 Task PR의 Contract를 집계해 "
+            "하나의 릴리스 추천값을 계산합니다 (읽기 전용, write client 생성 없음)."
+        ),
+    )
+    recommend_parser.add_argument(
+        "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
+    )
+
 
 def _run_release_prepare_command(args: argparse.Namespace) -> int:
     """Task 048: purely local - no GitHub client, no `_resolve_repository`
@@ -1049,6 +1065,28 @@ def _run_release_run_command(args: argparse.Namespace, config: DevBotConfig) -> 
     return 0
 
 
+def _run_release_recommend_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    """Task 052: aggregates every merged Task PR's Contract since the
+    latest stable Release into one recommendation - entirely read-only, no
+    write client is ever constructed."""
+    try:
+        repository = _resolve_repository(config, args.repo)
+    except ConfigError as exc:
+        print(f"설정 오류: {exc}", file=sys.stderr)
+        return 1
+
+    github_client = GitHubClient(config.github_token)
+
+    try:
+        aggregation = build_release_recommendation_aggregation(github_client, repository)
+    except ReleaseRecommendationAggregationError as exc:
+        print(f"release recommend 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(render_release_recommendation_aggregation(aggregation))
+    return 0
+
+
 def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     if args.release_command == "prepare":
         return _run_release_prepare_command(args)
@@ -1058,6 +1096,8 @@ def _run_release_command(args: argparse.Namespace, config: DevBotConfig) -> int:
         return _run_release_strategy_command(args, config)
     if args.release_command == "run":
         return _run_release_run_command(args, config)
+    if args.release_command == "recommend":
+        return _run_release_recommend_command(args, config)
 
     try:
         repository = _resolve_repository(config, args.repo)

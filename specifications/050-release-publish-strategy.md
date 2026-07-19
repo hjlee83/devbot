@@ -427,7 +427,7 @@ Do not omit safety tests to save context.
 
 ## Contract Version
 
-- contract_version: 1
+1
 
 ## Provenance
 

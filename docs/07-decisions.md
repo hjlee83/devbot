@@ -637,3 +637,65 @@ _baseline_refuses` (real throwaway Git checkout, mirroring the actual repository
 observed drift) both confirm `publish_release` is never called when the two baselines
 disagree.
 
+## 2026-07-19 — Release recommendation aggregation resolves PRs to Contracts by branch name; two historical Contracts were found and fixed to match Task 046's own parser (Task 052)
+
+Task 052 (`src/devbot/release_recommendation_aggregation.py`) adds `devbot release
+recommend`, a read-only command that aggregates every Task PR merged since the latest
+stable GitHub Release into one authoritative `ReleaseRecommendation`, by resolving each
+PR to its Task Contract and reusing Task 046's `parse_contract_metadata` and Task 047's
+`classify_release` - never inferring impact from PR titles, labels, or diffs.
+
+**Boundary-finding and PR enumeration reuse `release_ops.gather_release_context`
+unchanged**, the same function Tasks 037/048/051 already rely on. Recomputing "the
+latest reachable stable Release" and "every commit merged into the default branch since
+it" independently would have duplicated policy this Task's own Specification forbids
+duplicating.
+
+**There was no existing end-to-end "PR → Contract" mechanism to reuse.**
+`devbot.planner` only generates the naming convention (`task/<NNN>-<slug>` branches,
+`tasks/<NNN>-<slug>.md` Contracts - `docs/12-planner-workflow.md` §4); `devbot.worktree`'s
+parsers target Task *Issue* bodies, not PR bodies, and are explicitly documented as
+best-effort, not authoritative, in the 2026-07-15 worktree ADR entry above (a manually
+authored Issue or PR - or anything predating Task 022 - won't follow the template at
+all). Task 052 treats a PR's head branch name as the primary, required signal: a branch
+matching `task/<NNN>-<slug>` implies the Contract lives at the canonical path
+(`devbot.planner.canonical_contract_path`, reused, not reimplemented). A branch that
+doesn't match was never a Task branch and is recorded as an explicit, typed exclusion -
+never silently dropped. A branch that does match but whose Contract does not exist at
+that path, at the merge commit, is a genuine inconsistency and fails the entire
+aggregation closed. A Planner-rendered PR body's own `## Contract` declaration, when
+present, is cross-checked against the branch-derived path as a second, independent
+signal; disagreement is an ambiguity error - fail closed, never guess which one is
+right.
+
+**A new `GitHubClient.get_pull_request` method was added** because no existing method
+returns a merged PR's `merge_commit_sha`, `merged_at`, `body`, and `html_url` together -
+`list_pull_requests`'s `PullRequest` and `get_commit_pull_request_metadata`'s
+`PullRequestMetadata` each carry only a subset. This is the only GitHub-client change
+this Task required.
+
+**A real, non-theoretical Contract format inconsistency was discovered and fixed while
+verifying this Task against the actual repository.** Running `parse_contract_metadata`
+directly against every recent Contract file showed `tasks/050-release-publish-strategy.md`
+and `tasks/051-release-orchestration.md` both raise `MalformedContractVersionError` -
+their `## Contract Version` section body reads `- contract_version: 1` (bulleted, like
+every other metadata field), but the parser's `_VERSION_RE` requires the section body to
+be *only* a bare positive integer, matching Task 046's own Contract (`tasks/046-contract
+-metadata-engine.md`, body reads exactly `1`) and Tasks 048/049 (also bare integers,
+already correct). This means, as merged, running `devbot release recommend` against this
+repository right now would fail closed the moment it reached Task 050's PR - not a bug
+in Task 052's code (fail-closed on a malformed Contract is exactly its Specification's
+required behavior), but a real, immediate practical blocker.
+
+**Resolution, confirmed with the operator before proceeding:** Task 052's own code was
+left unchanged - fail-closed-on-malformed-Contract is correct, working as designed, and
+this discovery is exactly the kind of data-quality problem that behavior exists to
+catch. `tasks/050-release-publish-strategy.md` and `tasks/051-release-orchestration.md`
+were corrected in place (`- contract_version: 1` → `1`, a pure format fix with no
+semantic change), as a small, transparently-flagged drive-by fix bundled into this
+Task's PR. The corresponding embedded "Full Task Contract Reference" copies inside
+`specifications/050-release-publish-strategy.md` and `specifications/051-release
+-orchestration.md` were updated identically and re-verified byte-for-byte against the
+corrected Contract files, and both Specifications were re-validated
+(`devbot specification validate --task 50`/`--task 51`, both still PASS).
+
