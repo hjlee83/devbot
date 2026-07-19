@@ -406,3 +406,27 @@
       6개의 legacy Contract(001/022/037/042/044/045)를 대상으로 라이브
       검증했다(`src/devbot/contract_metadata.py`,
       `results/046-contract-metadata-engine.md`).
+- [x] Task 047: release classification policy. Task 046의 typed
+      `ContractParseResult`를 받아 `major`/`minor`/`patch`/`none` 릴리스
+      추천을 결정론적으로 계산하는 순수 정책 계층 `src/devbot/
+      release_classification.py`를 추가한다 - Markdown을 다시 읽지
+      않고, 버전 파일/Git 태그/GitHub Release/릴리스 노트 등 어떤
+      외부 상태도 건드리지 않는다. 우선순위(높은 순): legacy Contract
+      -> 전용 에러(추측하지 않음), metadata 없는 native 결과 -> 전용
+      에러, `compatibility=breaking` -> `major`, `migration=required`
+      -> `major`, 그 다음에야 `release_impact`
+      매핑(breaking->major/feature->minor/fix->patch/docs·internal·
+      none->none)을 적용한다. `risk_level`/`specification_type`은
+      의도적으로 절대 참조하지 않는다 - 코드 자체가 이 두 필드를
+      읽지 않으므로 결과에 영향을 줄 수 없음을 파라미터화 테스트
+      18개 조합으로 직접 증명했다. `specifications/047-*.md`는 이미
+      canonical 8-섹션 구조로 작성돼 있었고(Task 045/046 리뷰에서
+      확립된 패턴을 그대로 따름), Provenance 생성 출처 누락과
+      `Validation Commands` 서브섹션 누락 2건만 고쳐
+      `devbot specification validate --task 47`을 통과시켰다. 실제
+      저장소의 Task 047 Contract(내부용, `none` 추천)와 legacy
+      Contract(Task 037, 에러)를 대상으로 end-to-end 라이브 검증했다.
+      CLI/버전 변경/태그·Release 생성/릴리스 노트/여러 Task 통합
+      추천은 이번에 전혀 구현하지 않았다(`src/devbot/
+      release_classification.py`,
+      `results/047-release-classification-policy.md`).
