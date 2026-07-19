@@ -32,14 +32,17 @@
 ## 수정 파일
 
 - `src/devbot/bootstrap.py`
+- `src/devbot/planner.py` (리뷰 수정: `DEVBOT_BOOTSTRAP_RESPONSIBILITIES` 신설)
 - `src/devbot/workspace.py`
 - `src/devbot/worktree.py`
 - `tests/test_bootstrap.py`
+- `tests/test_planner.py` (리뷰 수정)
 - `tests/test_workspace.py`
 - `tests/test_worktree.py`
 - `CONSTITUTION.md`
 - `README.md`
 - `docs/07-decisions.md`
+- `docs/12-planner-workflow.md` (리뷰 수정: "1.1a DevBot Bootstrap" 절 신설)
 - `docs/13-host-managed-workspace-preparation.md`
 - `tests/test_main_loop.py` (fixture Issue body now includes required
   bootstrap metadata sections, since an empty body no longer passes
@@ -69,14 +72,34 @@ host checkout 경로를 접두사로 포함하는 구조상 워크트리 내부 
 경로 경계 기반 비교로 수정해 `main`에 먼저 머지했고, 이 브랜치에 `main`을
 반영해 이어서 진행했다.
 
+## 리뷰 수정 (PR #121)
+
+- **Planner 책임 모델 코드-문서 불일치**: `CONSTITUTION.md`/`README.md`는
+  Planner를 Issue+라벨로 축소했지만, `devbot.planner.PLANNER_RESPONSIBILITIES`
+  는 여전히 `branch_creation`/`contract_file_creation`/`pull_request_creation`
+  /`cross_linking`을 Planner 책임으로 선언해 코드와 문서가 모순됐다. 이
+  네 항목을 새 `devbot.planner.DEVBOT_BOOTSTRAP_RESPONSIBILITIES`로 옮기고,
+  `docs/12-planner-workflow.md`에 "1.1a DevBot Bootstrap" 절을 신설해
+  누가 무엇을 소유하는지 문서와 코드가 다시 일치하도록 했다.
+  `tests/test_planner.py`의 `test_planner_role_contract`도 두 상수 모두
+  검증하도록 갱신했다.
+- **Issue 번호 1000 이상에서 bootstrap 실패**: `BranchNamingPolicy.
+  parse_slug()`의 정규식이 `\d{3}`(정확히 3자리)만 허용해서,
+  `canonical_branch_name()`이 `task_number:03d`로 4자리 이상 번호도
+  그대로 생성하는데 `parse_slug()`가 그걸 못 읽어 `generated branch does
+  not match task pattern`으로 중단됐다. `\d{3,}`(3자리 이상)로 고치고
+  999/1000 경계 회귀 테스트(`test_branch_naming_policy_handles_four_digit
+  _issue_numbers`, `test_bootstrap_plan_succeeds_for_four_digit_issue
+  _number`)를 추가했다.
+
 ## Validation 결과
 
 - `uv sync` - PASS
 - `uv run ruff check src/devbot/bootstrap.py src/devbot/workspace.py src/devbot/worktree.py tests/test_bootstrap.py tests/test_workspace.py tests/test_worktree.py` - PASS
-- `uv run pytest tests/test_bootstrap.py tests/test_workspace.py tests/test_worktree.py -q` - PASS, 46 passed
-- `uv run ruff check .` - PASS (PR #120 병합 후 재검증 포함)
-- `uv run pytest` - PASS, 1296 passed (PR #120의 forbidden_host_fallback 수정과
-  회귀 테스트 5개를 병합해 반영한 이후 수치, 이전 1291 + 5)
+- `uv run pytest tests/test_planner.py tests/test_bootstrap.py -q` - PASS, 18 passed (리뷰 수정 반영 후)
+- `uv run ruff check .` - PASS (PR #120 병합 및 리뷰 수정 반영 후 재검증 포함)
+- `uv run pytest` - PASS, 1298 passed (PR #120의 forbidden_host_fallback 수정
+  반영 후 1296 + 리뷰 수정으로 추가된 999/1000 경계 테스트 2개)
 - `uv run devbot doctor` - NOT RUN, 이번 작업 지시가 `gh`/`curl`을 포함한 원격
   discovery 금지를 명시했고 doctor는 설정에 따라 GitHub/API 상태 확인으로
   확장될 수 있어 실행하지 않았다.

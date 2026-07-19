@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from devbot.planner import (
+    DEVBOT_BOOTSTRAP_RESPONSIBILITIES,
     IMPLEMENTER_RESPONSIBILITIES,
     OPERATOR_RESPONSIBILITIES,
     PLANNER_RESPONSIBILITIES,
@@ -55,6 +56,7 @@ def test_planner_role_contract() -> None:
     # Machine-checkable side: every role has non-empty, distinct responsibilities.
     for responsibilities in (
         PLANNER_RESPONSIBILITIES,
+        DEVBOT_BOOTSTRAP_RESPONSIBILITIES,
         IMPLEMENTER_RESPONSIBILITIES,
         REVIEWER_RESPONSIBILITIES,
         OPERATOR_RESPONSIBILITIES,
@@ -62,18 +64,28 @@ def test_planner_role_contract() -> None:
         assert responsibilities
         assert len(responsibilities) == len(set(responsibilities))
 
-    assert "branch_creation" in PLANNER_RESPONSIBILITIES
-    assert "pull_request_creation" in PLANNER_RESPONSIBILITIES
+    # Issue #119: Planner keeps only Issue-authoring responsibilities -
+    # Branch/Contract/PR creation and cross-linking moved to DevBot's
+    # deterministic bootstrap (`devbot.bootstrap`), not the Planner.
     assert "task_issue_creation" in PLANNER_RESPONSIBILITIES
-    assert "cross_linking" in PLANNER_RESPONSIBILITIES
+    assert "branch_creation" not in PLANNER_RESPONSIBILITIES
+    assert "contract_file_creation" not in PLANNER_RESPONSIBILITIES
+    assert "pull_request_creation" not in PLANNER_RESPONSIBILITIES
+    assert "cross_linking" not in PLANNER_RESPONSIBILITIES
+    assert "branch_creation" in DEVBOT_BOOTSTRAP_RESPONSIBILITIES
+    assert "contract_file_creation" in DEVBOT_BOOTSTRAP_RESPONSIBILITIES
+    assert "pull_request_creation" in DEVBOT_BOOTSTRAP_RESPONSIBILITIES
+    assert "cross_linking" in DEVBOT_BOOTSTRAP_RESPONSIBILITIES
     assert "continue_on_existing_branch_and_pr" in IMPLEMENTER_RESPONSIBILITIES
     assert "return_merge_ready_or_request_changes" in REVIEWER_RESPONSIBILITIES
     assert "perform_policy_required_manual_merge" in OPERATOR_RESPONSIBILITIES
 
-    # Documentation side: docs/12 documents all four roles' responsibilities.
+    # Documentation side: docs/12 documents all four roles' responsibilities,
+    # plus DevBot's bootstrap responsibility (1.1a).
     text = PLANNER_DOC.read_text(encoding="utf-8")
     assert "Planner" in text and "Implementer" in text
     assert "Reviewer" in text and "Operator" in text
+    assert "DevBot Bootstrap" in text
     for phrase in [
         "Task 번호와 제목",
         "Branch 생성",

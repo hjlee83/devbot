@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 
 import pytest
@@ -37,6 +38,36 @@ def test_branch_naming_policy_preserves_task_pattern_and_normalizes_title() -> N
     branch = policy.generate(task_number=119, title="Fix A/B: Planner   bootstrap!!!")
 
     assert branch == "task/119-fix-a-b-planner-bootstrap"
+
+
+def test_branch_naming_policy_handles_four_digit_issue_numbers() -> None:
+    """`canonical_branch_name()` zero-pads to a *minimum* of 3 digits
+    (`:03d`), so a 4+-digit Issue number produces a 4+-digit branch
+    segment - `parse_slug()` must still recognize it, not just Issue
+    numbers up to 999."""
+    policy = BranchNamingPolicy()
+
+    branch_999 = policy.generate(task_number=999, title="nine nine nine")
+    branch_1000 = policy.generate(task_number=1000, title="one thousand")
+
+    assert branch_999 == "task/999-nine-nine-nine"
+    assert branch_1000 == "task/1000-one-thousand"
+    assert policy.parse_slug(branch_999) == "nine-nine-nine"
+    assert policy.parse_slug(branch_1000) == "one-thousand"
+
+
+def test_bootstrap_plan_succeeds_for_four_digit_issue_number() -> None:
+    """`build_bootstrap_plan()` must not raise `BootstrapValidationError`
+    for Issue numbers >= 1000 - GitHub Issue numbers are not bounded to
+    three digits."""
+    issue = _issue()
+    issue = replace(issue, number=1000)
+
+    plan = build_bootstrap_plan(issue)
+
+    assert plan.task_number == 1000
+    assert plan.branch == "task/1000-reduce-planner-bootstrap-responsibilities"
+    assert plan.contract_path == "tasks/1000-reduce-planner-bootstrap-responsibilities.md"
 
 
 def test_branch_naming_policy_resolves_collisions_deterministically() -> None:

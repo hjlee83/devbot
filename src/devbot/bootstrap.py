@@ -18,7 +18,7 @@ from devbot.planner import canonical_branch_name, canonical_contract_path, canon
 
 _SLUG_INVALID_CHARS = re.compile(r"[^a-z0-9]+")
 _REPEATED_DASHES = re.compile(r"-+")
-_TASK_BRANCH_RE = re.compile(r"^task/(?P<number>\d{3})-(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)$")
+_TASK_BRANCH_RE = re.compile(r"^task/(?P<number>\d{3,})-(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)$")
 _MAX_SLUG_LENGTH = 48
 
 
