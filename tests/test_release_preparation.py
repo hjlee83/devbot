@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -326,6 +328,64 @@ def test_prepare_release_does_not_touch_other_packages_version_in_uv_lock(tmp_pa
     prepare_release(root, ReleaseRecommendation.PATCH)
 
     assert 'version = "3.18"' in (root / "uv.lock").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# All-or-nothing: a failure on the second os.replace must roll back the
+# first, never leaving the two real files with mismatched versions.
+# --------------------------------------------------------------------------
+
+
+def test_second_replace_failure_rolls_back_the_first_file(tmp_path: Path) -> None:
+    root = _write_project(tmp_path, pyproject_version="0.1.2")
+    pyproject_before = (root / "pyproject.toml").read_text(encoding="utf-8")
+    uv_lock_before = (root / "uv.lock").read_text(encoding="utf-8")
+
+    real_replace = os.replace
+    call_count = 0
+
+    def flaky_replace(src: object, dst: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("simulated failure on the second os.replace call")
+        real_replace(src, dst)
+
+    with patch("devbot.release_preparation.os.replace", side_effect=flaky_replace):
+        with pytest.raises(OSError, match="simulated failure"):
+            prepare_release(root, ReleaseRecommendation.PATCH)
+
+    # Both real files are restored to their exact original content - no
+    # version mismatch between them, and no leftover temp/backup files.
+    assert (root / "pyproject.toml").read_text(encoding="utf-8") == pyproject_before
+    assert (root / "uv.lock").read_text(encoding="utf-8") == uv_lock_before
+    leftover = [p.name for p in root.iterdir() if p.name not in {"pyproject.toml", "uv.lock"}]
+    assert leftover == []
+
+
+def test_second_replace_failure_still_allows_preparation_to_succeed_afterward(
+    tmp_path: Path,
+) -> None:
+    root = _write_project(tmp_path, pyproject_version="0.1.2")
+    call_count = 0
+    real_replace = os.replace
+
+    def flaky_replace(src: object, dst: object) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("simulated failure on the second os.replace call")
+        real_replace(src, dst)
+
+    with patch("devbot.release_preparation.os.replace", side_effect=flaky_replace):
+        with pytest.raises(OSError):
+            prepare_release(root, ReleaseRecommendation.PATCH)
+
+    # After the rolled-back failure, a normal (unpatched) retry succeeds
+    # cleanly from the fully-restored original state.
+    result = prepare_release(root, ReleaseRecommendation.PATCH)
+    assert result.old_version == "0.1.2"
+    assert result.new_version == "0.1.3"
 
 
 # --------------------------------------------------------------------------

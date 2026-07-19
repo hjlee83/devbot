@@ -1,5 +1,47 @@
 # Task 048 Result: Release Preparation
 
+## 리뷰 반영 (PR #102, hjlee83)
+
+아키텍처 리뷰에서 blocking 지적을 받았다: `prepare_release()`가 두
+파일을 각각 원자적으로 교체하지만(`os.replace` 두 번), **두 교체
+전체는 하나의 트랜잭션이 아니었다** - 첫 번째 `os.replace`
+(`pyproject.toml`)가 성공한 뒤 두 번째(`uv.lock`)가 실패하면
+`pyproject.toml`은 새 버전, `uv.lock`은 이전 버전으로 남아 PR
+설명/Result 문서가 보장한다고 적은 "부분 업데이트나 버전 불일치
+상태가 절대 남지 않는다"는 조건을 실제로는 위반하고 있었다.
+
+반영 내용:
+
+- `prepare_release`에 롤백 로직을 추가했다 - 두 번째 `os.replace`가
+  실패하면, 이미 갱신된 `pyproject.toml`을 **원래 내용으로 또 다른
+  원자적 `os.replace`**(원본 텍스트를 새 임시 파일에 쓴 뒤 그 임시
+  파일로 교체)를 통해 되돌린 뒤 원래 예외를 다시 던진다. 이제 두
+  실제 파일은 항상 "둘 다 새 버전" 아니면 "둘 다 원래 버전" 중
+  하나로만 남는다 - 개별 파일 각각의 원자성이 아니라 두 파일 쌍
+  전체의 all-or-nothing을 보장한다.
+- 회귀 테스트 2개 추가:
+  `test_second_replace_failure_rolls_back_the_first_file`이
+  `unittest.mock.patch`로 `devbot.release_preparation.os.replace`를
+  가로채 **정확히 두 번째 호출에서만** 실패하도록 강제하고, 실패 후
+  두 실제 파일이 원본과 바이트 단위로 완전히 동일한지, 임시/백업
+  파일이 남지 않는지 확인한다.
+  `test_second_replace_failure_still_allows_preparation_to_succeed_afterward`는
+  롤백 이후 정상적인(패치되지 않은) 재시도가 완전히 복원된 원래
+  상태에서 깨끗하게 성공하는지 확인한다.
+- 수정 전 코드로 되돌려 이 새 테스트가 실제로 실패하는지 직접
+  확인했다 - `pyproject.toml`이 `0.1.3`으로 이미 바뀐 채
+  `uv.lock`은 `0.1.2`로 남아
+  `VersionSourceMismatchError: pyproject.toml version '0.1.3' does not
+  match uv.lock devbot version '0.1.2'`가 발생함을 재현했다(리뷰가
+  정확히 예측한 증상). 수정 후 다시 통과함을 확인한 뒤 복구했다.
+- 모듈 docstring의 "Atomic writes" 절을 "All-or-nothing writes"로
+  바꿔 개별 `os.replace`의 원자성과 두 파일 쌍 전체의 all-or-nothing
+  보장이 서로 다른 것임을 명확히 했다.
+
+이 수정은 임시 파일 생성/정리 로직에만 영향을 주며, 버전 계산/사전
+일치 검증/bounded replacement/dry-run/범위 제한 등 나머지 설계는
+리뷰에서 그대로 승인됐다.
+
 ## 범위 밖 drive-by 수정 (main과 merge하며 발견)
 
 구현 완료 후 `origin/main`을 fetch했더니, 이번 세션과 무관한 실제 human
@@ -127,7 +169,8 @@ $ git status --short pyproject.toml uv.lock
 
 - `src/devbot/release_preparation.py` (신규)
 - `src/devbot/main.py` (`devbot release prepare` CLI 배선)
-- `tests/test_release_preparation.py` (신규, 30개 테스트)
+- `tests/test_release_preparation.py` (신규, 32개 테스트 - 리뷰 반영
+  회귀 2개 포함)
 - `tests/test_main.py` (6개 테스트 추가)
 - `tests/test_release.py` (범위 밖 drive-by 수정 1줄 - 위 절 참고)
 - `docs/00-roadmap.md` (Task 048 항목 추가)
@@ -150,6 +193,7 @@ $ git status --short pyproject.toml uv.lock
 | 6. 두 파일이 이후 같은 target 버전을 가짐 | `test_prepare_release_patch_updates_both_files`, `test_prepare_release_minor_updates_both_files`, `test_prepare_release_major_updates_both_files` |
 | 7. 결과가 old_version/new_version/recommendation/changed_paths를 보고 | `test_prepare_release_reports_changed_paths` |
 | 8. 반복 준비가 손상되지 않고 명시적으로 동작 | `test_repeated_preparation_advances_again_without_corruption` |
+| 리뷰 반영: 두 파일 쌍 전체의 all-or-nothing 보장 | `test_second_replace_failure_rolls_back_the_first_file`, `test_second_replace_failure_still_allows_preparation_to_succeed_afterward` |
 | 9. 네트워크/GitHub/태그/Release/publish/merge/PR 없음 | `test_release_prepare_does_not_call_github`(CLI), grep으로 import 목록에 GitHub/네트워크/git 관련 모듈 없음 확인 |
 | 10. 기존 release-classification이 추천 타입의 source of truth로 유지됨 | `src/devbot/release_preparation.py`가 `devbot.release_classification.ReleaseRecommendation`을 그대로 import, 재정의 없음 |
 | 11. 모든 Quality Gate 통과 | 아래 Validation 결과 |
@@ -172,8 +216,9 @@ $ git status --short pyproject.toml uv.lock
   에러/경고 0개, 수정 없이 처음부터 통과)
 - `uv run ruff check .`: PASS
 - `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS,
-  1013 passed (Task 047 병합 후 기준 977개 +
-  `tests/test_release_preparation.py` 30개 + `tests/test_main.py` 6개)
+  1015 passed (Task 047 병합 후 기준 977개 +
+  `tests/test_release_preparation.py` 32개 + `tests/test_main.py` 6개,
+  리뷰 반영 회귀 2개 포함)
 - 실제 `pyproject.toml`/`uv.lock`: 전체 스위트 실행 전후 모두
   `version = "0.1.0"`, `git status` 변경 없음 확인
 

@@ -15,10 +15,14 @@ version calculation happens before either file is touched
 A pre-existing mismatch between `pyproject.toml` and `uv.lock`'s versions
 is never silently repaired - it always raises `VersionSourceMismatchError`.
 
-**Atomic writes.** Both new file contents are staged to temporary files in
-the same directory before either real file is replaced via `os.replace`
-(atomic on the same filesystem), so a failure between the two writes can
-never leave one file updated and the other stale.
+**All-or-nothing writes.** Both new file contents are staged to temporary
+files in the same directory before either real file is replaced via
+`os.replace` (atomic on the same filesystem). Each individual replace is
+atomic, but the pair is not a single filesystem transaction - if the
+second `os.replace` fails after the first already succeeded,
+`pyproject.toml` is rolled back to its exact original content via another
+atomic replace before the exception propagates, so the two real files are
+never left with mismatched versions between them.
 
 **Formatting-preserving.** Only the exact matched version line is replaced
 in each file via a precisely bounded text splice - everything else in
@@ -261,10 +265,13 @@ def prepare_release(
 ) -> ReleasePreparationResult:
     """Validates via `plan_release_preparation`, then updates
     `pyproject.toml` and the `devbot` entry in `uv.lock` to the same
-    target version. Both writes are staged to temporary files first and
-    only then atomically replace the real files, so a failure between the
-    two writes never leaves one file updated and the other stale. No Git,
-    GitHub, or network operation is ever performed."""
+    target version. Both writes are staged to temporary files first. If
+    the second `os.replace` fails after the first one already succeeded,
+    `pyproject.toml` is rolled back to its exact original content (via
+    another atomic replace) before the exception propagates - the two
+    real files are never left with a version mismatch between them: it is
+    all-or-nothing, not just each individual file write being atomic. No
+    Git, GitHub, or network operation is ever performed."""
     plan = plan_release_preparation(project_root, recommendation)
 
     pyproject_path = project_root / PYPROJECT_FILENAME
@@ -290,7 +297,22 @@ def prepare_release(
         pyproject_tmp.unlink(missing_ok=True)
         raise
 
-    os.replace(pyproject_tmp, pyproject_path)
-    os.replace(uv_lock_tmp, uv_lock_path)
+    try:
+        os.replace(pyproject_tmp, pyproject_path)
+    except BaseException:
+        pyproject_tmp.unlink(missing_ok=True)
+        uv_lock_tmp.unlink(missing_ok=True)
+        raise
+
+    try:
+        os.replace(uv_lock_tmp, uv_lock_path)
+    except BaseException:
+        # The first replace already succeeded - restore pyproject.toml to
+        # its exact original content via another atomic replace, so no
+        # version mismatch between the two real files is ever left behind.
+        uv_lock_tmp.unlink(missing_ok=True)
+        rollback_tmp = _stage_temp_file(pyproject_path, pyproject_text)
+        os.replace(rollback_tmp, pyproject_path)
+        raise
 
     return plan
