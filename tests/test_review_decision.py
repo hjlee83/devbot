@@ -34,6 +34,16 @@ def _finding(**overrides: object) -> ReviewFinding:
     return ReviewFinding(**defaults)  # type: ignore[arg-type]
 
 
+def _counts(
+    *, blocker: object = 0, warning: object = 0, comment: object = 0
+) -> dict[ReviewSeverity, object]:
+    return {
+        ReviewSeverity.BLOCKER: blocker,
+        ReviewSeverity.WARNING: warning,
+        ReviewSeverity.COMMENT: comment,
+    }
+
+
 # --------------------------------------------------------------------------
 # ReviewLocation validation.
 # --------------------------------------------------------------------------
@@ -304,6 +314,114 @@ def test_direct_construction_with_correct_derivation_succeeds() -> None:
         ),
     )
     assert report.decision is ReviewDecision.APPROVED
+
+
+# --------------------------------------------------------------------------
+# Immutability: `frozen=True` alone does not stop a mutable container
+# passed directly from being mutated afterward - `__post_init__` must
+# normalize into genuinely immutable, independent copies.
+# --------------------------------------------------------------------------
+
+
+def test_mutating_original_findings_list_after_construction_does_not_affect_report() -> None:
+    findings: list[ReviewFinding] = []
+    counts = {ReviewSeverity.BLOCKER: 0, ReviewSeverity.WARNING: 0, ReviewSeverity.COMMENT: 0}
+    report = ReviewReport(decision=ReviewDecision.APPROVED, findings=findings, counts=counts)  # type: ignore[arg-type]
+
+    findings.append(_finding(severity=ReviewSeverity.BLOCKER, code="B1"))
+    counts[ReviewSeverity.BLOCKER] = 1
+
+    assert report.findings == ()
+    assert report.decision is ReviewDecision.APPROVED
+    assert dict(report.counts)[ReviewSeverity.BLOCKER] == 0
+
+
+def test_mutating_original_counts_dict_after_construction_does_not_affect_report() -> None:
+    counts = {ReviewSeverity.BLOCKER: 0, ReviewSeverity.WARNING: 0, ReviewSeverity.COMMENT: 0}
+    report = ReviewReport(decision=ReviewDecision.APPROVED, findings=[], counts=counts)  # type: ignore[arg-type]
+
+    counts[ReviewSeverity.BLOCKER] = 99
+
+    assert dict(report.counts)[ReviewSeverity.BLOCKER] == 0
+
+
+def test_mutating_original_metadata_dict_after_construction_does_not_affect_report() -> None:
+    metadata = {"source": "ci"}
+    report = ReviewReport(
+        decision=ReviewDecision.APPROVED,
+        findings=[],  # type: ignore[arg-type]
+        counts=_counts(),
+        metadata=metadata,
+    )
+
+    metadata["source"] = "tampered"
+
+    assert dict(report.metadata or {}) == {"source": "ci"}
+
+
+def test_report_counts_is_immune_to_mapping_proxy_mutation_attempt() -> None:
+    report = build_review_report([])
+    with pytest.raises(TypeError):
+        report.counts[ReviewSeverity.BLOCKER] = 5  # type: ignore[index]
+
+
+def test_direct_construction_findings_element_wrong_type_rejected() -> None:
+    with pytest.raises(InvalidReviewFindingError):
+        ReviewReport(
+            decision=ReviewDecision.APPROVED,
+            findings=[{"not": "a finding"}],  # type: ignore[list-item]
+            counts=_counts(),  # type: ignore[arg-type]
+        )
+
+
+def test_direct_construction_counts_non_int_value_rejected() -> None:
+    with pytest.raises(ReviewReportDerivationMismatchError):
+        ReviewReport(
+            decision=ReviewDecision.APPROVED,
+            findings=(),
+            counts=_counts(blocker="0"),  # type: ignore[arg-type]
+        )
+
+
+def test_direct_construction_counts_not_a_mapping_rejected() -> None:
+    with pytest.raises(ReviewReportDerivationMismatchError):
+        ReviewReport(decision=ReviewDecision.APPROVED, findings=(), counts=["not", "a", "mapping"])  # type: ignore[arg-type]
+
+
+def test_direct_construction_metadata_not_a_mapping_rejected() -> None:
+    with pytest.raises(ReviewDecisionError):
+        ReviewReport(
+            decision=ReviewDecision.APPROVED,
+            findings=(),
+            counts=_counts(),
+            metadata=["not", "a", "mapping"],  # type: ignore[arg-type]
+        )
+
+
+def test_direct_construction_metadata_non_string_value_rejected() -> None:
+    with pytest.raises(ReviewDecisionError):
+        ReviewReport(
+            decision=ReviewDecision.APPROVED,
+            findings=(),
+            counts=_counts(),
+            metadata={"key": 42},  # type: ignore[dict-item]
+        )
+
+
+def test_direct_construction_decision_wrong_type_rejected() -> None:
+    with pytest.raises(ReviewReportDerivationMismatchError):
+        ReviewReport(
+            decision="approved",  # type: ignore[arg-type]
+            findings=(),
+            counts=_counts(),
+        )
+
+
+def test_build_review_report_findings_are_independent_of_caller_list() -> None:
+    findings = [_finding(code="C1")]
+    report = build_review_report(findings)
+    findings.append(_finding(code="C2"))
+    assert len(report.findings) == 1
 
 
 # --------------------------------------------------------------------------

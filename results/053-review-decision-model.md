@@ -43,6 +43,51 @@
    깨질 수 없게 한다(스모크 테스트로 직접 검증: 잘못된 decision/counts로
    직접 생성 시도 → 즉시 거부).
 
+## 리뷰 반영: 생성 후 외부 mutation에 대한 진짜 불변성 (PR #112, hjlee83)
+
+리뷰에서 실제 버그를 발견했다: `@dataclass(frozen=True)`는 **속성
+재할당**만 막지, 그 속성에 저장된 mutable 객체(list/dict) 자체의
+mutation은 막지 않는다. `ReviewReport.__post_init__`이 넘겨받은
+`findings`/`counts`/`metadata`를 그대로 저장하고 있어서, `ReviewReport`를
+직접 생성할 때 원본 list/dict를 넘기면 생성 이후에도 외부에서 그
+원본을 바꿔서 `report.counts`/`report.findings`가 조용히 바뀔 수
+있었다 — `report.decision`은 그대로인 채로. 직접 재현해서 확인했다:
+
+```python
+findings = []
+counts = {ReviewSeverity.BLOCKER: 0, ReviewSeverity.WARNING: 0, ReviewSeverity.COMMENT: 0}
+report = ReviewReport(decision=ReviewDecision.APPROVED, findings=findings, counts=counts)
+findings.append(ReviewFinding(...BLOCKER...))
+counts[ReviewSeverity.BLOCKER] = 1
+# 수정 전: report.decision은 여전히 approved인데 report.counts는 blocker=1을 보고함
+```
+
+**수정**: `ReviewReport.__post_init__`이 이제 모든 입력을 `object.__setattr__`로
+정규화한다:
+- `findings` → 각 원소가 진짜 `ReviewFinding` 인스턴스인지 검증한 뒤,
+  중복 검사·정렬을 거쳐 새 `tuple`로 교체(원본 리스트와 완전히 독립).
+- `counts` → 정확히 3개 enum 키만 가지고, 각 값이 int인지 검증한 뒤
+  findings로부터 재도출한 값과 대조, 새 `MappingProxyType`으로 교체.
+- `metadata` → 문자열 키/값인지 검증한 뒤 복사한 새 `MappingProxyType`으로
+  교체(있는 경우).
+
+이제 원본이 어떻게 바뀌어도 이미 생성된 `report`는 전혀 영향받지 않는다.
+`build_review_report`는 이 정규화 로직을 중복하지 않도록 단순화했다 —
+findings/counts만 계산해서 `ReviewReport(...)`에 넘기고, 실제 검증·정렬·
+불변화는 전부 `__post_init__` 한 곳에서만 일어난다(단일 진실 공급원).
+
+검증: `test_mutating_original_findings_list_after_construction_does_not
+_affect_report`, `test_mutating_original_counts_dict_after_construction
+_does_not_affect_report`, `test_mutating_original_metadata_dict_after
+_construction_does_not_affect_report` — 생성 후 원본을 바꿔도 report가
+그대로임을 직접 확인. `test_direct_construction_findings_element_wrong
+_type_rejected`, `test_direct_construction_counts_non_int_value_rejected`,
+`test_direct_construction_counts_not_a_mapping_rejected`,
+`test_direct_construction_metadata_not_a_mapping_rejected`,
+`test_direct_construction_metadata_non_string_value_rejected`,
+`test_direct_construction_decision_wrong_type_rejected` — 직접 생성 시
+잘못된 타입/원소가 각각 타입 있는 오류로 fail closed됨을 확인.
+
 ## Location 검증
 
 `ReviewLocation`은 생성 시점에 다음을 즉시 거부한다:
@@ -125,31 +170,34 @@ $ uv run ruff check .
 All checks passed!
 
 $ uv run pytest -q
-1217 passed in 81.87s
+1228 passed in 63.08s
 ```
 
-- `tests/test_review_decision.py` (신규, 59개): Location 검증(절대
+- `tests/test_review_decision.py` (신규+리뷰 수정, 70개): Location 검증(절대
   경로/상위 탐색/빈 경로/공백/잘못된 줄 범위/line-without-path 등
   10여 개), Finding 검증(빈 code/message, 잘못된 severity 타입),
   각 severity별 decision 도출, blocker 우선순위, counts 파생과
   MappingProxyType 불변성, 결정론적 정렬(severity→code, 반복 호출 간
   일관성), 정확한 중복만 모호함으로 거부하고 code-only-same은 허용,
   `ReviewReport` 직접 생성 우회 시도가 모두 거부됨(잘못된 decision/
-  counts/중복 findings 각각), JSON 완전 왕복(location/summary/metadata
-  포함·미포함 둘 다), 다양한 malformed payload(non-dict, findings
-  non-list, 잘못된 severity/타입, 빈 code) fail-closed, 선언된
-  decision/counts가 파생값과 모순되면 거부하고 일치하면 통과, 결정론적
-  렌더링, 오류 계층.
+  counts/중복 findings 각각), **생성 후 원본 list/dict를 mutation해도
+  report가 불변임을 확인하는 회귀 테스트 3개**, **직접 생성 시 잘못된
+  타입/원소가 각각 거부됨을 확인하는 테스트 6개**, JSON 완전 왕복
+  (location/summary/metadata 포함·미포함 둘 다), 다양한 malformed
+  payload(non-dict, findings non-list, 잘못된 severity/타입, 빈 code)
+  fail-closed, 선언된 decision/counts가 파생값과 모순되면 거부하고
+  일치하면 통과, 결정론적 렌더링, 오류 계층.
 - `tests/test_main.py` (+8): text/json 출력, 빈 findings 승인, malformed
   JSON 파일, invalid payload, 모순된 declared decision, 입력 파일
   누락, GitHub client/write client/daemon lock 미생성.
-- 전체 스위트 1217개 회귀 없이 통과.
+- 전체 스위트 1228개 회귀 없이 통과.
 
 ## 수정/추가 파일
 
-- `src/devbot/review_decision.py` (신규)
+- `src/devbot/review_decision.py` (신규, 리뷰 수정으로 `ReviewReport
+  .__post_init__` 전면 재작성)
 - `src/devbot/main.py` (`review report` 서브커맨드 + 핸들러)
-- `tests/test_review_decision.py` (신규, 59개)
+- `tests/test_review_decision.py` (신규+리뷰 수정, 70개)
 - `tests/test_main.py` (+8)
 - `specifications/053-review-decision-model.md` (canonical 8-섹션
   구조로 재구성)

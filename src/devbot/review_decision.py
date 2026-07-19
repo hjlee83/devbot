@@ -156,25 +156,69 @@ class ReviewReport:
     metadata: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
-        # Re-derive and compare, rather than trust `decision`/`counts` -
-        # this is what makes the "never independently supplied" invariant
-        # hold even against a `ReviewReport` constructed directly, not just
-        # through `build_review_report`.
-        _check_no_ambiguous_duplicates(self.findings)
-        expected_counts = _derive_counts(self.findings)
+        # `frozen=True` only blocks attribute *reassignment* - it does not
+        # stop a mutable list/dict passed in from being mutated afterward,
+        # which would silently invalidate the derived invariants below.
+        # Every field is normalized into a genuinely immutable, validated
+        # form here, regardless of construction path (`build_review_report`
+        # or a direct `ReviewReport(...)` call), and re-derives
+        # `decision`/`counts` from that normalized `findings` rather than
+        # trusting whatever was passed in.
+        findings_list = list(self.findings)
+        for item in findings_list:
+            if not isinstance(item, ReviewFinding):
+                raise InvalidReviewFindingError(
+                    f"findings must contain only ReviewFinding instances, got "
+                    f"{type(item).__name__}"
+                )
+        _check_no_ambiguous_duplicates(findings_list)
+        ordered_findings = tuple(sorted(findings_list, key=_sort_key))
+        object.__setattr__(self, "findings", ordered_findings)
+
+        if not isinstance(self.counts, Mapping):
+            raise ReviewReportDerivationMismatchError(
+                f"counts must be a mapping, got {type(self.counts).__name__}"
+            )
+        expected_counts = _derive_counts(ordered_findings)
+        normalized_counts: dict[ReviewSeverity, int] = {}
         for severity in ReviewSeverity:
             actual = self.counts.get(severity, 0)
+            if not isinstance(actual, int) or isinstance(actual, bool):
+                raise ReviewReportDerivationMismatchError(
+                    f"counts[{severity.value!r}] must be an int, got {type(actual).__name__}"
+                )
             if actual != expected_counts[severity]:
                 raise ReviewReportDerivationMismatchError(
                     f"counts[{severity.value!r}]={actual!r} does not match the count derived "
                     f"from findings ({expected_counts[severity]!r})"
                 )
+            normalized_counts[severity] = actual
+        object.__setattr__(self, "counts", MappingProxyType(normalized_counts))
+
+        if not isinstance(self.decision, ReviewDecision):
+            raise ReviewReportDerivationMismatchError(
+                f"decision must be a ReviewDecision, got {type(self.decision).__name__}"
+            )
         expected_decision = _derive_decision(expected_counts)
         if self.decision is not expected_decision:
             raise ReviewReportDerivationMismatchError(
                 f"decision {self.decision.value!r} does not match the decision derived from "
                 f"findings ({expected_decision.value!r})"
             )
+
+        if self.metadata is not None:
+            if not isinstance(self.metadata, Mapping):
+                raise ReviewDecisionError(
+                    f"metadata must be a mapping or null, got {type(self.metadata).__name__}"
+                )
+            normalized_metadata: dict[str, str] = {}
+            for key, value in self.metadata.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    raise ReviewDecisionError(
+                        f"metadata must map strings to strings, got {key!r}: {value!r}"
+                    )
+                normalized_metadata[key] = value
+            object.__setattr__(self, "metadata", MappingProxyType(normalized_metadata))
 
 
 def _location_identity(location: ReviewLocation | None) -> tuple | None:
@@ -217,20 +261,19 @@ def build_review_report(
     metadata: Mapping[str, str] | None = None,
 ) -> ReviewReport:
     """The sanctioned constructor: derives `decision`/`counts` from
-    `findings` - never accept them as separate inputs. Raises
-    `AmbiguousReviewFindingsError` on duplicate findings before deriving
-    anything."""
+    `findings` - never accept them as separate inputs. All validation,
+    deterministic ordering, and immutability normalization actually happen
+    in `ReviewReport.__post_init__`, which this delegates to - a single
+    source of truth shared with any direct `ReviewReport(...)` call."""
     findings_list = list(findings)
-    _check_no_ambiguous_duplicates(findings_list)
-    ordered = tuple(sorted(findings_list, key=_sort_key))
-    counts = _derive_counts(ordered)
+    counts = _derive_counts(findings_list)
     decision = _derive_decision(counts)
     return ReviewReport(
         decision=decision,
-        findings=ordered,
-        counts=MappingProxyType(counts),
+        findings=tuple(findings_list),
+        counts=counts,
         summary=summary,
-        metadata=MappingProxyType(dict(metadata)) if metadata is not None else None,
+        metadata=metadata,
     )
 
 
