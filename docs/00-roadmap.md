@@ -558,3 +558,39 @@
       보고하고, 두 게시 경로가 한 실행에서 동시에 호출되지 않음을
       매트릭스 테스트로 검증했다(`src/devbot/release_orchestration.py`,
       `results/051-release-orchestration.md`).
+- [x] Task 052: release recommendation aggregation. 최근 stable Release
+      이후 병합된 모든 Task PR의 Contract를 집계해 하나의 권위 있는
+      릴리스 추천값을 계산하는 `src/devbot/release_recommendation_aggregation.py`와
+      읽기 전용 `devbot release recommend [--repo]`를 추가했다. 경계
+      탐색과 PR 열거는 Task 037/048/051이 이미 쓰던
+      `release_ops.gather_release_context`를 그대로 재사용한다(직접
+      재구현하지 않음). PR→Contract 연결은 이 저장소에 끝까지 이어지는
+      기존 메커니즘이 없었다 - `devbot.planner`는 규약을 만들 뿐이고
+      `devbot.worktree`의 파서들은 Task Issue 본문 대상이며 스스로
+      "best-effort"라고 문서화돼 있다(`docs/07-decisions.md` 2026-07-15
+      worktree ADR). 그래서 PR의 head 브랜치명(`task/NNN-slug`)을 1차
+      신호로 삼아 `tasks/NNN-slug.md` 경로를 재구성하고
+      (`devbot.planner.canonical_contract_path` 재사용), PR 본문의
+      `## Contract` 선언(있는 경우)과 대조해 불일치하면 모호성 오류로
+      fail closed한다. 브랜치명이 `task/NNN-slug` 패턴과 안 맞는 PR은
+      "Task PR이 아니었다"는 명시적·타입 있는 제외 사유로 결과에
+      남기고(조용히 버리지 않음), 패턴은 맞는데 그 경로에 Contract가
+      없으면 진짜 불일치로 보고 전체 집계를 fail closed한다. 구현 중
+      실제로 발견한 것: 이미 병합된 `tasks/050-*.md`/`tasks/051-*.md`
+      Contract 2개가 Task 046 자신의 파서(`contract_metadata.py`)가
+      요구하는 형식과 실제로 안 맞았다 - `## Contract Version` 본문이
+      다른 필드들처럼 `- contract_version: 1`(불릿)로 쓰여 있었는데,
+      파서는 순수 정수만(`1`) 허용한다(Task 046 자신의 Contract와
+      048/049는 이미 순수 정수 형식이었음). 사용자와 상의 후, 의미는
+      바꾸지 않고 포맷만 맞추는 한 줄짜리 drive-by fix로 두 파일과
+      대응하는 `specifications/050-*.md`/`051-*.md`에 내장된 Contract
+      Reference 사본을 함께 고쳤다(바이트 단위 일치 재검증 완료). Task
+      052 자신의 코드는 손대지 않았다 - "손상된 Contract는 전체
+      집계를 fail closed시킨다"는 것 자체가 Spec이 요구한 정확한
+      동작이었기 때문이다. GitHub client에 PR 하나의 전체 메타데이터
+      (`merge_commit_sha`/`merged_at`/`body`/`html_url`을 한 번에)를
+      돌려주는 기존 메서드가 없어서 `GitHubClient.get_pull_request`를
+      새로 추가했다(다른 기존 메서드들은 이 필드들의 부분집합만 반환).
+      전체 과정이 읽기 전용이다 - write client를 한 번도 만들지
+      않는다(`src/devbot/release_recommendation_aggregation.py`,
+      `results/052-release-recommendation-aggregation.md`).

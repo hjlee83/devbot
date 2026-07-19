@@ -2,7 +2,7 @@
 
 ## Contract Version
 
-- contract_version: 1
+1
 
 ## Provenance
 

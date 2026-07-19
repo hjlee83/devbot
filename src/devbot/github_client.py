@@ -92,6 +92,25 @@ class PullRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class PullRequestDetail:
+    """A single Pull Request's full metadata, per
+    `GET /repos/{owner}/{repo}/pulls/{number}` - the only endpoint that
+    returns `merge_commit_sha`, `merged_at`, and `body`/`html_url`
+    together (Task 052; `list_pull_requests`'s `PullRequest` and
+    `get_commit_pull_request_metadata`'s `PullRequestMetadata` each carry
+    only a subset)."""
+
+    number: int
+    html_url: str
+    body: str
+    head_ref: str
+    base_ref: str
+    merged: bool
+    merge_commit_sha: str | None
+    merged_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class GitHubReleaseAsset:
     """A single Release asset, per `GET /repos/{owner}/{repo}/releases`."""
 
@@ -395,6 +414,26 @@ class GitHubClient:
             page += 1
 
         return pull_requests
+
+    def get_pull_request(self, repository: RepositoryConfig, number: int) -> PullRequestDetail:
+        """Fetch one Pull Request's full metadata
+        (`GET /repos/{owner}/{repo}/pulls/{number}`, Task 052)."""
+        payload = self._get(f"/repos/{repository.owner}/{repository.repo}/pulls/{number}").json()
+        merged_at_raw = payload.get("merged_at")
+        return PullRequestDetail(
+            number=payload["number"],
+            html_url=payload["html_url"],
+            body=payload.get("body") or "",
+            head_ref=payload["head"]["ref"],
+            base_ref=payload["base"]["ref"],
+            merged=bool(merged_at_raw),
+            merge_commit_sha=payload.get("merge_commit_sha"),
+            merged_at=(
+                datetime.fromisoformat(merged_at_raw.replace("Z", "+00:00"))
+                if merged_at_raw
+                else None
+            ),
+        )
 
     def list_check_runs_for_ref(
         self,
