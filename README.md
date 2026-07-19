@@ -70,9 +70,13 @@ uv run devbot --version          # print the installed package version and exit
 ```
 
 Each iteration enforces one globally active Task and selects the next runnable
-Job from the managed repositories. DevBot reuses the Task's existing Branch and
-Pull Request, prepares an isolated worktree, and runs the configured Agent role
-against that prepared workspace.
+Job from the managed repositories. For a fully prepared Task, DevBot reuses the
+existing Branch and Pull Request. For a newly approved `devbot:ready` Issue
+without execution artifacts, DevBot validates the Issue metadata, creates the
+canonical `task/<NNN>-<slug>` Branch and Task Contract, prepares an isolated
+worktree, and runs the configured Agent role against that prepared workspace.
+It does not create an empty PR during bootstrap; delivery opens or updates the
+PR only after verified implementation output exists.
 
 The normal workflow is:
 

@@ -77,7 +77,7 @@ def test_branch_name_is_safe_and_deterministic() -> None:
     second = generate_branch_name(repository, 42, title)
 
     assert first == second
-    assert first.startswith("devbot/myrepo-42-")
+    assert first.startswith("task/042-")
     assert " " not in first
     assert re.search(r"[~^:?*\[\\]", first) is None
     assert ".." not in first

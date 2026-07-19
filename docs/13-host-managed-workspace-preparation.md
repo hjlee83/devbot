@@ -7,7 +7,9 @@ Last Updated: 2026-07-15
 Task Branch/Pull Request 해석과 격리된 Git worktree 준비를 어떻게
 소유하는지 정의한다. `docs/12-planner-workflow.md`(Task 022)가 정의한
 Planner/Implementer/Reviewer/Operator 네 역할 경계를 대체하지 않고, 그
-경계에 "DevBot host"라는 다섯 번째 소유자를 명시적으로 추가한다.
+경계에 "DevBot host"라는 다섯 번째 소유자를 명시적으로 추가한다. Task 119
+이후 Planner는 승인된 Issue와 `devbot:ready` 신호만 준비할 수 있고,
+DevBot host가 나머지 실행 산출물을 결정적으로 bootstrap한다.
 
 ## 1. 배경
 
@@ -20,8 +22,8 @@ Task Branch와 PR을 스스로 찾기 위해 `git fetch`/`gh` 같은 네트워�
 ## 2. 소유권 경계 (Scope §12)
 
 ```text
-Planner        : Task/Branch/PR/Issue 계약을 생성한다
-DevBot host    : fetch, worktree 준비, delivery, GitHub 갱신을 수행한다
+Planner        : 충분히 명시된 Task Issue와 ready 신호를 생성한다
+DevBot host    : branch/contract bootstrap, fetch, worktree 준비, delivery, GitHub 갱신을 수행한다
 Implementer     : 준비된 로컬 저장소 파일을 수정하고 검증한다
 Agent
 Reviewer       : 결과 PR을 리뷰한다
@@ -31,7 +33,10 @@ Operator       : Merge를 수행한다
 - **DevBot host**는 `src/devbot/worktree.py`(`WorktreeManager`)로 구현된다.
   IMPLEMENT/REWORK Job마다 GitHub에서 이미 조회한 linked PR 정보를 받아
   `git fetch`, `git worktree add`, branch 재사용/생성을 수행하고, Agent가
-  실행될 `RepositoryConfig`(worktree 경로)를 만들어 넘긴다.
+  실행될 `RepositoryConfig`(worktree 경로)를 만들어 넘긴다. no-PR
+  `devbot:ready` Issue는 먼저 `devbot.bootstrap.BranchNamingPolicy`로
+  `task/<NNN>-<slug>` branch를 생성하고, Issue 본문에서 Task Contract를
+  materialize한다.
 - **Implementer Agent**는 이제 `git fetch`/`gh`/`curl` 등 원격 discovery를
   전혀 수행할 필요가 없다 - 준비된 worktree 안에서 파일을 읽고 쓰고 로컬
   검증 명령만 실행한다.
@@ -58,11 +63,16 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
   있으면 그 PR이 authoritative이며, PR body에 `Closes #<issue>`가 없어도
   해당 PR을 사용한다. 명시 PR을 찾을 수 없으면 fallback branch를 만들지
   않고 `linked_branch_missing` workspace preparation failure로 중단한다.
-  Planner PR metadata가 없는 legacy Issue만 기존 closing-keyword 해석과
-  fallback branch 생성을 유지한다.
-- **생성**: Agent 실행 전, `prepare()`가 linked PR이 있으면 그 branch를,
-  없으면 `devbot.workspace.generate_branch_name()`으로 만든 새 branch를
-  `origin/<default_branch>`에서 분기해 worktree를 만든다.
+- **Bootstrap 생성**: Planner PR metadata가 없는 `devbot:ready` Issue는
+  Issue 본문에 objective, scope, constraints/non-goals, acceptance criteria,
+  verification, implementation context가 있어야 한다. 누락되면
+  `bootstrap_validation_failed`로 중단하고 claim은 이전 상태로 복구된다.
+  검증을 통과하면 `task/<Issue 번호 3자리>-<제목 slug>` branch와
+  `tasks/<Issue 번호 3자리>-<slug>.md` Contract를 만든다. 같은 이름이 이미
+  다른 Task branch로 존재하면 deterministic `-2`, `-3` suffix를 붙인다.
+- **생성 위치**: Agent 실행 전, `prepare()`가 linked PR이 있으면 그 branch를,
+  없으면 bootstrap branch를 `origin/<default_branch>`에서 분기해 worktree를
+  만든다.
 - **재사용**: 같은 저장소/Issue/branch로 다시 `prepare()`가 호출되면 기존
   worktree를 그대로 재사용한다 - 이전 실행이 남긴 미커밋 변경도 그대로
   보존된다(진단/복구 목적).
@@ -94,6 +104,10 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
   WORKSPACE_DIRTY`로 거부한다 - `git worktree add` 명령 자체는 성공했지만
   결과물이 안전하지 않은 경우를 `WORKTREE_CREATION_FAILED`(명령 실패)와
   구분한다.
+- **dry-run**: bootstrap 대상 Issue에서 `dry_run=True`면 metadata와 naming
+  plan만 계산하고 `git fetch`, `git worktree add`, Contract write를 하지
+  않는다. 반환된 `PreparedWorkspace`에는 예정 branch/contract/result 경로가
+  포함된다.
 
 ## 4. 준비된 Agent 컨텍스트
 

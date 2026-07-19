@@ -12,9 +12,15 @@ Operator 네 역할의 책임 경계와, 그 경계를 기계로 검증하는
 Task 021 Agent Outcome Classification)이 반복적으로 증명한 다음 순서를
 저장소 정책으로 고정한다.
 
-1. Planner가 범위, Checkpoint, Validation Gate를 정의한다.
-2. Planner가 Task Issue, Branch, 계약서 파일, Pull Request를 생성한다.
-3. Implementer는 기존 Branch와 Pull Request 위에서 계속 구현한다.
+1. Planner가 범위, Checkpoint, Validation Gate를 정의하고 Task Issue를
+   생성한다.
+2. DevBot이 `devbot:ready` Issue를 claim할 때 Branch와 계약서 파일이
+   없으면 결정론적으로 bootstrap한다(Issue #119, `devbot.bootstrap`) -
+   Planner가 이미 만들어 둔 Branch/계약서/PR이 있으면 그대로 재사용한다
+   (8절 "기존 워크플로와의 호환성").
+3. Implementer는 (Planner가 만들었든 DevBot이 bootstrap했든) 기존 Branch
+   위에서 계속 구현하고, 검증된 구현 commit이 생긴 뒤 delivery가 Pull
+   Request를 생성/갱신한다.
 4. Reviewer는 저장소 정책과 Task 계약서를 기준으로 구현을 평가한다.
 5. Operator가 최종 Merge를 수행한다.
 
@@ -30,14 +36,33 @@ Planner는 다음을 소유한다 (`devbot.planner.PLANNER_RESPONSIBILITIES`).
 - 범위(In scope)와 제외 범위(Out of scope)
 - Checkpoint와 필수 테스트 이름
 - Validation Gate
-- Branch 생성
-- 계약서 파일 생성
-- Pull Request 생성
 - Task Issue 생성
+
+Planner는 Issue 본문이 `docs/09-task-contract-standard.md`의 "계약서
+완성도 검증" 항목(objective/scope/constraints/acceptance criteria/
+verification/implementation context)을 결정론적으로 만족한 뒤에만
+`devbot:ready`를 적용한다. Branch, 계약서 파일, Pull Request는 더 이상
+Planner가 만들지 않는다(Issue #119) - 아래 1.1a 참조.
+
+### 1.1a DevBot Bootstrap
+
+Planner가 만든 `devbot:ready` Issue에 아직 Branch/계약서/PR이 없으면,
+DevBot host가 claim 시점에 다음을 결정론적으로 소유한다
+(`devbot.planner.DEVBOT_BOOTSTRAP_RESPONSIBILITIES`,
+`src/devbot/bootstrap.py`).
+
+- Branch 생성 - 기존 Planner branch pattern(`task/<NNN>-<slug>`)을
+  `devbot.bootstrap.BranchNamingPolicy`로 중앙화해 그대로 유지한다.
+- 계약서 파일 생성 - Issue 본문 그대로의 의도로 Task Contract를
+  materialize한다.
+- Pull Request 생성 - bootstrap 시점이 아니라, 검증된 구현 commit이 생긴
+  뒤 기존 delivery 지점에서만 일어난다.
 - Branch, PR, Issue, 계약서 간의 명시적 상호 링크(cross-link)
 
-Planner는 계약서가 `docs/09-task-contract-standard.md`의 "계약서 완성도
-검증" 항목을 모두 만족한 뒤에만 Task Issue와 PR을 생성한다.
+필수 Issue metadata가 없거나 불충분하면 `bootstrap_validation_failed`로
+중단하고, 구현 Agent가 누락된 의도를 임의로 채우지 않는다. 이미 Branch/
+계약서/PR을 갖춘 Planner-prepared Issue는 이 절 없이 기존 경로를 그대로
+탄다(8절 "기존 워크플로와의 호환성").
 
 ### 1.2 Implementer
 

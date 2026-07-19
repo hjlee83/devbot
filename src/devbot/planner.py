@@ -29,10 +29,19 @@ PLANNER_RESPONSIBILITIES: tuple[str, ...] = (
     "scope_and_out_of_scope",
     "checkpoints_and_required_tests",
     "validation_gate",
+    "task_issue_creation",
+)
+
+# Issue #119: DevBot, not the Planner, now owns deterministic execution
+# bootstrap (`devbot.bootstrap`) once a Planner-created Issue receives
+# `devbot:ready` - branch/contract creation and cross-linking moved here
+# from `PLANNER_RESPONSIBILITIES`. Pull Request creation stays at the
+# existing delivery point (after a verified implementation commit), not at
+# bootstrap time.
+DEVBOT_BOOTSTRAP_RESPONSIBILITIES: tuple[str, ...] = (
     "branch_creation",
     "contract_file_creation",
     "pull_request_creation",
-    "task_issue_creation",
     "cross_linking",
 )
 
