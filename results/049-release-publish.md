@@ -1,5 +1,53 @@
 # Task 049 Result: Release Publish
 
+## 리뷰 반영 (PR #104, hjlee83)
+
+아키텍처 리뷰에서 blocking 버그를 받았다: `_resolve_tag_state()`가 로컬
+태그와 원격 태그를 하나의 `observed` 집합으로 합치고 있었다. 첫 실행에서
+`git tag`는 성공했지만 `git push origin <tag>`가 실패하면 로컬에만
+태그가 남는데, 다음 실행에서는 local_sha=target_sha, remote_sha=None인
+상태에서 `observed == {target_sha}`가 성립해 `TagState.MATCHES_TARGET`으로
+잘못 판정됐다. 그 결과 `_create_and_push_tag()`(태그 재생성+push)를
+건너뛰고 바로 `create_release()`로 진행할 수 있었다 - **원격에 태그가
+실제로 존재하지 않는데도 게시가 완료된 것처럼 처리될 위험**이었다.
+
+반영 내용:
+
+- `_create_and_push_tag`를 `_ensure_tag_created_and_pushed`로 다시
+  설계했다 - 로컬 태그 존재 여부와 원격 태그 존재 여부를 **완전히
+  독립적으로** 확인한다: 로컬에 없으면 로컬에서 생성하고, 그것과
+  무관하게 원격에 없으면 push한다(둘 다 있으면 아무 것도 하지 않음 -
+  멱등). `publish_prepared_release`가 이제 이 함수를 항상 호출하도록
+  바꿨다(이전에는 `preview.tag_state is ABSENT`일 때만 호출해 버그의
+  원인이 됐다) - 함수 자체가 멱등하므로 무조건 호출해도 안전하다.
+  이렇게 하면 `create_release` 호출 시점에 원격 태그가 target SHA에
+  실제로 존재함이 항상 보장된다.
+- 로컬/원격 어느 쪽이든 target과 다른 커밋을 가리키면(예상 못한 충돌)
+  여전히 `ConflictingTagError`로 fail closed한다 - `preview_release_
+  publish`가 이미 이를 걸러내지만, 방어적으로 한 번 더 확인한다.
+- 리뷰가 요구한 4개 회귀 테스트 중 핵심 2개를 작성했다(나머지 2개
+  요구사항은 이 2개 테스트의 assertion에 포함시켰다):
+  1. `test_tag_created_locally_but_push_failure_does_not_falsely_report_matches_target` -
+     `git tag`는 성공, `git push`만 실패하도록 강제(`subprocess.run`을
+     정확히 `git push origin <tag>` 호출에만 패치) - 실패 후 로컬 태그는
+     남아 있지만 원격에는 없고, `create_release`가 호출되지 않았음을
+     확인한다.
+  2. `test_retry_after_tag_push_failure_pushes_remote_tag_before_creating_release` -
+     실패 후 재시도(패치 없이 정상 실행)가 실제로 원격에 태그를
+     push하고, 그 다음에만 `create_release`를 호출하며, 로컬 태그가
+     중복 생성되지 않았음을 확인한다.
+- 수정 전 코드로 되돌려 이 두 테스트가 실제로 실패하는지 직접
+  확인했다 - 리뷰가 예측한 대로 재시도 테스트가
+  `'refs/tags/v1.2.3' not in remote_tags`로 실패했다(원격에 태그가
+  끝내 push되지 않음). 수정 후 다시 통과함을 확인한 뒤 복구했다.
+- 이 수정 과정에서 `PublishOutcome` 라벨의 사소한 부정확성도 발견했다
+  - 재시도 성공 시 `outcome`이 여전히(수정 전부터 있던 로직 그대로)
+    `COMPLETED_MISSING_RELEASE`로 표시되는데, 실제로는 이번 호출에서
+    push와 Release 생성을 둘 다 수행했다. 안전성에는 영향이 없는
+    관찰용 라벨이라 이번에는 손대지 않고 테스트 주석으로 사실만
+    정확히 기록해 뒀다 - 향후 라벨을 더 세분화하고 싶다면 별도 작업으로
+    남긴다.
+
 ## 구현 전 아키텍처 충돌 확인과 사용자 논의
 
 구현을 시작하기 전에, Task 037의 ADR(`docs/07-decisions.md`, "Operator
@@ -112,7 +160,8 @@ dereference, push 성공/실패 등) `subprocess`를 mock하는 것보다 훨씬
 - `src/devbot/release_preparation.py` (`read_current_version` promote +
   버전 형식 검증 강화 - 안전한 추가/버그 수정)
 - `src/devbot/main.py` (`devbot release publish-prepared` CLI 배선)
-- `tests/test_release_publish.py` (신규, 15개 테스트)
+- `tests/test_release_publish.py` (신규, 17개 테스트 - 리뷰 반영 회귀
+  2개 포함)
 - `tests/test_main.py` (5개 테스트 추가)
 - `tests/test_github_write_client.py` (허용 메서드 목록에 `create_release`
   추가)
@@ -141,15 +190,17 @@ dereference, push 성공/실패 등) `subprocess`를 mock하는 것보다 훨씬
 | 9. 기존 추상화 재사용, 두 번째 GitHub client 없음 | `get_commit_sha`/`get_release_by_tag` 재사용(신규 GitHubClient 메서드 0개), `GitHubWriteClient`에만 1개 메서드 추가 |
 | 10. 전체 검증 통과 | 아래 Validation 결과 |
 | force 태그 연산 없음 | `test_no_force_flag_used_in_any_git_call`, `test_source_never_contains_a_force_git_flag` |
+| 리뷰 반영: push 실패가 "게시 완료"로 오판되지 않음 | `test_tag_created_locally_but_push_failure_does_not_falsely_report_matches_target`, `test_retry_after_tag_push_failure_pushes_remote_tag_before_creating_release` |
 
 ## Validation 결과
 
 - `uv run devbot specification validate --task 49`: PASS, 에러/경고 0개
 - `uv run ruff check .`: PASS
 - `UV_CACHE_DIR=/private/tmp/devbot-task037-uv-cache uv run pytest`: PASS,
-  1035 passed (Task 048 병합 후 기준 1015개 + `tests/test_release_publish.py`
-  15개 + `tests/test_main.py` 5개 + `tests/test_github_write_client.py`
-  갱신 1개[기존 테스트 수정, 신규 아님])
+  1037 passed (Task 048 병합 후 기준 1015개 + `tests/test_release_publish.py`
+  17개[리뷰 반영 회귀 2개 포함] + `tests/test_main.py` 5개 +
+  `tests/test_github_write_client.py` 갱신 1개[기존 테스트 수정, 신규
+  아님])
 - 실제 `pyproject.toml`/`uv.lock`: 구현 전체 기간 동안
   `version = "0.1.2"`로 불변, `git status` 변경 없음 확인(마지막 확인은
   전체 스위트 실행 직후)

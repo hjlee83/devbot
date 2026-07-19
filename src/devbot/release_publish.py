@@ -244,17 +244,52 @@ def preview_release_publish(
     )
 
 
-def _create_and_push_tag(local_path: Path, tag: str, target_sha: str) -> None:
-    tag_result = _run_git(local_path, "tag", "-a", tag, "-m", f"Release {tag}", target_sha)
-    if tag_result.returncode != 0:
-        raise ReleasePublishError(
-            f"git tag failed: {(tag_result.stderr or tag_result.stdout).strip()}"
+def _ensure_tag_created_and_pushed(
+    local_path: Path,
+    github_client: GitHubClient,
+    repository: RepositoryConfig,
+    tag: str,
+    target_sha: str,
+) -> None:
+    """Idempotent and safe to call unconditionally: creates the local tag
+    only if it does not already exist there (at the correct target), and
+    pushes only if the *remote* does not already have it (at the correct
+    target) - checked independently, not merged into one combined signal.
+
+    This matters because a prior call can fail between the two steps (`git
+    tag` succeeds, `git push` fails) - a combined local-or-remote check
+    would then see the *local* tag and wrongly conclude the tag was fully
+    published, skipping the push and letting `create_release` proceed
+    against a tag that does not exist on GitHub (PR #104 review). Checking
+    each side on its own guarantees the remote tag genuinely exists at
+    `target_sha` before this function returns.
+
+    Never force-creates or force-moves - an unexpected disagreement with
+    `target_sha` on either side raises `ConflictingTagError` defensively,
+    even though `preview_release_publish` should already have caught it."""
+    local_sha = _local_ref_commit(local_path, f"refs/tags/{tag}")
+    if local_sha is None:
+        tag_result = _run_git(local_path, "tag", "-a", tag, "-m", f"Release {tag}", target_sha)
+        if tag_result.returncode != 0:
+            raise ReleasePublishError(
+                f"git tag failed: {(tag_result.stderr or tag_result.stdout).strip()}"
+            )
+    elif local_sha != target_sha:
+        raise ConflictingTagError(
+            f"local tag {tag!r} points at {local_sha!r}, expected {target_sha!r}"
         )
-    push_result = _run_git(local_path, "push", "origin", tag)
-    if push_result.returncode != 0:
-        raise ReleasePublishError(
-            f"git push of tag {tag!r} failed: "
-            f"{(push_result.stderr or push_result.stdout).strip()}"
+
+    remote_sha = _remote_tag_commit(github_client, repository, tag)
+    if remote_sha is None:
+        push_result = _run_git(local_path, "push", "origin", tag)
+        if push_result.returncode != 0:
+            raise ReleasePublishError(
+                f"git push of tag {tag!r} failed: "
+                f"{(push_result.stderr or push_result.stdout).strip()}"
+            )
+    elif remote_sha != target_sha:
+        raise ConflictingTagError(
+            f"remote tag {tag!r} points at {remote_sha!r}, expected {target_sha!r}"
         )
 
 
@@ -266,9 +301,10 @@ def publish_prepared_release(
     *,
     local_checkout_path: Path | None = None,
 ) -> ReleasePublishResult:
-    """Validates via `preview_release_publish`, then publishes: creates and
-    pushes the annotated tag (unless it already matches the verified
-    target), then creates the GitHub Release (unless one already matches).
+    """Validates via `preview_release_publish`, then publishes: ensures the
+    annotated tag is both created locally and pushed remotely (each
+    checked and applied independently - see `_ensure_tag_created_and_pushed`
+    for why a combined check is unsafe), then creates the GitHub Release.
     Never force-moves a tag. If tag push succeeds but Release creation
     fails, raises `PartialPublicationError` identifying the pushed tag -
     the tag is never deleted, and a later call safely completes only the
@@ -293,8 +329,9 @@ def publish_prepared_release(
             outcome=PublishOutcome.ALREADY_PUBLISHED,
         )
 
-    if preview.tag_state is TagState.ABSENT:
-        _create_and_push_tag(project_root, preview.tag, preview.target_sha)
+    _ensure_tag_created_and_pushed(
+        project_root, github_client, repository, preview.tag, preview.target_sha
+    )
 
     try:
         release_info = write_client.create_release(

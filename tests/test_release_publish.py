@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import devbot.release_publish as release_publish_module
 from devbot.github_client import GitHubAPIError, GitHubClient, GitHubNotFoundError
 from devbot.github_write_client import GitHubWriteClient
 from devbot.models import RepositoryConfig
@@ -16,6 +17,7 @@ from devbot.release_publish import (
     MissingReleaseNotesError,
     PartialPublicationError,
     PublishOutcome,
+    ReleasePublishError,
     ReleaseState,
     StaleMainError,
     TagState,
@@ -368,6 +370,110 @@ def test_retry_after_partial_publication_completes_safely_without_moving_tag(
 
 
 # --------------------------------------------------------------------------
+# PR #104 review: `git tag` succeeds but `git push` fails must not be
+# mistaken for a fully-published tag on retry (local-only presence must
+# never substitute for a verified remote tag before Release creation).
+# --------------------------------------------------------------------------
+
+
+def _run_with_git_push_failing(tag: str, action: object) -> None:
+    """Runs `action()` with `release_publish`'s `subprocess.run` patched so
+    `git push origin <tag>` fails but every other git invocation (including
+    `git tag`) executes for real."""
+    real_run = subprocess.run
+
+    def flaky_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if list(args[:4]) == ["git", "push", "origin", tag]:
+            return subprocess.CompletedProcess(
+                args, returncode=1, stdout="", stderr="simulated push failure"
+            )
+        return real_run(args, **kwargs)  # type: ignore[arg-type]
+
+    original = release_publish_module.subprocess.run
+    release_publish_module.subprocess.run = flaky_run  # type: ignore[assignment]
+    try:
+        action()  # type: ignore[operator]
+    finally:
+        release_publish_module.subprocess.run = original
+
+
+def test_tag_created_locally_but_push_failure_does_not_falsely_report_matches_target(
+    tmp_path: Path,
+) -> None:
+    local = _init_repo_with_remote(tmp_path)
+    main_sha = _rev_parse(local, "main")
+    github_client = _fake_github_client({"main": main_sha})
+    write_client = _fake_write_client()
+
+    def attempt() -> None:
+        with pytest.raises(ReleasePublishError) as excinfo:
+            publish_prepared_release(
+                github_client, write_client, _repository(local), "notes", local_checkout_path=local
+            )
+        assert not isinstance(excinfo.value, PartialPublicationError)
+
+    _run_with_git_push_failing("v1.2.3", attempt)
+
+    # The local tag was created, but never reached the remote.
+    assert _local_tags(local) == ["v1.2.3"]
+    remote_tags = subprocess.run(
+        ["git", "ls-remote", "--tags", "origin"], cwd=local, capture_output=True, text=True
+    ).stdout
+    assert "refs/tags/v1.2.3" not in remote_tags
+    # Release creation must never be attempted while the remote tag is absent.
+    write_client.create_release.assert_not_called()
+
+
+def test_retry_after_tag_push_failure_pushes_remote_tag_before_creating_release(
+    tmp_path: Path,
+) -> None:
+    local = _init_repo_with_remote(tmp_path)
+    main_sha = _rev_parse(local, "main")
+    failing_write_client = _fake_write_client()
+
+    def attempt() -> None:
+        with pytest.raises(ReleasePublishError):
+            publish_prepared_release(
+                _fake_github_client({"main": main_sha}),
+                failing_write_client,
+                _repository(local),
+                "notes",
+                local_checkout_path=local,
+            )
+
+    _run_with_git_push_failing("v1.2.3", attempt)
+    failing_write_client.create_release.assert_not_called()
+    local_tag_sha = _rev_parse(local, "v1.2.3^{commit}")
+    assert local_tag_sha == main_sha
+
+    # Retry without the injected failure - the remote still does not have
+    # the tag, so the fake GitHub client must not report it either.
+    working_github_client = _fake_github_client({"main": main_sha})
+    working_write_client = _fake_write_client()
+    result = publish_prepared_release(
+        working_github_client,
+        working_write_client,
+        _repository(local),
+        "notes",
+        local_checkout_path=local,
+    )
+
+    # The pre-existing outcome label reflects the *local* tag already
+    # existing going into this call (from the earlier failed attempt) -
+    # what matters for safety is verified separately below: the remote tag
+    # was actually pushed and create_release was only called afterward.
+    assert result.outcome is PublishOutcome.COMPLETED_MISSING_RELEASE
+    working_write_client.create_release.assert_called_once()
+    remote_tags = subprocess.run(
+        ["git", "ls-remote", "--tags", "origin"], cwd=local, capture_output=True, text=True
+    ).stdout
+    assert "refs/tags/v1.2.3" in remote_tags
+    # Only one local tag - the retry must not have created a second one.
+    assert _local_tags(local) == ["v1.2.3"]
+    assert _rev_parse(local, "v1.2.3^{commit}") == main_sha
+
+
+# --------------------------------------------------------------------------
 # Version files are never touched; no force git operation is ever used
 # --------------------------------------------------------------------------
 
@@ -400,7 +506,6 @@ def test_no_force_flag_used_in_any_git_call(tmp_path: Path) -> None:
         recorded_calls.append(list(args))
         return real_run(args, **kwargs)  # type: ignore[arg-type]
 
-    import devbot.release_publish as release_publish_module
 
     original = release_publish_module.subprocess.run
     release_publish_module.subprocess.run = recording_run  # type: ignore[assignment]
