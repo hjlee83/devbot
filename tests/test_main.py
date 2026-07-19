@@ -1982,6 +1982,172 @@ def test_specification_template_show_unknown_returns_nonzero(
     assert exit_code == 1
 
 
+# --------------------------------------------------------------------------
+# Task 053: `devbot review report` - read-only validate/render boundary for
+# an existing review report JSON payload.
+# --------------------------------------------------------------------------
+
+
+def _write_report_file(tmp_path: Path, payload: dict) -> Path:
+    import json
+
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_review_report_text_output_for_blocker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(
+        tmp_path,
+        {
+            "findings": [
+                {"severity": "blocker", "code": "SEC-001", "message": "SQL injection risk"}
+            ]
+        },
+    )
+
+    exit_code = main(
+        ["review", "report", "--input", str(report_file)],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "decision: changes_required" in out
+    assert "SEC-001" in out
+
+
+def test_review_report_json_output_round_trips_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(
+        tmp_path, {"findings": [{"severity": "comment", "code": "C1", "message": "fyi"}]}
+    )
+
+    exit_code = main(
+        ["review", "report", "--input", str(report_file), "--format", "json"],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "comment_only"
+    assert payload["findings"][0]["code"] == "C1"
+
+
+def test_review_report_empty_findings_approved_exit_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(tmp_path, {"findings": []})
+
+    exit_code = main(
+        ["review", "report", "--input", str(report_file)],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 0
+    assert "decision: approved" in capsys.readouterr().out
+
+
+def test_review_report_malformed_json_returns_failure_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = tmp_path / "bad.json"
+    report_file.write_text("not json{{{", encoding="utf-8")
+
+    exit_code = main(
+        ["review", "report", "--input", str(report_file)],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "review report 오류" in err
+
+
+def test_review_report_invalid_payload_returns_failure_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(tmp_path, {"findings": "not-a-list"})
+
+    exit_code = main(
+        ["review", "report", "--input", str(report_file)],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+    assert "review report 오류" in capsys.readouterr().err
+
+
+def test_review_report_contradictory_declared_decision_returns_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(
+        tmp_path,
+        {
+            "findings": [{"severity": "blocker", "code": "B1", "message": "m"}],
+            "decision": "approved",
+        },
+    )
+
+    exit_code = main(
+        ["review", "report", "--input", str(report_file)],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+    assert "review report 오류" in capsys.readouterr().err
+
+
+def test_review_report_missing_input_file_returns_failure_exit_code(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        ["review", "report", "--input", str(tmp_path / "does-not-exist.json")],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+
+
+def test_review_report_never_constructs_github_client_or_write_client(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(tmp_path, {"findings": []})
+
+    with (
+        patch("devbot.main.GitHubClient") as mock_client,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        exit_code = main(
+            ["review", "report", "--input", str(report_file)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_client.assert_not_called()
+    mock_write_client.assert_not_called()
+    mock_lock.assert_not_called()
+
+
 def test_goal_dispatch_shows_role_resolution_without_invoking_agent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
