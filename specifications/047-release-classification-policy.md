@@ -1,0 +1,350 @@
+# Specification: Task 047 — Release Classification Policy
+
+## Provenance
+
+- Task Issue: [#98](https://github.com/hjlee83/devbot/issues/98)
+- Task Contract: `tasks/047-release-classification-policy.md`
+- Parent Standard: `specifications/045-contract-schema.md`
+- Runtime Dependency: `src/devbot/contract_metadata.py`
+- Epic: Contract Platform
+- Current Release: `v0.1.1`
+
+# Overview
+
+## Goal
+
+Implement a pure policy boundary that consumes Task 046 typed Contract results and recommends `major`, `minor`, `patch`, or `none` without changing any project version or external state.
+
+## Scope
+
+In scope:
+
+- Typed release recommendation.
+- Classification from `ContractParseResult` or `ContractMetadata` using the existing Task 046 domain model.
+- Explicit precedence rules.
+- Explicit legacy and missing-metadata errors.
+- Unit tests and Result documentation.
+
+Out of scope:
+
+- Version mutation.
+- Release aggregation across multiple Contracts.
+- Tags, GitHub Releases, release notes, workflow, review, merge, or dispatch automation.
+
+## Background
+
+Task 046 created the only supported runtime parser for Contract Schema v1. This task must consume its typed result and must not interpret Contract Markdown independently. Release classification is a recommendation only; execution belongs to a future release task.
+
+## Roadmap Context
+
+This is the first policy consumer of the Contract Metadata Engine and completes the minimum Contract-to-release-recommendation path.
+
+# Functional Requirements
+
+## Required Behaviour
+
+Expose a public pure operation equivalent to:
+
+```python
+class ReleaseRecommendation(StrEnum):
+    MAJOR = "major"
+    MINOR = "minor"
+    PATCH = "patch"
+    NONE = "none"
+
+classify_release(result: ContractParseResult) -> ReleaseRecommendation
+```
+
+Exact names may follow repository conventions. The function must consume the typed Task 046 result and must not accept raw Markdown.
+
+Policy precedence, evaluated from highest to lowest:
+
+1. Legacy Contract -> dedicated error.
+2. Native result without metadata -> dedicated error.
+3. `compatibility == BREAKING` -> `major`.
+4. `migration == REQUIRED` -> `major`.
+5. `release_impact == BREAKING` -> `major`.
+6. `release_impact == FEATURE` -> `minor`.
+7. `release_impact == FIX` -> `patch`.
+8. `release_impact` in `DOCS`, `INTERNAL`, `NONE` -> `none`.
+
+`risk_level` and `specification_type` are intentionally not classification inputs in Task 047. They may inform future review or workflow policy but must not change this recommendation.
+
+## Acceptance Criteria
+
+1. Native Schema v1 input returns one typed recommendation deterministically.
+2. Both compatibility and migration breaking overrides take precedence over release impact.
+3. Every canonical `release_impact` value is covered.
+4. Legacy input fails with a stable typed policy error.
+5. Native input with absent metadata fails closed.
+6. The implementation never reparses Markdown.
+7. No version file, GitHub resource, filesystem state, or network state is changed.
+8. Existing Task 046 models remain the source of truth.
+9. Result documentation and all quality gates pass.
+
+## Out of Scope
+
+- Calculating the next concrete version string.
+- Pre-1.0 special semantic-version rules.
+- Combining recommendations across Tasks or PRs.
+- Release readiness or approval workflows.
+- CLI unless an existing repository convention makes a minimal read-only command unavoidable; default is no CLI.
+
+# Technical Design
+
+## Architecture
+
+```text
+Contract Markdown
+      |
+      v
+Task 046 Contract Metadata Engine
+      |
+      v
+ContractParseResult
+      |
+      v
+Task 047 Release Classification Policy
+      |
+      v
+major | minor | patch | none
+```
+
+The policy layer imports Task 046 types. It must not duplicate enum values or create a second Contract parser.
+
+## Domain Model
+
+Recommended public types:
+
+```python
+class ReleaseRecommendation(StrEnum):
+    MAJOR = "major"
+    MINOR = "minor"
+    PATCH = "patch"
+    NONE = "none"
+
+class ReleaseClassificationError(RuntimeError):
+    pass
+
+class LegacyContractClassificationError(ReleaseClassificationError):
+    pass
+
+class MissingContractMetadataError(ReleaseClassificationError):
+    pass
+```
+
+A richer immutable result object is allowed only when it adds deterministic, useful explanation such as the matched rule. The recommendation enum must remain directly accessible and tests must not depend on prose messages.
+
+## Classification Table
+
+| Condition | Recommendation |
+|---|---|
+| `compatibility=breaking` | `major` |
+| `migration=required` | `major` |
+| `release_impact=breaking` | `major` |
+| `release_impact=feature` | `minor` |
+| `release_impact=fix` | `patch` |
+| `release_impact=docs` | `none` |
+| `release_impact=internal` | `none` |
+| `release_impact=none` | `none` |
+
+Override conditions are intentionally evaluated first. For example, `release_impact=docs` with `compatibility=breaking` still returns `major`.
+
+## Files Expected to Change
+
+Likely files:
+
+- a focused policy module under `src/devbot/`
+- focused tests under `tests/`
+- `results/047-release-classification-policy.md`
+- `docs/00-roadmap.md`
+
+Avoid changes to Task 046 parsing behavior unless a genuine defect blocks typed consumption; any such change must remain tightly scoped and regression-tested.
+
+## Dependencies
+
+- `src/devbot/contract_metadata.py`
+- `specifications/045-contract-schema.md`
+- Python standard library only unless the repository already provides an equivalent utility.
+
+## Constraints
+
+- Raw Markdown is not an accepted policy input.
+- Do not duplicate Task 046 enums.
+- Do not add model-specific names such as Claude, Codex, GPT, or Gemini.
+- Do not mutate versions or external state.
+- Do not add release aggregation.
+
+## Migration Notes
+
+Purely additive. Existing callers remain unchanged until they opt into the new policy.
+
+# Validation
+
+## Required Tests and Quality Gates
+
+Required tests include:
+
+- each of the six canonical `release_impact` values
+- `compatibility=breaking` overriding every non-major impact representative
+- `migration=required` overriding every non-major impact representative
+- precedence when multiple major conditions are present
+- legacy input error
+- native result with missing metadata error
+- deterministic repeated classification
+- proof that `risk_level` and `specification_type` do not alter a recommendation when release inputs are unchanged
+
+Quality gates:
+
+```bash
+uv run devbot specification validate --task 47
+uv run ruff check .
+uv run pytest
+```
+
+## Success Criteria
+
+All Acceptance Criteria pass, the full suite remains green, and no release execution behavior is introduced.
+
+# Safety
+
+## Things the Implementation Agent Must NOT Do
+
+- Do not update `pyproject.toml` or any version file.
+- Do not create tags or GitHub Releases.
+- Do not generate release notes.
+- Do not parse Markdown in the policy module.
+- Do not add workflow, review, merge, or dispatch automation.
+- Do not guess a classification for legacy input.
+
+# Completion
+
+## Expected Deliverables
+
+- Typed recommendation and errors.
+- Pure deterministic classifier.
+- Focused tests.
+- Result document.
+- Roadmap update.
+
+## Result Document
+
+`results/047-release-classification-policy.md`
+
+## PR Expectations
+
+Implement Issue #98 on `task/047-release-classification-policy`, run all quality gates, write the Result document, and open a PR targeting `main`.
+
+## Definition of Done
+
+- Policy consumes Task 046 typed results only.
+- Precedence rules are implemented exactly.
+- All canonical impacts and override paths are tested.
+- Legacy and missing metadata fail closed.
+- No side effects or release execution are added.
+- Specification validation, lint, and full tests pass.
+
+# Handoff
+
+## Required Handoff Procedure
+
+Implement Issue #98 using this Specification and the Task Contract as authoritative sources. Keep the implementation role model-independent. Commit to the existing branch and open a PR after validation.
+
+## Token-Limit Behaviour
+
+If execution is interrupted, leave the branch in a coherent committed state and record incomplete validation honestly in the Result document. Do not weaken tests or scope to claim completion.
+
+# Full Task Contract Reference
+
+```markdown
+# Task 047 — Release Classification Policy
+
+## Contract Version
+
+1
+
+## Provenance
+
+- GitHub Issue: #98
+- Branch: `task/047-release-classification-policy`
+- Epic: Contract Platform
+- Current Release: `v0.1.1`
+
+## Task Identity
+
+- id: 047
+- title: Release Classification Policy
+
+## Metadata
+
+- specification_type: feature
+- release_impact: internal
+- risk_level: medium
+- compatibility: backward
+- migration: none
+
+## Goal
+
+Implement a deterministic policy that converts typed Contract Metadata into a release recommendation of `major`, `minor`, `patch`, or `none`.
+
+## Context
+
+Task 045 established Contract Schema v1 and Task 046 implemented the single runtime metadata parser. DevBot can now make policy decisions without re-reading Markdown. The first consumer is release classification.
+
+## Scope
+
+- Add a typed release recommendation enum or equivalent immutable model.
+- Classify native Schema v1 parse results using typed metadata only.
+- Apply breaking overrides before ordinary `release_impact` mapping.
+- Handle legacy Contract input explicitly and safely.
+- Keep classification pure, deterministic, and side-effect free.
+- Add focused tests and `results/047-release-classification-policy.md`.
+
+## Out of Scope
+
+- Mutating version files.
+- Creating Git tags or GitHub Releases.
+- Generating release notes.
+- Combining multiple Tasks or PRs into one release decision.
+- Review Loop, Workflow Engine, merge automation, or agent dispatch changes.
+- CLI commands unless strictly required by an existing repository convention.
+
+## Deliverables
+
+- Release classification policy module.
+- Typed recommendation and stable policy errors.
+- Tests for every canonical metadata combination required by this Contract.
+- Result document with validation evidence.
+
+## Acceptance Criteria
+
+1. A native Schema v1 `ContractParseResult` can be classified without re-parsing Markdown.
+2. `compatibility=breaking` always recommends `major`.
+3. `migration=required` always recommends `major`.
+4. Otherwise `release_impact=breaking` recommends `major`.
+5. Otherwise `release_impact=feature` recommends `minor`.
+6. Otherwise `release_impact=fix` recommends `patch`.
+7. Otherwise `release_impact=docs`, `internal`, or `none` recommends `none`.
+8. Legacy input fails with a dedicated policy error rather than guessing.
+9. Missing metadata on a native result fails closed.
+10. The policy is deterministic and introduces no filesystem, network, GitHub, or version mutation side effects.
+11. Specification validation, lint, and the full test suite pass.
+
+## Quality Gates
+
+- `uv run devbot specification validate --task 47`
+- `uv run ruff check .`
+- `uv run pytest`
+- Tests cover all release-impact values and both breaking overrides.
+- Existing Task 042–046 behavior remains compatible.
+
+## Handoff
+
+Use `specifications/047-release-classification-policy.md` as the implementation authority. Work only on `task/047-release-classification-policy`, create the Result document, run all quality gates, and open a PR targeting `main`.
+
+## References
+
+- Issue #98
+- `specifications/045-contract-schema.md`
+- `src/devbot/contract_metadata.py`
+```
