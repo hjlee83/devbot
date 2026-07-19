@@ -723,3 +723,16 @@
   해당하며, devbot/devbot#116 자체가 그 결정이다 - 다만 `CONSTITUTION.md`
   본문 개정은 이 문서 전용 Goal의 범위 밖으로 남겨, 실행 Goal 착수 전
   프로젝트 소유자가 별도로 확정하도록 한다.
+
+  **PR #117 CTO 리뷰로 수정된 항목(2026-07-20):** 초안은 `subscription
+  _assisted`(ChatGPT Plus/Claude Pro 대화형)를 자율 루프에서도 호출 가능한
+  실행 모드로 잘못 모델링했었다 - 실제로는 사람이 대화에 있어야만 실행되는
+  human-triggered 체크포인트 채널이다. 이를 바로잡으며 `subscription
+  _runtime`(Codex/Claude Code CLI처럼 구독 기반이지만 자율 호출 가능한
+  모드)을 신설했고, `AUDITING` 상태를 `REVIEW_REQUESTED`와
+  `GOAL_ACCEPTED` 사이에 추가해 "`리뷰`는 사람이 직접 accept/reject하는
+  행위가 아니라 conversation agent가 수행하는 Goal Audit을 시작하는
+  명령"으로 재정의했다. Architecture gate도 모든 노드에 AI 리뷰를
+  강제하던 것을 PLANNING 시점의 invariant classification 기반 선택적
+  호출로 바꾸고, budget에 per-node뿐 아니라 per-Goal 총량 상한을
+  추가했다. 상세는 `ADR-005~007`, `docs/16~18`의 "Correction" 절 참고.

@@ -9,18 +9,33 @@ machine (`docs/03-state-machine.md`) - every Task Graph node still runs the
 unchanged `IDLE -> WORKING -> REVIEW -> ... -> done` flow; what is new is
 the aggregate view across every node in a Goal's Task Graph.
 
+**Correction (2026-07-20, CTO review on PR #117):** the first version of
+this document modeled `REVIEW_REQUESTED` as automatically queuing a
+"subscription-assisted final audit" and `GOAL_ACCEPTED` as a human
+personally reading the Completion Report and judging it. Both are wrong for
+the same underlying reason: a `subscription_assisted` Agent (ChatGPT Plus,
+Claude Pro/Code) cannot be queued or invoked in the background - it only
+runs while a human is actually present in that conversation. The agreed UX
+is narrower and clearer than either of those: `다음` starts a Goal, `리뷰`
+is what actually *runs* the Goal audit - via the conversation agent the
+human is already talking to - not a separate thing the human does after an
+automatic audit already ran, and not a personal line-by-line read of every
+node's evidence. This adds one state, `AUDITING`, between `REVIEW_REQUESTED`
+and `GOAL_ACCEPTED`, and changes what those two states mean.
+
 ## Summary table
 
 | State | Owner | Entry condition | Output | Failure / escalation |
 |---|---|---|---|---|
 | `GOAL_PROPOSED` | Human | intent exists | draft Goal Specification | none (may sit indefinitely) |
 | `GOAL_APPROVED` | Human ("다음") | Specification complete (DoD, Scope, Non-goals present) | frozen Specification + Resource Strategy + Budget | incomplete Specification -> back to `GOAL_PROPOSED` |
-| `PLANNING` | DevBot (Planner, extends Task 038) | `GOAL_APPROVED` | Task Graph (nodes, `order`, `depends_on`) | `ambiguous` decision -> Goal-level `manual-action`; `already_completed`/`duplicate_open_work` -> short-circuit to `RELEASE_REPORTED`-adjacent no-op |
-| `EXECUTING` | DevBot (Goal Executor, extends Task 040 + existing daemon) | valid Task Graph, >=1 materializable node | node materialized (Task 040's 3-write set) + existing per-Issue autonomous loop runs | node stuck `blocked`/`manual-action` -> Goal-level `manual-action` if unrecoverable, else `REVISING` |
-| `VERIFYING` | DevBot (ADR-005's four gates) | a node's Task reaches a review outcome, or all required nodes reach `done` | per-node `gate_results`; Completion Report once all required nodes pass | recoverable gate failure -> `REVISING`; missing/stale evidence -> re-run the gate, never presented as current |
+| `PLANNING` | DevBot (Planner, extends Task 038; `deterministic` execution mode today) | `GOAL_APPROVED` | Task Graph + per-node Invariant Classification (`docs/16`) | `ambiguous` decision -> Goal-level `manual-action`; `already_completed`/`duplicate_open_work` -> short-circuit to `RELEASE_REPORTED`-adjacent no-op |
+| `EXECUTING` | DevBot (Goal Executor, extends Task 040 + existing daemon; `subscription_runtime`/`local_runtime`/`api` only) | valid Task Graph, >=1 materializable node | node materialized (Task 040's 3-write set) + existing per-Issue autonomous loop runs | node stuck `blocked`/`manual-action` -> Goal-level `manual-action` if unrecoverable, else `REVISING` |
+| `VERIFYING` | DevBot (ADR-005's four gates; Architecture gate only for `ai_review_required` nodes) | a node's Task reaches a review outcome, or all required nodes reach `done` | per-node `gate_results`; Completion Report once all required nodes pass | recoverable gate failure -> `REVISING`; missing/stale evidence -> re-run the gate, never presented as current |
 | `REVISING` | DevBot (existing rework loop, Task 010/027) | `VERIFYING` found a recoverable failure | node returns to `EXECUTING`, then back to `VERIFYING` | Budget exhaustion (ADR-007) -> `exhaustion_behavior` (`stop`/`fallback`/`escalate`) |
-| `REVIEW_REQUESTED` | DevBot (automatic) | Goal gate passed for every required node | Completion Report, optional final AI audit queued | evidence goes stale before human reviews -> re-verify affected node, return to `VERIFYING` |
-| `GOAL_ACCEPTED` | Human ("리뷰") | human reviews Completion Report (+ optional final audit) | Goal marked accepted | human rejects -> `REVISING` (implementation issue) or `PLANNING` (scope issue) |
+| `REVIEW_REQUESTED` | DevBot (automatic) | Goal gate passed for every required node | Completion Report, waiting for `리뷰` | evidence goes stale before `리뷰` arrives -> re-verify affected node, return to `VERIFYING` |
+| `AUDITING` | Human triggers ("리뷰"); conversation agent (`subscription_assisted`) performs | `REVIEW_REQUESTED` + human sends `리뷰` | audit verdict (PASS/FAIL) + findings, read from the Completion Report, not a diff re-read | FAIL -> `REVISING` (implementation issue) or `PLANNING` (scope issue) |
+| `GOAL_ACCEPTED` | Conversation agent's verdict (human present throughout via `리뷰`) | `AUDITING` produced PASS | Goal marked accepted | (none - a FAIL never reaches this state) |
 | `RELEASE_REPORTED` | DevBot (reuses Task 037/048-052) | `GOAL_ACCEPTED` | Release Report (GitHub Release, per repository's Task 050 `publish_strategy`) | release-step failure -> Goal-level `manual-action`; does not revert `GOAL_ACCEPTED`, since the work itself is already merged |
 
 ## State detail
@@ -60,6 +75,19 @@ outcomes that mean no Task Graph is needed, and the Goal proceeds directly
 toward `RELEASE_REPORTED` with an empty graph and that reasoning recorded
 in the Completion Report.
 
+`PLANNING` runs unattended - it must never depend on a `subscription
+_assisted` call, since nothing in this state can wait for a human to be
+present (`docs/adr/ADR-007-ai-resource-subscription-strategy.md`'s
+Execution Mode correction). Today this is automatic: Task 038 makes zero
+AI/LLM calls, so `PLANNING` is `deterministic` as currently implemented. A
+future, more general-purpose decomposition step could use
+`subscription_runtime`/`api` assistance, but never `subscription_assisted`.
+`PLANNING` also produces each node's Invariant Classification
+(`docs/16-verification-model.md`) - which of `VERIFYING`'s later
+Architecture-gate invariants each node can satisfy with a deterministic
+rule versus genuinely needs AI judgment for - so that classification cost
+is paid once, up front, per Goal, not repeated per node later.
+
 ### EXECUTING
 
 Extends Task 040's exact three-write materialization
@@ -82,14 +110,18 @@ or requires human attention determines whether the Goal moves to
 Runs the four ADR-005 gates. In practice this overlaps in time with
 `EXECUTING`, not strictly after it - the Technical and Contract gates run
 as part of a node's existing Validation Gate and Specification Validator
-invocations, and the Architecture gate *is* the node's existing Task-level
-review (Task 053/054), just now recorded as structured evidence attached
-to the Task Graph node rather than only living on the PR. The Goal gate
-alone waits for every required node to finish. Evidence staleness is
-treated the same way Task 054 already treats a stale review head: a
-gate result is only valid for the exact artifact version it was computed
-against, and `VERIFYING` re-runs rather than reuses evidence for a node
-whose artifact moved since its last gate result.
+invocations. The Architecture gate is selective, per its Invariant
+Classification from `PLANNING`: a node with `ai_review_required: false`
+satisfies it entirely through deterministic rules (no AI call, no
+`ReviewReport`); only a node with `ai_review_required: true` runs the
+node's existing Task-level review (Task 053/054) for the specific flagged
+invariants, recorded as structured evidence attached to the Task Graph node
+rather than only living on the PR (`docs/16-verification-model.md`). The
+Goal gate alone waits for every required node to finish. Evidence
+staleness is treated the same way Task 054 already treats a stale review
+head: a gate result is only valid for the exact artifact version it was
+computed against, and `VERIFYING` re-runs rather than reuses evidence for a
+node whose artifact moved since its last gate result.
 
 ### REVISING
 
@@ -97,35 +129,55 @@ Extends the existing rework loop (Task 010's `ReworkService`, Task 027's
 autonomous relay) unchanged - a node in `REVISING` returns to its own
 Issue/Branch/PR's `rework` state, not a new one. What Goal-level
 `REVISING` adds is budget accounting: each rework cycle consumes
-`max_implementation_retries`/`max_ai_review_calls`
-(`docs/18-resource-strategy.md`), generalizing the existing single hardcoded
-`REVIEW_LOOP_LIMIT` into a per-Goal configured ceiling. Exhausting budget
-does not silently keep retrying - it follows the configured
-`exhaustion_behavior` exactly as ADR-007 defines it.
+`max_implementation_retries` and, only for nodes flagged `ai_review
+_required`, `max_architecture_review_calls_per_node`/`_per_goal`
+(`docs/18-resource-strategy.md`), generalizing the existing single
+hardcoded `REVIEW_LOOP_LIMIT` into per-Goal configured ceilings. Exhausting
+budget does not silently keep retrying - it follows the configured
+`exhaustion_behavior` exactly as ADR-007 defines it. Every call this state
+makes is `subscription_runtime`/`local_runtime`/`api`/`deterministic` -
+never `subscription_assisted`, for the same reason as `EXECUTING`.
 
 ### REVIEW_REQUESTED
 
-Reached automatically, not by a human command - this is the state a human's
-`리뷰` command finds the Goal already in, per Issue #116's own interaction
-target ("`리뷰` - perform the final Goal audit **after** the Goal reaches
-`REVIEW_REQUESTED`"). Entry requires the Goal gate to have passed for every
-*required* Task Graph node (optional nodes may still be incomplete without
-blocking this). If `require_final_goal_audit` is set
-(`docs/18-resource-strategy.md`), one bounded subscription-assisted or API
-audit pass runs here, using the Completion Report as its input rather than
-re-reading every node's diff - the same "aggregate, don't re-derive"
-discipline as the Goal gate itself, just with a human-quality second look
-before presenting to the actual human.
+Reached automatically, not by a human command. Entry requires the Goal
+gate to have passed for every *required* Task Graph node (optional nodes
+may still be incomplete without blocking this). Its only output is the
+Completion Report - **no audit is queued or run here.** This state exists
+purely so `AUDITING` (below) has something ready to act on the moment a
+human sends `리뷰`; if evidence goes stale (a node's artifact moves) while
+the Goal is waiting here, the affected node returns to `VERIFYING` rather
+than presenting stale evidence when `리뷰` eventually arrives.
+
+### AUDITING
+
+The state a human's `리뷰` command both enters *and drives* - per Issue
+#116's own interaction target ("`리뷰` - perform the final Goal audit
+**after** the Goal reaches `REVIEW_REQUESTED`"), `리뷰` is not a query
+about a Goal already judged; it is what runs the judgment. Entry requires
+`REVIEW_REQUESTED`. The conversation agent the human is already talking to
+(whichever Role/Agent is configured `subscription_assisted` for this
+checkpoint, `docs/18-resource-strategy.md`) reads the Completion Report and
+its cited evidence - not a fresh re-read of every node's diff, the same
+"aggregate, don't re-derive" discipline the Goal gate itself already
+follows - and produces a PASS or FAIL verdict with findings. This is a
+human-triggered, human-present checkpoint: the human sees the audit happen
+in the same conversation they typed `리뷰` into, and retains the ability to
+redirect it, but the state transition itself is driven by the audit's
+verdict, not a separate manual accept/reject click layered on top of it.
+"사람은 audit을 직접 수행하거나 매 PR을 판정하지 않고, 방향 결정과 audit
+호출만 담당한다" - the human decides *when* to audit and can redirect what
+they see, the conversation agent produces the verdict.
 
 ### GOAL_ACCEPTED
 
-The human's `리뷰` command's outcome. The human reviews the Completion
-Report (and any final audit result) and accepts or rejects. A rejection is
-not a dead end - it routes to `REVISING` if the human's objection is about
-implementation quality within the existing Scope, or back to `PLANNING`
-if it reveals the Task Graph itself needs to change (which, per ADR-006,
-may in turn require a new `GOAL_APPROVED` if the needed change is actually
-a scope change, not merely a different decomposition of the same scope).
+Reached by `AUDITING`'s PASS verdict, not by a separate human action beyond
+having sent `리뷰`. A FAIL verdict never reaches this state - it routes to
+`REVISING` if the audit's findings are about implementation quality within
+the existing Scope, or back to `PLANNING` if the findings reveal the Task
+Graph itself needs to change (which, per ADR-006, may in turn require a new
+`GOAL_APPROVED` if the needed change is actually a scope change, not merely
+a different decomposition of the same scope).
 
 ### RELEASE_REPORTED
 

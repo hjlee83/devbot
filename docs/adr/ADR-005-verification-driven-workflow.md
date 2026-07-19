@@ -39,13 +39,17 @@ supposed to shrink.
 Verification is decomposed into four gates, each independently satisfiable
 and each explicit about how much of it is deterministic versus AI judgment.
 A Goal only reaches `REVIEW_REQUESTED` once every Task Graph node it depends
-on has passed all four gates for its own artifacts, and a Goal only reaches
-`GOAL_ACCEPTED` once the Goal gate itself passes.
+on has passed all four gates for its own artifacts; `GOAL_ACCEPTED` itself
+is reached only after the human-triggered `AUDITING` checkpoint passes on
+top of that (`docs/17-execution-revision-loop.md`) - the Goal gate makes a
+Goal *eligible* for the human's `리뷰` audit, it does not substitute for it.
 
 ```text
 Technical gate     -> fully deterministic, zero AI cost
 Contract gate      -> mostly deterministic, narrow AI judgment where noted
-Architecture gate  -> primarily AI judgment, evidence-backed and typed
+Architecture gate  -> selective AI judgment, evidence-backed and typed,
+                       zero-cost for any node PLANNING could fully reduce
+                       to deterministic rules
 Goal gate          -> deterministic aggregation over the other three gates
 ```
 
@@ -74,20 +78,42 @@ files outside the Specification's declared scope is a reasonable
 implementation detail or actual scope creep - is where this gate spends its
 (bounded, see ADR-007) AI budget; everything else in it is free.
 
-### Architecture gate (AI judgment, evidence-backed)
+### Architecture gate (AI judgment, invoked selectively)
 
 Accepted ADRs are not violated, core/adapter boundaries remain intact,
 dependency and module rules remain intact, unapproved public API, security,
-or persistence changes are escalated. This is exactly what today's Task
-review already does, and it is the one gate that structurally cannot be made
-fully deterministic - "does this respect ADR-001's core/adapter boundary" is
-a judgment call by construction. What changes is the evidence format: this
-gate must produce a Task 053 `ReviewReport` (typed findings, severity,
-location, a decision that is *derived from* the findings rather than
-asserted independently) rather than free-text approval, and submission goes
-through Task 054's `github_review_submission` so the same stale-head and
-self-approval protections that already exist for Task-level review keep
-applying unchanged.
+or persistence changes are escalated. Judgment is structurally required for
+*some* of these invariants - "does this respect ADR-001's core/adapter
+boundary" cannot always be reduced to a fixed rule - but not for all of
+them, and not for every node.
+
+**Correction (2026-07-20, CTO review on PR #117):** the first version of
+this gate ran a full AI review, unconditionally, on every Task Graph node -
+identical in cost to today's per-Task review, just relocated under a Goal.
+For a multi-node Goal that reintroduces exactly the AI-cost problem this
+whole gate split exists to solve. The fix: `PLANNING` classifies each of
+this gate's invariants, per node, as either checkable by a deterministic
+rule (an import-boundary linter, a file-path allowlist derived from the
+node's Specification scope, an existing CI check) or as requiring actual
+judgment. A node whose invariants are *all* classified as rule-checkable
+needs **zero** Architecture-gate AI calls - those checks run as part of the
+Technical/Contract gate's deterministic machinery instead. Only a node with
+at least one invariant PLANNING could not reduce to a rule is flagged
+`ai_review_required`, and only that node's Architecture gate spends AI
+budget - bounded per-node and per-Goal-total
+(`docs/18-resource-strategy.md`). See `docs/16-verification-model.md` for
+the invariant-classification model this depends on.
+
+For a node that *is* flagged, the evidence format is unchanged from the
+first version of this ADR: a Task 053 `ReviewReport` (typed findings,
+severity, location, a decision *derived from* the findings rather than
+asserted independently) rather than free-text approval, submitted through
+Task 054's `github_review_submission` so the same stale-head and self
+-approval protections that already exist for Task-level review keep
+applying unchanged. The AI call itself uses `subscription_runtime` or `api`
+execution mode (`docs/adr/ADR-007-ai-resource-subscription-strategy.md`) -
+never `subscription_assisted`, since it must complete without a human
+present.
 
 ### Goal gate (deterministic aggregation)
 
@@ -123,10 +149,11 @@ not a new, separately-asserted judgment.
 
 ### Positive
 
-- AI calls are spent only where judgment is structurally required
-  (Architecture gate, and the narrow scope-creep judgment inside the
-  Contract gate) - every other gate is free, which is what makes removing
-  per-Task human review affordable in token terms.
+- AI calls are spent only where judgment is structurally required (the
+  Architecture gate's selectively-flagged nodes, and the narrow scope-creep
+  judgment inside the Contract gate) - every other gate, and every node
+  PLANNING could fully reduce to deterministic rules, is free, which is
+  what makes removing per-Task human review affordable in token terms.
 - The evidence contract makes every gate result independently auditable
   after the fact, including by a human during the Goal-level `리뷰`
   checkpoint - nothing is "trust the agent said so."
@@ -142,9 +169,9 @@ not a new, separately-asserted judgment.
 
 - Four gates are more moving parts than one review pass; a Task Graph node
   must now track four independent results instead of one.
-- The Contract gate's scope-creep judgment and the Architecture gate remain
-  AI calls, not free checks - this decision reduces AI cost, it does not
-  eliminate it.
+- The Contract gate's scope-creep judgment and any node the Architecture
+  gate flags as `ai_review_required` remain AI calls, not free checks - this
+  decision reduces AI cost, it does not eliminate it.
 - Gate results must be persisted and correctly attributed to a Task Graph
   node's specific artifacts (a specific PR head, a specific Specification
   version) or the Goal gate's aggregation is meaningless; this requires the

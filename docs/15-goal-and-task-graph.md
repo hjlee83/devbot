@@ -78,11 +78,13 @@ Goal Specification
                               existing "Inputs and constraints",
                               ADR-002)
   verification_requirements   - which of the four ADR-005 gates apply and
-                                at what strictness (a Goal may, e.g., not
-                                require a final AI audit if every node's
-                                gates already passed - see
-                                `require_final_goal_audit`,
-                                docs/18-resource-strategy.md)
+                                at what strictness per node (`required` |
+                                `advisory`, docs/16-verification-model.md's
+                                Verification Plan) - `AUDITING`
+                                (docs/17-execution-revision-loop.md) is not
+                                configurable here: it is the Goal's
+                                mandatory `리뷰` checkpoint, not one more
+                                gate a Goal can opt out of
 ```
 
 Unlike Task 042's Specification, a Goal Specification does not have a fixed
@@ -180,9 +182,12 @@ Completion Report
                                       docs/17)
 ```
 
-This is what a human reads at the `리뷰` checkpoint (`GOAL_ACCEPTED`,
-ADR-006) instead of re-reading every Task PR - its legibility is load
--bearing for the whole two-checkpoint model, not a nice-to-have.
+This is what the conversation agent reads at `AUDITING`, triggered by the
+human's `리뷰` command (`docs/17-execution-revision-loop.md`), instead of
+re-reading every Task PR's diff - and what the human sees alongside it in
+that same conversation. Its legibility is load-bearing for the whole
+two-checkpoint model, not a nice-to-have: `AUDITING`'s PASS/FAIL verdict is
+only as trustworthy as this report is complete.
 
 ## Non-goals of this document
 

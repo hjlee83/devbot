@@ -48,54 +48,143 @@ scope, per both ADR-001 and Issue #116's own "Non-goals."
 
 ### Execution Mode
 
+**Correction (2026-07-20, CTO review on PR #117):** the first version of
+this ADR treated `subscription_assisted` as one more autonomously-invokable
+execution mode, interchangeable with `api`/`local_runtime` wherever a Role
+needed a call. That is wrong and was flagged as a blocking review finding:
+a ChatGPT Plus or Claude Pro/Code *conversation* cannot be invoked by
+DevBot in the background - it only runs while a human is actually present
+typing in it. Modeling it as a generic autonomous mode would have let
+`EXECUTING`/`VERIFYING`/`REVISING` silently depend on a channel that
+structurally cannot answer when DevBot calls it unattended. The corrected
+model below distinguishes *who can trigger a call* as a first-class split,
+not just *who pays for it*, and adds a fifth mode - `subscription_runtime` -
+for the case the first version conflated with `api`: a subscription-backed
+CLI tool DevBot **can** invoke unattended (Codex CLI under a ChatGPT Plus/
+Team plan, Claude Code CLI run non-interactively under a Claude Pro/Max
+plan) - this is DevBot's actual current implementer/reviewer dispatch
+today (Task 011's `ClaudeRunner`/`CodexRunner`, both CLI-based), and it was
+being mislabeled as metered `api` usage in the first version's own example.
+
 Every `AgentDescriptor` gains an `execution_mode`, one of:
 
 ```text
-subscription_assisted   - runs inside a channel the user already pays for
-                           (ChatGPT Plus, Claude Pro/Code); reasoning cost is
-                           sunk, not metered per call by DevBot
-local_runtime            - runs on infrastructure DevBot's operator controls
-                           directly (a local model, a self-hosted runtime)
+subscription_assisted   - HUMAN-TRIGGERED ONLY. Runs inside a conversation
+                           a human is actively present in (ChatGPT Plus,
+                           Claude Pro/Code chat/app). DevBot cannot invoke
+                           this in the background - it starts exactly when
+                           a human utterance ("다음", "리뷰") starts it, and
+                           only there. Never a valid execution_mode for a
+                           Role call made from EXECUTING/VERIFYING/REVISING's
+                           autonomous loop.
+subscription_runtime     - autonomously invokable by DevBot, no human needs
+                           to be present, billed against a subscription
+                           entitlement rather than metered API tokens (Codex
+                           CLI under a Plus/Team plan, Claude Code CLI run
+                           non-interactively under a Pro/Max plan). This is
+                           where DevBot's actual current implementer/
+                           reviewer dispatch already lives.
+local_runtime             - operator-controlled infrastructure with no
+                           vendor subscription involved at all (a
+                           self-hosted model). Narrower than the first
+                           version of this ADR - a subscription-backed CLI
+                           tool is `subscription_runtime`, not this.
 api                       - a metered API call DevBot's own credentials pay
-                           for per token/request
+                           for per token/request; autonomously invokable.
 deterministic             - not an AI call at all (lint, tests, schema
-                           validation); zero marginal cost, zero token budget
+                           validation); zero marginal cost, zero token budget.
 ```
 
 This is the same distinction ADR-003 already drew between "subscription
 -assisted mode" and "autonomous mode" for input channels, now attached to
 the *execution* side (an Agent filling a Role), not the *input* side (where
 a request originated) - the two are independent, per ADR-003's core claim
-that "the originating channel... does not determine role assignment."
-ADR-005's Technical gate is `deterministic` by definition; its Contract gate
-is `deterministic` for structural checks and whichever mode is configured
-for its narrow scope-creep judgment; its Architecture gate is
-`subscription_assisted`, `local_runtime`, or `api` depending on operator
-configuration - never hardcoded to one.
+that "the originating channel... does not determine role assignment." The
+autonomous loop (`PLANNING`/`EXECUTING`/`VERIFYING`/`REVISING`,
+`docs/17-execution-revision-loop.md`) may only use `subscription_runtime`,
+`local_runtime`, `api`, or `deterministic` - `subscription_assisted` is
+reserved exclusively for the two states that are themselves human-triggered
+checkpoints: `GOAL_PROPOSED`'s design conversation and `AUDITING`'s Goal
+audit, both entered only by a human utterance, never by DevBot deciding to
+call out on its own. ADR-005's Technical gate is `deterministic` by
+definition; its Contract gate is `deterministic` for structural checks and
+`subscription_runtime`/`api` for its narrow scope-creep judgment; its
+Architecture gate, per the correction below, is invoked selectively rather
+than for every node, and when it is invoked it uses `subscription_runtime`
+or `api` - never `subscription_assisted`, since it must run without
+requiring a human to be present in a chat.
+
+**`PLANNING` itself needs no execution mode at all today.** Task 038's
+`goal_planner.py` makes zero AI/LLM calls - it is pure deterministic
+matching against a hand-curated capability catalog. The Goal State
+Machine's `PLANNING` state is therefore `deterministic` as currently
+implemented; a future, more general-purpose decomposition step (for
+arbitrary target repos beyond devbot's own hand-curated catalog) might
+need `subscription_runtime`/`api` assistance, but never
+`subscription_assisted` - it must still complete without a human present,
+the same constraint as every other autonomous-loop call. Do not confuse
+this with the human-facing **Planner Role** (`CONSTITUTION.md` §2), which
+*is* `subscription_assisted` - that role's conversation happens at
+`GOAL_PROPOSED`, before `GOAL_APPROVED`, not inside the autonomous
+`PLANNING` state that runs after it.
 
 ### AI/Token Budget
+
+**Correction (2026-07-20, CTO review on PR #117):** the first version of
+this ADR defaulted `max_ai_review_calls` to `3` *per node*, inherited
+directly from `REVIEW_LOOP_LIMIT` with no total cap - for a Goal with 5
+Task Graph nodes that is up to 15 Architecture-gate AI calls, which does
+not reduce AI/token consumption at all versus today's per-Task review, it
+just relocates the same cost under a Goal wrapper. The fix has two parts:
+the Architecture gate itself becomes selective rather than mandatory-per
+-node (see ADR-005's corrected "Architecture gate" section and
+`docs/16-verification-model.md`), and the Budget gains an explicit
+per-Goal total ceiling so a selective-but-unbounded gate can't reintroduce
+the same problem a different way.
 
 A Goal (ADR-006) carries a Budget, expressed per axis a Goal can actually
 exhaust:
 
 ```text
-max_planner_calls            - PLANNING invocations before escalating
-max_implementation_retries   - per Task Graph node, before escalating
-max_ai_review_calls          - Architecture-gate invocations per node
-                                (generalizes REVIEW_LOOP_LIMIT from a single
-                                hardcoded loop to a per-Goal configured value)
-require_final_goal_audit     - bool; whether GOAL_ACCEPTED requires one more
-                                subscription-assisted or api review pass
-                                even if every node already passed its gates
-fallback_activation           - conditions under which primary -> fallback
-                                triggers (primary exhausted its own limit,
-                                errored, or is unavailable)
-api_usage                     - allowed | forbidden (a Goal can require
-                                staying entirely subscription_assisted/
-                                deterministic, e.g. for a cost-sensitive
-                                deployment)
-exhaustion_behavior            - stop | fallback | escalate
+max_planner_calls                     - AI-assisted PLANNING invocations
+                                        before escalating; 0 is a valid and
+                                        expected value while PLANNING stays
+                                        Task 038-style deterministic (see
+                                        Execution Mode above) - this axis
+                                        exists for the future, not today
+max_implementation_retries             - per Task Graph node, before
+                                        escalating
+max_architecture_review_calls_per_node  - Architecture-gate AI invocations
+                                          for a single node; defaults to 0 -
+                                          a node consumes this only if
+                                          PLANNING flagged it as needing
+                                          judgment (docs/16's invariant
+                                          classification), never by default
+max_architecture_review_calls_per_goal   - total Architecture-gate AI
+                                           invocations across every node in
+                                           the Goal; the ceiling that keeps
+                                           "selective per node" from
+                                           silently becoming "unbounded in
+                                           aggregate"
+fallback_activation                       - conditions under which primary
+                                           -> fallback triggers (primary
+                                           exhausted its own limit, errored,
+                                           or is unavailable)
+api_usage                                  - allowed | forbidden (a Goal can
+                                            require staying entirely
+                                            subscription_runtime/
+                                            local_runtime/deterministic,
+                                            e.g. for a cost-sensitive
+                                            deployment)
+exhaustion_behavior                         - stop | fallback | escalate
 ```
+
+`require_final_goal_audit` (present in the first version of this ADR) is
+**removed**: `AUDITING` (`docs/17-execution-revision-loop.md`) is no longer
+an optional add-on a Budget can skip - it is the mandatory second
+checkpoint Issue #116's own interaction model requires ("`리뷰` - perform
+the final Goal audit"), so a bypass flag would contradict the two
+-checkpoint model this whole redesign exists to deliver.
 
 `exhaustion_behavior` is evaluated the same way at every axis: `stop` ends
 the Goal in a blocked-equivalent state preserving all work (mirroring
@@ -105,8 +194,24 @@ moves the Goal to `manual-action`, the same discipline already used at Task
 grain (`docs/03-state-machine.md`).
 
 `deterministic` checks never consume any budget axis - only
-`subscription_assisted`, `local_runtime`, and `api` calls do. This is what
-makes ADR-005's gate split actually reduce cost rather than just relabel it.
+`subscription_runtime`, `local_runtime`, and `api` calls do.
+`subscription_assisted` calls (`GOAL_PROPOSED`, `AUDITING`) are not counted
+against this Budget either - they are bounded by human availability, not by
+a call limit DevBot enforces on itself. This is what makes ADR-005's gate
+split, combined with the Architecture gate's selective invocation, actually
+reduce cost rather than just relabel or relocate it.
+
+**A Task-mode legacy default exists separately from the Goal-mode
+default.** A Goal that wraps exactly one Task (or a bare Task run outside
+any Goal at all, today's status quo) keeps `max_architecture_review_calls
+_per_node` defaulting to `3` - the existing `REVIEW_LOOP_LIMIT` behavior,
+unchanged, so no existing single-Task deployment sees different behavior
+without opting in. That default of `3` is a backward-compatibility
+constant for that one case, not the general Goal-mode policy - a
+multi-node Goal's default is `0` per node (opt-in via PLANNING's
+classification) plus an explicit `max_architecture_review_calls_per_goal`
+ceiling, exactly to avoid the per-node-times-node-count blowup this
+correction exists to close.
 
 ### Primary/Fallback Routing (unchanged, now Role x Execution Mode)
 
@@ -114,52 +219,63 @@ Task 041's `RoleRoutingConfig(name, routing="priority")` and its
 `_SUPPORTED_ROUTING_STRATEGIES = frozenset({"priority"})` remain exactly the
 routing behavior: within a Role, Agents are tried in priority order.
 Execution Mode is an attribute of *which* Agent sits at which priority for a
-Role, not a second routing axis - "GPT Plus plans, Codex implements" is
-expressed as `planner` role's priority-1 Agent having
-`execution_mode: subscription_assisted` (backed by ChatGPT Plus) and
-`implementer` role's priority-1 Agent having `execution_mode: api` (backed
-by Codex's API), with each Role's own fallback chain configured
-independently. No core code branches on "is this the GPT+Codex
-configuration" - it only ever reads Role -> priority-ordered Agents ->
-Execution Mode, exactly as ADR-001 requires.
+Role, not a second routing axis. The `planner` Role is special only in that
+its `subscription_assisted` binding applies to the `GOAL_PROPOSED`
+conversation and `AUDITING` (`docs/17-execution-revision-loop.md`), never to
+the autonomous `PLANNING` state itself - see the Execution Mode section
+above. "GPT Plus plans, Codex implements" (**corrected**, per the CTO
+review: Codex CLI under a Plus/Team plan is `subscription_runtime`, not
+`api`) is expressed as `planner`'s priority-1 Agent having
+`execution_mode: subscription_assisted` and `implementer`'s priority-1 Agent
+having `execution_mode: subscription_runtime`, with each Role's own
+fallback chain configured independently. No core code branches on "is this
+the GPT+Codex configuration" - it only ever reads Role -> priority-ordered
+Agents -> Execution Mode, exactly as ADR-001 requires.
 
 ```yaml
-# example: subscription-first configuration (GPT Plus + Codex)
+# example: subscription-first configuration (GPT Plus + Codex CLI) -
+# DevBot's actual current default shape (Task 011's ClaudeRunner/CodexRunner
+# are both CLI tools run under a subscription plan, not metered API calls)
 roles:
   planner:
+    # subscription_assisted here binds GOAL_PROPOSED's design conversation
+    # and AUDITING's Goal audit - never PLANNING itself, which stays
+    # deterministic (Task 038) and needs no execution_mode call at all
     primary: { agent: gpt_plus, execution_mode: subscription_assisted }
     fallback: { agent: claude_pro, execution_mode: subscription_assisted }
   implementer:
-    primary: { agent: codex, execution_mode: api }
-    fallback: { agent: claude_code, execution_mode: subscription_assisted }
+    primary: { agent: codex, execution_mode: subscription_runtime }
+    fallback: { agent: claude_code, execution_mode: subscription_runtime }
   reviewer:
-    primary: { agent: codex, execution_mode: api }
-    fallback: { agent: gpt_plus, execution_mode: subscription_assisted }
+    primary: { agent: codex, execution_mode: subscription_runtime }
+    fallback: { agent: gpt_api, execution_mode: api }
 budget:
-  max_planner_calls: 3
+  max_planner_calls: 0
   max_implementation_retries: 3
-  max_ai_review_calls: 3
-  require_final_goal_audit: true
+  max_architecture_review_calls_per_node: 0
+  max_architecture_review_calls_per_goal: 6
   api_usage: allowed
   exhaustion_behavior: escalate
 
 # example: Claude-first configuration
 roles:
   planner:   { primary: { agent: claude_pro, execution_mode: subscription_assisted } }
-  implementer: { primary: { agent: claude_code, execution_mode: subscription_assisted } }
-  reviewer:  { primary: { agent: claude_code, execution_mode: subscription_assisted } }
+  implementer: { primary: { agent: claude_code, execution_mode: subscription_runtime } }
+  reviewer:  { primary: { agent: claude_code, execution_mode: subscription_runtime } }
 budget:
   api_usage: forbidden
   exhaustion_behavior: stop
 
-# example: API-first configuration (no subscription product involved)
+# example: API-first configuration (no subscription product involved,
+# e.g. headless CI-style deployment - planner conversation still needs a
+# human at GOAL_PROPOSED/AUDITING; nothing here makes that step unattended)
 roles:
-  planner:     { primary: { agent: gpt_api, execution_mode: api } }
+  planner:     { primary: { agent: gpt_plus, execution_mode: subscription_assisted } }
   implementer: { primary: { agent: claude_api, execution_mode: api } }
   reviewer:    { primary: { agent: claude_api, execution_mode: api } }
 budget:
   api_usage: allowed
-  max_planner_calls: 5
+  max_architecture_review_calls_per_goal: 10
   exhaustion_behavior: fallback
 ```
 
@@ -178,12 +294,15 @@ the same workflow") without any of the three being a special case in code.
   exactly as before, the same backward-compatibility discipline Task 041
   itself already established for `config/agents.yaml`.
 - `REVIEW_LOOP_LIMIT`'s pattern (a bounded, configurable retry cap with a
-  sensible default) generalizes cleanly into `max_ai_review_calls` instead
-  of being reinvented.
-- A Goal can be run entirely `subscription_assisted` (a user with only
-  ChatGPT Plus and Claude Pro, no API keys) or entirely `api` (a headless
-  CI-style deployment) or mixed, with the same core and the same ADR-005
-  gates.
+  sensible default) generalizes cleanly into `max_architecture_review
+  _calls_per_node`/`_per_goal` instead of being reinvented.
+- A Goal's autonomous loop can run entirely on `subscription_runtime`
+  Agents (a user with only Codex CLI/Claude Code CLI under existing
+  subscriptions, no API keys) or entirely `api` (a headless CI-style
+  deployment) or mixed - `subscription_assisted` still requires a human
+  present at `GOAL_PROPOSED`/`AUDITING` regardless of which of these is
+  chosen, since that is a property of the checkpoint, not of the
+  deployment's cost preference.
 
 ### Negative
 

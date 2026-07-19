@@ -64,22 +64,42 @@ is who decides *when the next Task starts* and *who checks the result*.
 
 ```text
 GOAL_PROPOSED                     <- Goal Specification + DoD drafted
-  -> GOAL_APPROVED                <- "다음": the ONE human approval gate
-  -> PLANNING                     <- decompose into a Task Graph (ADR "invent
-                                      nothing outside the approved Goal Scope")
+  -> GOAL_APPROVED                <- "다음": the FIRST human checkpoint
+  -> PLANNING                     <- decompose into a Task Graph, unattended
+                                      (deterministic today - ADR-007);
+                                      "invent nothing outside the approved
+                                      Goal Scope"
   -> EXECUTING                    <- materialize + run Task Graph nodes,
                                       unattended, in dependency order
   -> VERIFYING                    <- ADR-005's four gates per node
+                                      (Architecture gate selective, not
+                                      per-node-mandatory - ADR-005 §Architecture)
   -> REVISING (recoverable failure)
   -> EXECUTING / VERIFYING        <- bounded revision loop (ADR-007 budget)
   -> REVIEW_REQUESTED             <- Goal gate passed for every required node
-  -> GOAL_ACCEPTED                <- "리뷰": the SECOND human checkpoint
+  -> AUDITING                     <- "리뷰": the SECOND human checkpoint -
+                                      starts AND is performed by the
+                                      conversation agent the human is
+                                      already talking to, not queued
+                                      automatically and not a personal
+                                      line-by-line human read
+  -> GOAL_ACCEPTED                <- AUDITING's PASS verdict
   -> RELEASE_REPORTED
 ```
 
 Full transition ownership, entry conditions, and failure/escalation paths
 are defined in `docs/17-execution-revision-loop.md`; this ADR fixes only the
-two-checkpoint shape and why it is safe.
+two-checkpoint shape and why it is safe. **Correction (2026-07-20, CTO
+review on PR #117):** the first version of this diagram put `GOAL_ACCEPTED`
+directly after `REVIEW_REQUESTED`, implying a human personally reads and
+judges the Completion Report. The corrected shape still has exactly two
+human checkpoints (`다음`, `리뷰`) - `AUDITING` does not add a third, it is
+what `리뷰` *means*: the conversation agent, not the human line-by-line,
+produces the verdict that lands `GOAL_ACCEPTED`. See `docs/17
+-execution-revision-loop.md`'s matching correction for full detail, and
+ADR-007's Execution Mode correction for why `subscription_assisted` (the
+mode this checkpoint necessarily runs in) cannot be queued automatically
+the way the first version of `REVIEW_REQUESTED` assumed.
 
 ### Why this does not violate Human-first Planning
 
@@ -176,11 +196,12 @@ rulebook Agents actually read stays accurate.
   or, if the discipline is implemented loosely, genuine scope creep
   (dangerous). `docs/16-verification-model.md`'s Contract gate is the
   concrete mechanism this risk is delegated to.
-- Two checkpoints instead of many is only actually safer if `REVIEW_REQUESTED`
-  gives the human enough aggregated evidence to make an informed accept/
-  reject decision without re-reading every Task PR - this places real
-  weight on the Completion Report (ADR-005's Goal gate evidence) being
-  genuinely legible, not a rubber stamp.
+- Two checkpoints instead of many is only actually safer if the Completion
+  Report gives `AUDITING`'s conversation agent (and the human watching that
+  same conversation) enough aggregated evidence to make an informed PASS/
+  FAIL verdict without re-reading every Task PR - this places real weight
+  on the Completion Report (ADR-005's Goal gate evidence) being genuinely
+  legible, not a rubber stamp the audit agent waves through.
 
 ## Rejected Alternatives
 

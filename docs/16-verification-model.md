@@ -39,7 +39,7 @@ Verification Plan
 |---|---|---|---|
 | Technical | Fully | command output + exit code | Validation Gate (`AGENTS.md` §9), Task 039 CI Workflow Runs check |
 | Contract | Mostly (scope-creep judgment is the exception) | `SpecificationValidationResult` (`SPV-001..013`) + checkpoint-to-test table | Task 043 `specification_validation.py`, `docs/06-review-policy.md` |
-| Architecture | Judgment (evidence-backed, typed) | `ReviewReport` (typed findings, severity, location) | Task 053 `review_decision.py`, submitted via Task 054 `github_review_submission.py` |
+| Architecture | Selective judgment (evidence-backed, typed; zero-cost for nodes fully covered by deterministic rules) | Invariant Classification (below) + `ReviewReport` for flagged nodes only | Task 053 `review_decision.py`, submitted via Task 054 `github_review_submission.py` |
 | Goal | Fully (aggregation only) | Completion Report | new (`docs/15-goal-and-task-graph.md`), same aggregation style as Task 052 |
 
 No gate's evidence is a free-text claim. Every row above already exists as
@@ -68,28 +68,67 @@ Two parts, one deterministic and one not:
   `devbot specification validate --task <N>` today, just invoked
   automatically per node.
 - **Scope-creep judgment** (AI, bounded by `docs/18-resource-strategy.md`'s
-  `max_ai_review_calls`): deciding whether a file changed outside the
-  Specification's declared scope is a reasonable implementation detail or
-  actual creep. This is the only part of the Contract gate that spends
-  budget; it should be a narrow, single-purpose classification (in scope /
-  out of scope / escalate), not a general review pass duplicating the
-  Architecture gate's job.
+  per-node/per-Goal Architecture-gate budget): deciding whether a file
+  changed outside the Specification's declared scope is a reasonable
+  implementation detail or actual creep. This is the only part of the
+  Contract gate that spends budget; it should be a narrow, single-purpose
+  classification (in scope / out of scope / escalate), not a general
+  review pass duplicating the Architecture gate's job.
 
 ### Architecture gate detail
 
-Identical in substance to today's Task-level review
-(`docs/06-review-policy.md`, `AGENTS.md` §11-12) - "does this respect
-`docs/adr/`'s accepted decisions, are core/adapter boundaries intact, is
-any public API/security/persistence change unapproved" is exactly what a
-Task reviewer already evaluates. What this gate changes is only the output
-contract: a Task 053 `ReviewReport` instead of free text, whose `decision`
-and severity counts are *derived from* its `findings` rather than asserted
-independently (`ReviewReport.__post_init__`'s invariant, enforced even
-against direct construction) - so a Goal-level aggregation can trust a
-node's recorded decision without re-reading the findings that produced it.
-Submission of that report as an actual GitHub PR review goes through Task
-054's stale-head and self-approval protections unchanged - a Task Graph
-node's PR is still a real PR, reviewed the real way.
+**Correction (2026-07-20, CTO review on PR #117):** the first version of
+this section described the Architecture gate as running a full AI review,
+identical to today's Task-level review, on every Task Graph node
+unconditionally - for a Goal with several nodes that reproduces the exact
+per-Task review cost this whole redesign exists to reduce (see ADR-005's
+matching correction). The gate is now split into a classification step and
+a conditional review step.
+
+**Invariant Classification** (produced once, during `PLANNING`, per node -
+`docs/17-execution-revision-loop.md`):
+
+```text
+Invariant Classification
+  node_ref
+  invariants: list of
+    description             - e.g. "no unapproved public API change",
+                              "respects ADR-001 core/adapter boundary"
+    verifiable_by             - deterministic_rule | ai_review
+    rule_ref                   - if deterministic_rule: which check enforces
+                                 it (an import-boundary linter, a file-path
+                                 allowlist derived from the node's
+                                 Specification scope, an existing CI check) -
+                                 this rule then runs as part of the
+                                 Technical or Contract gate, not here
+  ai_review_required           - bool; true only if >=1 invariant above is
+                                 `ai_review`
+```
+
+A node whose invariants are *all* `deterministic_rule` has
+`ai_review_required: false` and spends **zero** Architecture-gate AI calls -
+its architecture evidence is the deterministic rules' pass results,
+attached to the Technical/Contract gate evidence it already produces, not a
+separate `ReviewReport`. Only a node with `ai_review_required: true` runs
+an actual AI review, and only for the specific invariants classified
+`ai_review` - not a general re-review of the whole diff.
+
+For a flagged node, the output contract is unchanged from the first version
+of this ADR/document: a Task 053 `ReviewReport` (typed findings, severity,
+location) instead of free text, whose `decision` and severity counts are
+*derived from* its `findings` rather than asserted independently
+(`ReviewReport.__post_init__`'s invariant, enforced even against direct
+construction) - so a Goal-level aggregation can trust a node's recorded
+decision without re-reading the findings that produced it. Submission of
+that report as an actual GitHub PR review goes through Task 054's
+stale-head and self-approval protections unchanged - a Task Graph node's PR
+is still a real PR, reviewed the real way when it is reviewed at all.
+
+Classification itself (which invariants are rule-checkable versus
+judgment-required) is a one-time cost paid once per Goal's `PLANNING`, not
+per node re-evaluated later - and classifying "this invariant needs a rule"
+is far cheaper than running the AI review that rule replaces, especially
+across every subsequent Goal that reuses the same rule once it exists.
 
 ### Goal gate detail
 
@@ -112,10 +151,18 @@ deterministic aggregation" decision exactly.
   recorded gate result must re-run that gate, not reuse stale evidence -
   the same principle Task 054's `_fetch_and_verify_pull_request` re
   -verification already enforces at Task grain, generalized to every gate.
-- **A missing gate result is a blocking finding, not a pass.** The Goal gate
-  must never interpret "this node has no recorded Architecture gate result"
-  as "this node has no architecture problems" - absence of evidence blocks
-  `REVIEW_REQUESTED` the same way a failed gate does.
+- **A missing gate result is a blocking finding, not a pass - unless the
+  gate was never required for that node.** The Goal gate must never
+  interpret "this node has no recorded Architecture gate `ReviewReport`" as
+  "this node has no architecture problems" *when that node's Invariant
+  Classification marked it `ai_review_required: true`* - absence of
+  required evidence blocks `REVIEW_REQUESTED` the same way a failed gate
+  does. A node classified `ai_review_required: false` legitimately has no
+  `ReviewReport`, and that absence is not a finding - its Architecture
+  evidence is the deterministic rules' own pass results instead. The
+  Invariant Classification record itself is what distinguishes "correctly
+  skipped" from "missing" - a node with no Invariant Classification at all
+  is the actual missing-evidence case and blocks the same as any other gate.
 - **Findings are never silently dropped.** Task 054's existing rule that
   "every finding is always also written into the top-level review body"
   generalizes: every gate finding attached to a node must appear in the
