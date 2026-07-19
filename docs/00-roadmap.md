@@ -620,3 +620,32 @@
       매핑(approved→APPROVE 등)은 이 태스크에 포함하지 않았다 - 다음
       태스크를 위한 순수 결정 모델만 정의한다(`src/devbot/review_decision.py`,
       `results/053-review-decision-model.md`).
+- [x] Task 054: GitHub review submission. Task 053의 provider-neutral
+      `ReviewReport`를 정확히 하나의 공식 GitHub PR 리뷰로 제출하는
+      `src/devbot/github_review_submission.py`와
+      `devbot review submit --pr N --report report.json [--dry-run]`을
+      추가했다. `approved`→`APPROVE`/`changes_required`→`REQUEST_CHANGES`/
+      `comment_only`→`COMMENT` 매핑은 이 모듈에만 있고 Task 053은 여전히
+      GitHub와 무관하다. **Stale head 보호**: report의 metadata에서
+      `reviewed_head_sha`를 필수로 읽어, PR의 현재 head SHA(읽기 전용
+      조회)와 다르면 write client를 만들기 전에 거부한다 - dry-run과
+      실제 제출 둘 다 같은 planning 함수(`build_github_review_submission
+      _plan`)를 거치므로 이 보호가 절대 갈라지지 않는다. **Self-approval을
+      선제적으로 차단**: event가 APPROVE일 때만 인증된 identity와 PR
+      작성자를 비교해(읽기 전용 API 2개 추가 호출 없이 이미 읽은 정보로),
+      같으면 어떤 쓰기도 하기 전에 `SelfApprovalError`로 거부한다 -
+      GitHub 자체의 422 오류 메시지("...own pull request...")도 보조
+      안전망으로 인식해 같은 타입 오류로 승격시키고, 절대 조용히
+      COMMENT로 다운그레이드하지 않는다. **Inline comment 변환**: path와
+      line이 모두 있는 finding만 inline으로 변환하고(둘 중 하나라도
+      없으면 에러 없이 body-only로), `side` 값이 있는데 `LEFT`/`RIGHT`가
+      아니면 - 잘못 배치될 수 있으므로 - 조용히 넘기지 않고 전체 제출을
+      fail closed한다. 모든 finding은 inline 여부와 무관하게 body에도
+      항상 다시 나타나 절대 사라지지 않는다. `GitHubClient.PullRequestDetail`에
+      `head_sha`/`state`/`author_login` 필드를 추가했고(기존엔 없었음),
+      `GitHubWriteClient.submit_pull_request_review`를 신규 추가했다(다른
+      기존 메서드와 같은 패턴, 정책은 전혀 갖지 않고 검증된 payload만
+      전달). merge/label/comment 등 리뷰 제출 외 다른 PR 변경은 전혀
+      하지 않는다. GitHub App 인증, review/rework 루프, merge readiness,
+      LLM 리뷰 실행은 이 태스크에 포함하지 않았다(`src/devbot/github
+      _review_submission.py`, `results/054-github-review-submission.md`).

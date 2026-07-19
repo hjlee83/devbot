@@ -2148,6 +2148,185 @@ def test_review_report_never_constructs_github_client_or_write_client(tmp_path: 
     mock_lock.assert_not_called()
 
 
+# --------------------------------------------------------------------------
+# Task 054: `devbot review submit` - submits exactly one official GitHub PR
+# review from a validated Task 053 report. `--dry-run` must never
+# construct a write client.
+# --------------------------------------------------------------------------
+
+
+def _submit_pr_detail(**overrides: object):
+    from devbot.github_client import PullRequestDetail
+
+    defaults: dict[str, object] = dict(
+        number=99,
+        html_url="https://example.invalid/pull/99",
+        body="",
+        head_ref="feature",
+        head_sha="abc123",
+        base_ref="main",
+        state="open",
+        merged=False,
+        merge_commit_sha=None,
+        merged_at=None,
+        author_login="alice",
+    )
+    defaults.update(overrides)
+    return PullRequestDetail(**defaults)  # type: ignore[arg-type]
+
+
+def test_review_submit_dry_run_never_constructs_write_client(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(
+        tmp_path, {"findings": [], "metadata": {"reviewed_head_sha": "abc123"}}
+    )
+
+    with (
+        patch("devbot.main.GitHubClient") as mock_client_cls,
+        patch("devbot.main.GitHubWriteClient") as mock_write_client,
+    ):
+        mock_client_cls.return_value.get_pull_request.return_value = _submit_pr_detail()
+        exit_code = main(
+            ["review", "submit", "--pr", "99", "--report", str(report_file), "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_write_client.assert_not_called()
+    out = capsys.readouterr().out
+    assert "event: APPROVE" in out
+    assert "dry-run" in out
+
+
+def test_review_submit_real_execution_submits_exactly_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devbot.github_write_client import PullRequestReviewInfo
+
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(
+        tmp_path, {"findings": [], "metadata": {"reviewed_head_sha": "abc123"}}
+    )
+
+    with (
+        patch("devbot.main.GitHubClient") as mock_client_cls,
+        patch("devbot.main.GitHubWriteClient") as mock_write_cls,
+    ):
+        mock_client_cls.return_value.get_pull_request.return_value = _submit_pr_detail()
+        mock_write_cls.return_value.submit_pull_request_review.return_value = (
+            PullRequestReviewInfo(
+                id=42, html_url="https://example.invalid/review/42", state="APPROVED"
+            )
+        )
+        exit_code = main(
+            ["review", "submit", "--pr", "99", "--report", str(report_file)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_write_cls.return_value.submit_pull_request_review.assert_called_once()
+    out = capsys.readouterr().out
+    assert "submitted: yes" in out
+    assert "review_id: 42" in out
+
+
+def test_review_submit_stale_head_returns_failure_exit_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(
+        tmp_path, {"findings": [], "metadata": {"reviewed_head_sha": "abc123"}}
+    )
+
+    with patch("devbot.main.GitHubClient") as mock_client_cls:
+        mock_client_cls.return_value.get_pull_request.return_value = _submit_pr_detail(
+            head_sha="different-sha"
+        )
+        exit_code = main(
+            ["review", "submit", "--pr", "99", "--report", str(report_file), "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+    assert "review submit 오류" in capsys.readouterr().err
+
+
+def test_review_submit_missing_metadata_returns_failure_exit_code(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(tmp_path, {"findings": []})
+
+    with patch("devbot.main.GitHubClient"):
+        exit_code = main(
+            ["review", "submit", "--pr", "99", "--report", str(report_file), "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+
+
+def test_review_submit_malformed_report_returns_failure_before_github_call(
+    tmp_path: Path,
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(tmp_path, {"findings": "not-a-list"})
+
+    with patch("devbot.main.GitHubClient") as mock_client_cls:
+        exit_code = main(
+            ["review", "submit", "--pr", "99", "--report", str(report_file)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+    mock_client_cls.assert_not_called()
+
+
+def test_review_submit_missing_report_file_returns_failure_exit_code(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+
+    exit_code = main(
+        [
+            "review",
+            "submit",
+            "--pr",
+            "99",
+            "--report",
+            str(tmp_path / "does-not-exist.json"),
+        ],
+        env_path=env_path,
+        repositories_path=repositories_path,
+    )
+
+    assert exit_code == 1
+
+
+def test_review_submit_does_not_acquire_daemon_lock(tmp_path: Path) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    report_file = _write_report_file(
+        tmp_path, {"findings": [], "metadata": {"reviewed_head_sha": "abc123"}}
+    )
+
+    with (
+        patch("devbot.main.GitHubClient") as mock_client_cls,
+        patch("devbot.main.ProcessLock") as mock_lock,
+    ):
+        mock_client_cls.return_value.get_pull_request.return_value = _submit_pr_detail()
+        exit_code = main(
+            ["review", "submit", "--pr", "99", "--report", str(report_file), "--dry-run"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    mock_lock.assert_not_called()
+
+
 def test_goal_dispatch_shows_role_resolution_without_invoking_agent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

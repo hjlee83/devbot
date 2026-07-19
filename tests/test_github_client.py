@@ -204,8 +204,10 @@ def test_get_pull_request_parses_full_detail() -> None:
             "body": "## Contract\n\n- `tasks/052-slug.md`\n",
             "head": {"ref": "task/052-slug", "sha": "headsha"},
             "base": {"ref": "main"},
+            "state": "closed",
             "merged_at": "2026-07-19T01:02:03Z",
             "merge_commit_sha": "mergesha",
+            "user": {"login": "someone"},
         }
     )
     client = GitHubClient("token123", session=session)
@@ -215,11 +217,14 @@ def test_get_pull_request_parses_full_detail() -> None:
     assert detail.number == 52
     assert detail.html_url == "https://github.com/someone/myrepo/pull/52"
     assert detail.head_ref == "task/052-slug"
+    assert detail.head_sha == "headsha"
     assert detail.base_ref == "main"
+    assert detail.state == "closed"
     assert detail.merged is True
     assert detail.merge_commit_sha == "mergesha"
     assert detail.merged_at is not None
     assert detail.merged_at.isoformat() == "2026-07-19T01:02:03+00:00"
+    assert detail.author_login == "someone"
     session.get.assert_called_once()
     assert session.get.call_args.args[0].endswith("/repos/someone/myrepo/pulls/52")
 
@@ -233,8 +238,10 @@ def test_get_pull_request_unmerged_reports_merged_false() -> None:
             "body": "",
             "head": {"ref": "task/053-slug", "sha": "headsha"},
             "base": {"ref": "main"},
+            "state": "open",
             "merged_at": None,
             "merge_commit_sha": None,
+            "user": {"login": "another-user"},
         }
     )
     client = GitHubClient("token123", session=session)
@@ -244,6 +251,8 @@ def test_get_pull_request_unmerged_reports_merged_false() -> None:
     assert detail.merged is False
     assert detail.merged_at is None
     assert detail.merge_commit_sha is None
+    assert detail.state == "open"
+    assert detail.author_login == "another-user"
 
 
 def test_github_error_is_translated() -> None:

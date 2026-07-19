@@ -699,3 +699,78 @@ Task's PR. The corresponding embedded "Full Task Contract Reference" copies insi
 corrected Contract files, and both Specifications were re-validated
 (`devbot specification validate --task 50`/`--task 51`, both still PASS).
 
+## 2026-07-19 — GitHub review submission: stale-head and self-approval are checked read-only, before any write client exists (Task 054)
+
+Task 054 (`src/devbot/github_review_submission.py`) submits a validated Task 053
+`ReviewReport` as exactly one official GitHub PR review. Marked `risk_level: high` in
+its own Contract, since this is the first Task in this repository that writes a real
+GitHub review rather than an Issue/PR comment, label, or Release. Three safety
+decisions are worth recording explicitly.
+
+**Stale-head protection and self-approval detection are both read-only, and both run
+inside the same `build_github_review_submission_plan` function that dry-run and real
+submission both call first.** A report only carries evidence about one exact commit
+(`reviewed_head_sha`, required in its `metadata`); the PR's *current* head SHA is read
+via the already-existing `GitHubClient.get_pull_request` before anything else happens,
+and a mismatch refuses before any `GitHubWriteClient` is constructed. Because dry-run
+and real submission share this one function, there is no way for the two paths to
+enforce this protection differently - what dry-run reports as "the exact intended
+submission" is guaranteed to be what real execution would actually attempt.
+
+**Addendum (2026-07-19, same day, review fix):** the initial version of this check ran
+exactly once, during planning. Review on PR #114 pointed out this leaves a real
+time-of-check-to-time-of-use gap: GitHub's review-submission API has no
+head-SHA-conditional create, so a commit pushed to the PR between planning and the
+actual `write_client.submit_pull_request_review` call could let a review land against a
+`commit_id` that is no longer the PR's head. The read-and-verify logic (head-SHA match,
+open/unmerged state) was pulled out into `_fetch_and_verify_pull_request` and is now
+called a second time, immediately before the write, inside `submit_github_review` - not
+only during planning. A mismatch found on this second read raises `StaleReviewHeadError`
+(or `UnsupportedPullRequestStateError` if the PR closed/merged meanwhile) and aborts
+before any write is attempted, exactly as the first check does. This narrows the race
+window from "however long elapses between report authoring and submission" down to the
+network round-trip between the second read and the POST itself - it does not eliminate
+the window entirely, since GitHub's API still offers no atomic check-and-write primitive.
+Covered by `test_head_changed_between_plan_and_write_blocks_submission`,
+`test_pr_closed_between_plan_and_write_blocks_submission`, and
+`test_pr_merged_between_plan_and_write_blocks_submission` in
+`tests/test_github_review_submission.py`.
+
+**Self-approval is checked proactively, not only reactively.** GitHub's API rejects
+`APPROVE` when the authenticated identity authored the PR (HTTP 422), but relying only
+on that after the fact means an operator only learns why from an opaque GitHub error
+string - and the Specification explicitly forbids silently downgrading a failed
+`APPROVE` into `COMMENT` to work around it. `build_github_review_submission_plan`
+therefore compares the authenticated user (`GitHubClient.get_authenticated_user`,
+read-only) against the PR's author *before* returning a plan whose event is `APPROVE` -
+raising `SelfApprovalError` early, with no write attempted. This check is scoped to
+`APPROVE` only, matching the Specification's own language ("self-approval", "refusing
+approval") - it does not extend to `REQUEST_CHANGES`/`COMMENT`, and does not call
+`get_authenticated_user` at all for those events, avoiding an unnecessary read. As a
+second, independent layer, `submit_github_review` also recognizes GitHub's own 422
+self-approval message text if the proactive check somehow did not catch it (e.g. the
+authenticated identity changed between planning and submission) and raises the same
+typed error rather than letting it surface as an undifferentiated API failure.
+
+**An inline comment location that is only partially usable fails the whole submission
+closed, rather than silently falling back to body-only.** A finding with no location at
+all, or a location missing either `path` or `line`, is not an error - GitHub simply has
+nothing to anchor a comment to, so it stays body-only (this is the common, expected
+case, not a failure). But a finding whose `side` is set to something other than
+GitHub's two accepted values (`LEFT`/`RIGHT`) is a different situation: the data
+*looks* complete enough to place a comment, and doing so with a wrong or nonsensical
+side risks silently mis-anchoring it to the wrong half of a diff. `UnsupportedInline
+LocationError` refuses the entire submission in that case rather than guessing which
+side was intended or quietly dropping the finding to the body only. Independently of
+inline placement, every finding is always also written into the top-level review body -
+so even a successfully inline-placed finding is never the *only* place it appears,
+guarding against GitHub itself failing to render an inline comment for any reason.
+
+**`GitHubClient.PullRequestDetail` gained `head_sha`, `state`, and `author_login`
+(Task 052 introduced the type without them - only `merge_commit_sha`/`merged_at`,
+useful once a PR is already merged, existed).** `GitHubWriteClient.submit_pull_request
+_review` is the one new write method, following the same shape as every other write
+method in that client (`create_pull_request`, `merge_pull_request`, ...): it owns no
+policy of its own and only transports the caller's already-validated `commit_id`/
+`event`/`body`/`comments`.
+

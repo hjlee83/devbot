@@ -98,16 +98,23 @@ class PullRequestDetail:
     returns `merge_commit_sha`, `merged_at`, and `body`/`html_url`
     together (Task 052; `list_pull_requests`'s `PullRequest` and
     `get_commit_pull_request_metadata`'s `PullRequestMetadata` each carry
-    only a subset)."""
+    only a subset). `head_sha`, `state`, and `author_login` were added in
+    Task 054 - the current head commit of an open PR (not
+    `merge_commit_sha`, which is only set once merged), open/closed
+    state, and the PR author, needed for stale-head and self-approval
+    checks before submitting a review."""
 
     number: int
     html_url: str
     body: str
     head_ref: str
+    head_sha: str
     base_ref: str
+    state: str
     merged: bool
     merge_commit_sha: str | None
     merged_at: datetime | None
+    author_login: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,9 +432,12 @@ class GitHubClient:
             html_url=payload["html_url"],
             body=payload.get("body") or "",
             head_ref=payload["head"]["ref"],
+            head_sha=payload["head"]["sha"],
             base_ref=payload["base"]["ref"],
+            state=payload["state"],
             merged=bool(merged_at_raw),
             merge_commit_sha=payload.get("merge_commit_sha"),
+            author_login=payload["user"]["login"],
             merged_at=(
                 datetime.fromisoformat(merged_at_raw.replace("Z", "+00:00"))
                 if merged_at_raw

@@ -62,6 +62,16 @@ class ReleaseInfo:
     html_url: str
 
 
+@dataclass(frozen=True, slots=True)
+class PullRequestReviewInfo:
+    """A submitted pull request review, per
+    `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` (Task 054)."""
+
+    id: int
+    html_url: str
+    state: str
+
+
 class GitHubWriteClient:
     """Minimal authenticated GitHub REST API write client."""
 
@@ -292,6 +302,34 @@ class GitHubWriteClient:
             sha=payload["sha"], merged=payload["merged"], message=payload["message"]
         )
 
+    def submit_pull_request_review(
+        self,
+        repository: RepositoryConfig,
+        pull_request_number: int,
+        *,
+        commit_id: str,
+        event: str,
+        body: str,
+        comments: Sequence[dict[str, Any]] = (),
+    ) -> PullRequestReviewInfo:
+        """Submit exactly one official Pull Request review
+        (`POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews`, Task 054).
+        `event` must be one of GitHub's own `APPROVE`/`REQUEST_CHANGES`/
+        `COMMENT` - this client performs no mapping or validation of it;
+        `devbot.github_review_submission` owns that policy and always binds
+        `commit_id` to the exact head SHA it validated before calling this."""
+        payload: dict[str, Any] = {"commit_id": commit_id, "event": event, "body": body}
+        if comments:
+            payload["comments"] = list(comments)
+        response = self._post(
+            f"/repos/{repository.owner}/{repository.repo}/pulls/"
+            f"{pull_request_number}/reviews",
+            json=payload,
+        ).json()
+        return PullRequestReviewInfo(
+            id=response["id"], html_url=response["html_url"], state=response["state"]
+        )
+
 
 __all__ = [
     "GitHubClientError",
@@ -299,4 +337,5 @@ __all__ = [
     "IssueInfo",
     "MergePullRequestResult",
     "PullRequestInfo",
+    "PullRequestReviewInfo",
 ]
