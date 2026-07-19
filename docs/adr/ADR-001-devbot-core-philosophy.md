@@ -118,9 +118,11 @@ Initial routing may use simple `primary` and `fallback` policies. Weighted selec
 
 ## Related Future Decisions
 
-- Specification-first architecture
-- Role dispatch model
-- Input channel versus execution agent
-- PWA as DevBot control center
-- Integration ports for source control, work tracking, and communication
-- Subscription-assisted versus autonomous execution
+- Specification-first architecture — decided, see [ADR-002](ADR-002-specification-first-architecture.md).
+- Input channel versus execution agent — decided, see [ADR-003](ADR-003-input-channel-execution-agent-separation.md).
+- PWA as DevBot control center — decided, see [ADR-004](ADR-004-pwa-as-devbot-control-center.md).
+- Subscription-assisted versus autonomous execution — decided as an Execution Mode axis of Resource Strategy, see [ADR-007](ADR-007-ai-resource-subscription-strategy.md); ADR-003's "Execution Modes" section is the earlier statement of the same distinction.
+- Verification as the gate between automation and trust — decided, see [ADR-005](ADR-005-verification-driven-workflow.md).
+- Goal as the user-facing unit of work, Task as the internal execution unit — decided, see [ADR-006](ADR-006-goal-driven-execution.md).
+- Role dispatch model — implemented ahead of an ADR (Task 041, `src/devbot/agent_registry.py`); formalized as part of Resource Strategy in ADR-007 rather than as a standalone ADR.
+- Integration ports for source control, work tracking, and communication — still open; not addressed by this Goal (devbot/devbot#116).

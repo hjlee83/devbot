@@ -649,3 +649,77 @@
       하지 않는다. GitHub App 인증, review/rework 루프, merge readiness,
       LLM 리뷰 실행은 이 태스크에 포함하지 않았다(`src/devbot/github
       _review_submission.py`, `results/054-github-review-submission.md`).
+
+## Phase 4 — Goal-driven architecture refresh (devbot/devbot#116)
+
+- [x] Goal: verification-driven goal execution architecture refresh.
+      Task-driven 루프를 Goal-driven·verification-first 루프로 재설계하기
+      위한 아키텍처/계약을 정의한다 - 이 Goal 자체는 문서·ADR만 산출하고
+      실행 엔진 구현은 포함하지 않는다(devbot/devbot#116 Non-goals).
+      `docs/adr/ADR-002~004`(기존 초안, PR #115가 머지 없이 닫혀 있던
+      것을 이 Goal의 리뷰 정책이 전제하는 "ADR-001~004 일관성" 기준을
+      충족시키기 위해 함께 확정), `ADR-005`(Verification-driven
+      workflow), `ADR-006`(Goal-driven execution), `ADR-007`(AI resource/
+      subscription-first strategy), `docs/15~18`(Goal·Task Graph,
+      Verification model, Execution/revision loop, Resource strategy)를
+      추가했다. 아래는 이 Goal의 DoD가 요구하는 "기존 Task가 superseded/
+      retained/deferred 중 무엇인지" 매핑이다.
+
+  **Retained (변경 없이 재사용, 새 아키텍처가 그 위에 얹힘):**
+
+  - Task 001-037의 전체 Task 파이프라인(상태기, 리뷰 루프, Timeline,
+    데몬 신뢰성, Planner 워크플로, host-managed workspace, 릴리스 파이프
+    라인 기반) - Goal 계층이 얹히는 실행 엔진 자체.
+  - Task 038 goal_planner - `PLANNING` 상태의 엔진으로 그대로 확장
+    (`docs/17-execution-revision-loop.md`).
+  - Task 040 goal_executor - `EXECUTING` 상태의 노드 구체화로 그대로
+    확장, 3-write 세트는 불변(`docs/15-goal-and-task-graph.md`).
+  - Task 041 role dispatch/agent registry - Execution Policy의 기반
+    (`docs/18-resource-strategy.md`); `config/agents.yaml` 없는 배포는
+    기존과 동일하게 동작.
+  - Task 042-046 Specification·Contract Schema/Metadata Engine -
+    Contract gate의 구조적 절반을 그대로 공급(`docs/16
+    -verification-model.md`).
+  - Task 047-052 릴리스 분류/준비/게시/전략/오케스트레이션/추천 집계 -
+    `RELEASE_REPORTED`가 그대로 재사용(`docs/17`).
+  - Task 053-054 review decision model/GitHub review submission -
+    Architecture gate의 Evidence 포맷이자 제출 경로(`docs/16`).
+  - B2 자동 머지 안전 게이트 - `EXECUTING` 하위의 기존 per-Issue 루프
+    일부로 그대로 유지.
+
+  **Superseded (메커니즘은 유지, 인터랙션/오버사이트 지점만 이동):**
+
+  - Task 단위 수동 착수("Issue #N 작업해"를 매 Task마다 반복) - Goal
+    레벨 "다음" 한 번으로 대체(`ADR-006`). 실제 파이프라인(Task
+    001-037)은 안 바뀜.
+  - Task 040의 Task당 수동 `--confirm` 게이트 - Goal 레벨
+    `GOAL_APPROVED` 게이트 한 번으로 대체(`docs/17`).
+  - Task 037의 "운영자가 한 문장으로 릴리스 게시" UX - `RELEASE_REPORTED`
+    전이가 그 한 문장을 자동으로 대체 발화; Task 037의 실제 게시 로직은
+    안 바뀜(`docs/17`).
+
+  **Deferred (이 Goal의 범위 밖, 우선순위 변경 없음):**
+
+  - `docs/14-autonomy-first-roadmap.md`의 B3(자동 착수)/B4(자가복구)/
+    B5(배포)는 이 Goal이 순서를 바꾸지 않는다 - 그 문서 자신의 원칙
+    ("Phase C는 무인 루프가 신뢰되기 전까지 열지 않는다")대로, 이
+    Goal의 산출물은 Phase C의 청사진일 뿐 Phase B 우선순위를 앞지르지
+    않는다.
+  - PWA 구현, Slack/Jira 어댑터, 모델 자동 벤치마킹, weighted routing,
+    마켓플레이스/플러그인 배포 - devbot/devbot#116 Non-goals 그대로
+    유지.
+  - 이 Goal이 정의한 아키텍처(Goal/Task Graph/Verification Plan/
+    Execution Policy 등) 자체의 실행 엔진 구현 - 별도의 후속
+    구현 Goal로 미룬다(devbot/devbot#116 DoD: "A subsequent
+    implementation Goal can be created without unresolved core-domain
+    decisions").
+
+  **문서 드리프트로 함께 확인된 것(이 Goal에서 고치지 않음, 후속
+  Constitution/AGENTS 개정 때 함께 반영 권고):** `AGENTS.md` §13의
+  "자동 Merge와 자동 Issue Close는 현재 범위가 아니다"는 이미 B2로
+  구현된 자동 머지와 불일치한다(`ADR-006`). `CONSTITUTION.md` §1의
+  Human-first Planning 체크포인트가 Task 단위에서 Goal 단위로 이동하는
+  것은 §10이 요구하는 "프로젝트 소유자의 명시적 아키텍처 결정"에
+  해당하며, devbot/devbot#116 자체가 그 결정이다 - 다만 `CONSTITUTION.md`
+  본문 개정은 이 문서 전용 Goal의 범위 밖으로 남겨, 실행 Goal 착수 전
+  프로젝트 소유자가 별도로 확정하도록 한다.
