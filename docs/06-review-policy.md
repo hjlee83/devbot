@@ -28,8 +28,22 @@ B2 gate:
 1. `AUTOMERGE_ENABLED=true`.
 2. The repository config has `automerge_allowed: true`.
 3. The repository config is not `is_self_repo: true`.
-4. GitHub check-runs for the PR head exist, are completed, and have only
-   passing conclusions (`success`, `skipped`, or `neutral`).
+4. CI status for the PR head is confirmed green by at least one
+   provider-neutral source (`devbot/ci_status.py`), and no consulted source
+   reports a failure or pending run:
+   - GitHub Actions workflow runs for the head SHA.
+   - The combined commit-status API (for external CI providers).
+   - GitHub check-runs, as an optional bonus source.
+
+   Each source is read independently; a permission gap or API error on one
+   source (e.g. a fine-grained PAT without the "Checks" permission, which
+   403s on check-runs) does not block the gate as long as another source
+   can confirm status. A classic PAT with the `repo` scope can see all
+   three sources and remains a valid, but optional, way to grant check-runs
+   access - it is not required.
+
+If no source can confirm CI status at all, the gate fails closed exactly
+like an unmet gate (Issue #127).
 
 If any gate fails, DevBot logs and comments the reason, keeps
 `devbot:ready-to-merge`, and leaves the PR available for human merge.

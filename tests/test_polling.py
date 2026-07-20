@@ -11,6 +11,7 @@ from devbot.agents.codex import CodexRunner
 from devbot.automerge import AutomergeService
 from devbot.delivery import DeliveryResult, VerificationResult
 from devbot.github_client import (
+    CombinedCommitStatus,
     GitHubAuthenticationError,
     GitHubIssue,
     PullRequest,
@@ -75,6 +76,16 @@ class FakeGitHubClient:
         if state == "closed":
             return [pull_request for pull_request in pull_requests if pull_request.merged]
         return [pull_request for pull_request in pull_requests if not pull_request.merged]
+
+    def list_workflow_runs_for_ref(self, repository: RepositoryConfig, head_sha: str):
+        if self._error is not None:
+            raise self._error
+        return []
+
+    def get_combined_status_for_ref(self, repository: RepositoryConfig, ref: str):
+        if self._error is not None:
+            raise self._error
+        return CombinedCommitStatus(state="pending", total_count=0)
 
     def list_check_runs_for_ref(self, repository: RepositoryConfig, ref: str):
         if self._error is not None:
@@ -758,6 +769,8 @@ def test_ready_to_merge_pr_is_merged_and_issue_marked_done() -> None:
             config=config,
             write_client=write_client,
             state_writer=state_writer,
+            list_workflow_runs_for_ref=github_client.list_workflow_runs_for_ref,
+            get_combined_status_for_ref=github_client.get_combined_status_for_ref,
             list_check_runs_for_ref=github_client.list_check_runs_for_ref,
         ),
     )
@@ -812,6 +825,8 @@ def test_run_cycle_does_not_crash_when_check_runs_lookup_fails() -> None:
             config=config,
             write_client=write_client,
             state_writer=state_writer,
+            list_workflow_runs_for_ref=github_client.list_workflow_runs_for_ref,
+            get_combined_status_for_ref=github_client.get_combined_status_for_ref,
             list_check_runs_for_ref=_raise_check_runs_error,
         ),
     )
@@ -847,6 +862,8 @@ def test_merged_linked_pr_reconciles_review_issue_to_done() -> None:
             config=config,
             write_client=write_client,
             state_writer=state_writer,
+            list_workflow_runs_for_ref=github_client.list_workflow_runs_for_ref,
+            get_combined_status_for_ref=github_client.get_combined_status_for_ref,
             list_check_runs_for_ref=github_client.list_check_runs_for_ref,
         ),
     )

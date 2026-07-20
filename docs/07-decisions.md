@@ -1,5 +1,31 @@
 # Architecture Decision Log
 
+## 2026-07-20 — Automatic merge's CI gate is provider-neutral, not check-runs-only (Issue #127)
+
+The 2026-07-18 "Automatic merge is policy-gated" entry below states "CI is
+API-backed. The gate uses GitHub check-runs for the PR head" - that is not
+corrected here, just superseded in scope: a deployed fine-grained PAT
+frequently cannot be granted the "Checks" repository permission at all, so
+`list_check_runs_for_ref` alone 403s under that token type and the CI gate
+was permanently blocked in that deployment, regardless of actual CI status.
+
+`devbot/ci_status.py` now normalizes CI status from three independent
+sources - GitHub Actions workflow runs (`list_workflow_runs_for_ref`), the
+combined commit-status API (`get_combined_status_for_ref`), and check-runs
+as an optional bonus source - into one `CIVerdict`. Each source is
+consulted independently in `AutomergeService._evaluate_ci_status`; a
+permission gap or API error on one source does not block the gate as long
+as another source can confirm status (`evaluate_ci_status`'s combination
+rule: any FAILING reading wins, else any PENDING wins, else any GREEN
+reading is enough, else - no source could confirm anything - UNKNOWN).
+
+The Issue #124 fail-closed principle is preserved and generalized: UNKNOWN
+(every source unavailable or empty) still blocks exactly like an unmet
+gate. A classic PAT with the `repo` scope can still see check-runs and
+remains a valid way to grant that access, but it is no longer required -
+core CI judgment (`evaluate_ci_status`) never special-cases a specific
+provider or token type.
+
 ## 2026-07-20 — DevBot bootstraps branch and contract from ready Issues
 Planner 책임은 승인된 Issue 작성과 `devbot:ready` 적용으로 축소한다. Branch,
 Task Contract, PR을 미리 만들 필요는 없다. DevBot host가 ready Issue를 claim한

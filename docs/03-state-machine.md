@@ -50,8 +50,11 @@ No new Issue may start.
   current head and no safety gate fails, the linked PR receives the exclusive
   `devbot:ready-to-merge` label.
 - If automatic merge is enabled, the repository is allowlisted, the repository
-  is not marked as DevBot's self repository, and GitHub check-runs for the PR
-  head are green, DevBot merges the PR and moves the Issue to `done`.
+  is not marked as DevBot's self repository, and CI status for the PR head is
+  confirmed green by at least one provider-neutral source (GitHub Actions
+  workflow runs, combined commit status, or check-runs - see
+  `docs/06-review-policy.md` and Issue #127 in `docs/07-decisions.md`),
+  DevBot merges the PR and moves the Issue to `done`.
 - If any automatic merge gate fails, DevBot logs/comments the reason, keeps
   `devbot:ready-to-merge`, and leaves the Issue in `review` for human merge.
 - Stale, contradictory, exhausted, metadata-only, external-verification,

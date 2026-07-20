@@ -1821,6 +1821,8 @@ def main(
                     config=config,
                     write_client=write_client,
                     state_writer=state_writer,
+                    list_workflow_runs_for_ref=github_client.list_workflow_runs_for_ref,
+                    get_combined_status_for_ref=github_client.get_combined_status_for_ref,
                     list_check_runs_for_ref=github_client.list_check_runs_for_ref,
                     logger=logger,
                 ),
