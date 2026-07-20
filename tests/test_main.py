@@ -7,7 +7,29 @@ from unittest.mock import patch
 import pytest
 
 from devbot.github_client import WorkflowRun
+from devbot.goal_execution_foundation import (
+    AgentSelection,
+    AITokenBudget,
+    ApiUsage,
+    DefinitionOfDoneCriterion,
+    ExecutionMode,
+    ExecutionPolicy,
+    GateKind,
+    GoalExecutionPlan,
+    ResourceStrategy,
+    RoleExecutionPolicy,
+    TaskGraph,
+    TaskNode,
+    VerificationGate,
+    VerificationPlan,
+)
 from devbot.goal_planner import GoalPlan
+from devbot.goal_runtime_adapter import (
+    APPROVED_GOAL_PLAN_SCHEMA_VERSION,
+    ApprovedGoalPlanDocument,
+    GoalTaskBinding,
+    write_approved_goal_plan,
+)
 from devbot.lock import ProcessLock
 from devbot.main import _run_startup_self_update, main
 from devbot.models import DevBotConfig
@@ -79,6 +101,53 @@ def _ready_preview(**overrides: object) -> ReleasePreview:
     )
     defaults.update(overrides)
     return ReleasePreview(**defaults)  # type: ignore[arg-type]
+
+
+def _approved_goal_plan_document() -> ApprovedGoalPlanDocument:
+    budget = AITokenBudget(
+        max_planner_calls=0,
+        max_implementation_retries=1,
+        max_architecture_review_calls_per_node=0,
+        max_architecture_review_calls_per_goal=0,
+        api_usage=ApiUsage.FORBIDDEN,
+    )
+    policy = ExecutionPolicy(
+        roles={
+            "implementer": RoleExecutionPolicy(
+                primary=AgentSelection(
+                    execution_mode=ExecutionMode.SUBSCRIPTION_RUNTIME,
+                    resource="subscription",
+                    runtime="cli",
+                )
+            )
+        }
+    )
+    return ApprovedGoalPlanDocument(
+        schema_version=APPROVED_GOAL_PLAN_SCHEMA_VERSION,
+        plan=GoalExecutionPlan(
+            goal_id="goal-141",
+            objective="Run approved plan.",
+            approved_scope=("adapter",),
+            non_goals=("planning",),
+            definition_of_done=(
+                DefinitionOfDoneCriterion("complete", GateKind.GOAL),
+            ),
+            task_graph=TaskGraph((TaskNode("a", "Task A"),)),
+            verification_plan=VerificationPlan((VerificationGate(GateKind.TECHNICAL),)),
+            execution_policy=policy,
+            resource_strategy=ResourceStrategy(
+                input_channel="chatgpt",
+                execution_policy=policy,
+                budget=budget,
+            ),
+            budget=budget,
+            exit_conditions=("review requested",),
+            escalation_conditions=("manual action",),
+        ),
+        task_bindings=(
+            GoalTaskBinding("a", "someone/myrepo", 141, "tasks/141-a.md", "task/141-a"),
+        ),
+    )
 
 
 def test_release_preview_command_is_wired(
@@ -2683,3 +2752,59 @@ def test_status_command_reports_runtime_scheduler_state(
     assert "ai_concurrency: 1" in out
     assert "worker 0: state=idle" in out
     assert "worker 1: state=idle" in out
+
+
+def test_goal_approved_validate_start_status_resume_commands_are_wired(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    plan_path = tmp_path / "goal-plan.json"
+    state_path = tmp_path / "goal-state.json"
+    write_approved_goal_plan(_approved_goal_plan_document(), plan_path)
+
+    assert (
+        main(
+            ["goal", "validate-approved", "--plan", str(plan_path)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+        == 0
+    )
+    assert "valid: yes" in capsys.readouterr().out
+
+    assert (
+        main(
+            [
+                "goal",
+                "start-approved",
+                "--plan",
+                str(plan_path),
+                "--state",
+                str(state_path),
+            ],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+        == 0
+    )
+    assert "pending_execution: node=a role=implementer" in capsys.readouterr().out
+
+    assert (
+        main(
+            ["goal", "status-approved", "--state", str(state_path)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+        == 0
+    )
+    assert "state: EXECUTING" in capsys.readouterr().out
+
+    assert (
+        main(
+            ["goal", "resume-approved", "--state", str(state_path)],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+        == 0
+    )
+    assert "pending_execution: node=a role=implementer" in capsys.readouterr().out

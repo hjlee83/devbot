@@ -757,6 +757,20 @@
       Contract/PR 흐름에 연결한다. 이 단계에서도 새 scope planning이나
       provider hard-coding은 금지한다.
 
+- [x] Issue #141: approved GoalExecutionPlan integration adapter. Task 118의
+      provider-neutral foundation은 유지한 채 `goal_runtime_adapter`를 추가해
+      versioned approved-plan JSON 로드/검증, atomic runtime-state persistence,
+      resume, completion snapshot 저장, RuntimeScheduler-backed execution
+      submission, execution/verification adapter protocol, `goal validate-approved`,
+      `goal start-approved`, `goal status-approved`, `goal resume-approved` CLI를 제공한다.
+      실제 provider/runtime 호출과 final Goal audit은 후속 adapter 구현 범위로
+      남겼다(`results/141-approved-goal-plan-integration-adapter.md`).
+
+- [ ] Next Goal: end-to-end approved Goal release validation. fixture 또는
+      sandbox repository에서 approved plan 문서부터 Task execution adapter,
+      deterministic verification, completion snapshot, `REVIEW_REQUESTED`
+      도달까지 release 후보 경로를 실제 운영 흐름으로 검증한다.
+
 - [x] Issue #122: repository registration with `devbot init`. 필수
       `WORKSPACE_ROOT` 기반 저장소 discovery 대신, 대상 저장소 내부에서
       실행하는 명시적 등록으로 대체한다 - `devbot.repository_registry`
