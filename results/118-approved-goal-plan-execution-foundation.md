@@ -35,14 +35,16 @@
 - No required verification request path:
   `test_task_with_no_required_verification_requests_completes_without_stalling`
 - Task Graph validation: `test_task_graph_rejects_missing_dependency`,
-  `test_task_graph_rejects_forward_dependency_as_invalid_dag_order`
+  `test_task_graph_accepts_valid_dag_independent_of_input_order`
 - Stable ready ordering: `test_task_graph_ready_nodes_are_stable_and_dependency_aware`
 - Illegal transition: `test_illegal_transition_is_typed`
 - RETRY: `test_retry_returns_node_to_retryable_and_consumes_retry_budget`
 - FAIL: `test_fail_stops_goal_as_failed`
 - ESCALATE: `test_escalate_stops_autonomous_progress`
-- Budget enforcement: `test_retry_budget_exhaustion_is_enforced`,
+- Budget enforcement:
+  `test_retry_budget_exhaustion_follows_configured_behavior`,
   `test_architecture_review_budget_is_consumed_and_limited`,
+  `test_architecture_review_budget_exhaustion_follows_configured_behavior`,
   `test_architecture_review_plan_must_fit_budget`
 
 ## Validation 결과
@@ -50,18 +52,21 @@
 - `uv run ruff check src/devbot/goal_execution_foundation.py tests/test_goal_execution_foundation.py`
   - PASS
 - `uv run pytest tests/test_goal_execution_foundation.py`
-  - PASS, 15 passed
+  - PASS, 18 passed
 - `uv run ruff check .`
   - PASS
 - `uv run pytest`
-  - PASS, 1403 passed in 218.99s
+  - PASS, 1406 passed in 182.54s
 - `uv run devbot doctor`
-  - FAIL: startup self-update가 dirty operator checkout에서 중단됨
-    (`skip_reason=operator checkout dirty`). 현재 rework 변경 파일 때문에 발생한
-    운영 전제 조건 실패이며 코드 테스트 실패는 아님.
+  - FAIL: startup self-update가 Task branch에서 중단됨
+    (`skip_reason=current branch is not main:
+    task/118-approved-goal-plan-execution-foundation`). 운영 전제 조건 실패이며
+    코드 테스트 실패는 아님.
 - `uv run devbot --once --dry-run`
-  - PASS: startup self-update는 dirty checkout 때문에 dry-run에서 skip,
-    workspace cleanliness/current branch compatibility 진단 후 `NO_RUNNABLE_TASK`.
+  - FAIL: startup self-update가 Task branch에서 중단됨
+    (`skip_reason=current branch is not main:
+    task/118-approved-goal-plan-execution-foundation`). 운영 전제 조건 실패이며
+    코드 테스트 실패는 아님.
 
 ## 수동 검증
 

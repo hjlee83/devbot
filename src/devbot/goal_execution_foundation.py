@@ -134,14 +134,6 @@ class TaskGraph:
         if missing:
             raise PlanValidationError(f"task graph has missing dependencies: {', '.join(missing)}")
 
-        ordered_index = {node.node_id: index for index, node in enumerate(self.nodes)}
-        for node in self.nodes:
-            for dependency in node.dependencies:
-                if ordered_index[dependency] >= ordered_index[node.node_id]:
-                    raise PlanValidationError(
-                        f"dependency {dependency!r} must appear before {node.node_id!r}"
-                    )
-
         visiting: set[str] = set()
         visited: set[str] = set()
         dependencies = {node.node_id: node.dependencies for node in self.nodes}
@@ -323,6 +315,7 @@ class VerificationRequest:
     goal_id: str
     node_id: str
     gate: GateKind
+    consumes_ai_budget: bool = False
 
 
 @dataclass(frozen=True)
@@ -439,7 +432,14 @@ class GoalRun:
             )
 
         requests = tuple(
-            VerificationRequest(self.plan.goal_id, result.node_id, gate.kind)
+            VerificationRequest(
+                self.plan.goal_id,
+                result.node_id,
+                gate.kind,
+                consumes_ai_budget=(
+                    gate.kind is GateKind.ARCHITECTURE and gate.ai_review_required
+                ),
+            )
             for gate in self.plan.verification_plan.gates
             if gate.applies_to(self._node(result.node_id, graph)) and gate.required
         )
@@ -463,17 +463,33 @@ class GoalRun:
         if self.state is not GoalState.VERIFYING:
             raise IllegalGoalTransitionError("verification outcomes require VERIFYING")
         pending = list(self.pending_verification_requests)
-        request = VerificationRequest(self.plan.goal_id, evidence.node_id, evidence.gate)
-        if request not in pending:
+        request = next(
+            (
+                item
+                for item in pending
+                if item.goal_id == self.plan.goal_id
+                and item.node_id == evidence.node_id
+                and item.gate is evidence.gate
+            ),
+            None,
+        )
+        if request is None:
             raise IllegalGoalTransitionError(
                 "verification outcome does not match a pending request"
             )
 
         consumption = self.budget_consumption
-        if evidence.gate is GateKind.ARCHITECTURE:
-            consumption = consumption.consume_architecture_review_call(
-                evidence.node_id, self.plan.budget
-            )
+        if request.consumes_ai_budget:
+            try:
+                consumption = consumption.consume_architecture_review_call(
+                    evidence.node_id, self.plan.budget
+                )
+            except BudgetExhaustedError as error:
+                return self._apply_budget_exhaustion(
+                    evidence=evidence,
+                    reason=str(error),
+                    graph=self._graph(),
+                )
 
         graph = self._graph()
         all_evidence = self.evidence + (evidence,)
@@ -497,9 +513,16 @@ class GoalRun:
             )
 
         if evidence.outcome is VerificationOutcome.RETRY:
-            consumption = consumption.consume_implementation_retry(
-                evidence.node_id, self.plan.budget
-            )
+            try:
+                consumption = consumption.consume_implementation_retry(
+                    evidence.node_id, self.plan.budget
+                )
+            except BudgetExhaustedError as error:
+                return self._apply_budget_exhaustion(
+                    evidence=evidence,
+                    reason=str(error),
+                    graph=graph,
+                )
             return replace(
                 self,
                 state=GoalState.REVISING,
@@ -529,6 +552,40 @@ class GoalRun:
             evidence=all_evidence,
             budget_consumption=consumption,
             reason=evidence.evidence,
+        )
+
+    def _apply_budget_exhaustion(
+        self, *, evidence: VerificationEvidence, reason: str, graph: TaskGraph
+    ) -> GoalRun:
+        all_evidence = self.evidence + (evidence,)
+        if self.plan.budget.exhaustion_behavior is ExhaustionBehavior.ESCALATE:
+            return replace(
+                self,
+                state=GoalState.ESCALATED,
+                graph=graph.replace_node(evidence.node_id, state=TaskNodeState.ESCALATED),
+                pending_verification_requests=(),
+                evidence=all_evidence,
+                reason=reason,
+            )
+        if self.plan.budget.exhaustion_behavior is ExhaustionBehavior.FALLBACK:
+            return replace(
+                self,
+                state=GoalState.REVISING,
+                graph=graph.replace_node(evidence.node_id, state=TaskNodeState.RETRYABLE),
+                pending_execution_request=ExecutionRequest(
+                    self.plan.goal_id, evidence.node_id, role="fallback"
+                ),
+                pending_verification_requests=(),
+                evidence=all_evidence,
+                reason=reason,
+            )
+        return replace(
+            self,
+            state=GoalState.FAILED,
+            graph=graph.replace_node(evidence.node_id, state=TaskNodeState.BLOCKED),
+            pending_verification_requests=(),
+            evidence=all_evidence,
+            reason=reason,
         )
 
     def completion_snapshot(self) -> CompletionSnapshot:

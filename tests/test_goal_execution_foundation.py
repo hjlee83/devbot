@@ -6,11 +6,11 @@ from devbot.goal_execution_foundation import (
     AgentSelection,
     AITokenBudget,
     ApiUsage,
-    BudgetExhaustedError,
     DefinitionOfDoneCriterion,
     ExecutionMode,
     ExecutionPolicy,
     ExecutionResult,
+    ExhaustionBehavior,
     GateKind,
     GoalExecutionPlan,
     GoalRun,
@@ -197,14 +197,17 @@ def test_task_graph_rejects_missing_dependency() -> None:
         TaskGraph((TaskNode("b", "Broken", dependencies=("missing",)),))
 
 
-def test_task_graph_rejects_forward_dependency_as_invalid_dag_order() -> None:
-    with pytest.raises(PlanValidationError, match="must appear before"):
-        TaskGraph(
-            (
-                TaskNode("b", "Second", dependencies=("a",)),
-                TaskNode("a", "First"),
-            )
+def test_task_graph_accepts_valid_dag_independent_of_input_order() -> None:
+    graph = TaskGraph(
+        (
+            TaskNode("b", "Second", dependencies=("a",)),
+            TaskNode("a", "First"),
         )
+    )
+
+    assert tuple(node.node_id for node in graph.ready_nodes()) == ("a",)
+    graph = graph.replace_node("a", state=TaskNodeState.COMPLETED)
+    assert tuple(node.node_id for node in graph.ready_nodes()) == ("b",)
 
 
 def test_illegal_transition_is_typed() -> None:
@@ -230,19 +233,45 @@ def test_retry_returns_node_to_retryable_and_consumes_retry_budget() -> None:
     assert run.graph.nodes[0].state is TaskNodeState.RETRYABLE
 
 
-def test_retry_budget_exhaustion_is_enforced() -> None:
-    run = run_approved_goal_plan(_plan(budget=_budget(max_implementation_retries=0)))
-    run = run.record_execution_result(ExecutionResult("a", True, "implemented"))
-
-    with pytest.raises(BudgetExhaustedError, match="implementation retry budget exhausted"):
-        run.record_verification_outcome(
-            VerificationEvidence(
-                node_id="a",
-                gate=GateKind.TECHNICAL,
-                outcome=VerificationOutcome.RETRY,
-                evidence="still failing",
+@pytest.mark.parametrize(
+    ("behavior", "expected_state", "expected_node_state"),
+    [
+        (ExhaustionBehavior.STOP, GoalState.FAILED, TaskNodeState.BLOCKED),
+        (ExhaustionBehavior.ESCALATE, GoalState.ESCALATED, TaskNodeState.ESCALATED),
+        (ExhaustionBehavior.FALLBACK, GoalState.REVISING, TaskNodeState.RETRYABLE),
+    ],
+)
+def test_retry_budget_exhaustion_follows_configured_behavior(
+    behavior: ExhaustionBehavior,
+    expected_state: GoalState,
+    expected_node_state: TaskNodeState,
+) -> None:
+    run = run_approved_goal_plan(
+        _plan(
+            budget=_budget(
+                max_implementation_retries=0,
+                exhaustion_behavior=behavior,
             )
         )
+    )
+    run = run.record_execution_result(ExecutionResult("a", True, "implemented"))
+
+    run = run.record_verification_outcome(
+        VerificationEvidence(
+            node_id="a",
+            gate=GateKind.TECHNICAL,
+            outcome=VerificationOutcome.RETRY,
+            evidence="still failing",
+        )
+    )
+
+    assert run.state is expected_state
+    assert "implementation retry budget exhausted for a" in run.reason
+    assert run.graph is not None
+    assert run.graph.nodes[0].state is expected_node_state
+    if behavior is ExhaustionBehavior.FALLBACK:
+        assert run.pending_execution_request is not None
+        assert run.pending_execution_request.role == "fallback"
 
 
 def test_fail_stops_goal_as_failed() -> None:
@@ -297,6 +326,33 @@ def test_architecture_review_budget_is_consumed_and_limited() -> None:
 
     assert run.budget_consumption.architecture_review_calls_by_node["a"] == 1
     assert run.budget_consumption.architecture_review_calls_total == 1
+
+
+def test_architecture_review_budget_exhaustion_follows_configured_behavior() -> None:
+    plan = _plan(
+        graph=TaskGraph((TaskNode("a", "Review me"),)),
+        verification_plan=VerificationPlan(
+            (
+                VerificationGate(GateKind.ARCHITECTURE, ai_review_required=True),
+                VerificationGate(GateKind.ARCHITECTURE, ai_review_required=True),
+            )
+        ),
+        budget=_budget(
+            max_architecture_review_calls_per_node=1,
+            max_architecture_review_calls_per_goal=2,
+            exhaustion_behavior=ExhaustionBehavior.ESCALATE,
+        ),
+    )
+    run = run_approved_goal_plan(plan)
+    run = run.record_execution_result(ExecutionResult("a", True, "implemented"))
+    run = run.record_verification_outcome(_pass("a", GateKind.ARCHITECTURE))
+
+    run = run.record_verification_outcome(_pass("a", GateKind.ARCHITECTURE))
+
+    assert run.state is GoalState.ESCALATED
+    assert "architecture review budget exhausted for a" in run.reason
+    assert run.graph is not None
+    assert run.graph.nodes[0].state is TaskNodeState.ESCALATED
 
 
 def test_architecture_review_plan_must_fit_budget() -> None:
