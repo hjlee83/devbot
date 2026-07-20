@@ -26,6 +26,7 @@ from devbot.goal_execution_foundation import (
     VerificationGate,
     VerificationOutcome,
     VerificationPlan,
+    VerificationRequest,
     run_approved_goal_plan,
 )
 
@@ -238,7 +239,7 @@ def test_retry_returns_node_to_retryable_and_consumes_retry_budget() -> None:
     [
         (ExhaustionBehavior.STOP, GoalState.FAILED, TaskNodeState.BLOCKED),
         (ExhaustionBehavior.ESCALATE, GoalState.ESCALATED, TaskNodeState.ESCALATED),
-        (ExhaustionBehavior.FALLBACK, GoalState.REVISING, TaskNodeState.RETRYABLE),
+        (ExhaustionBehavior.FALLBACK, GoalState.EXECUTING, TaskNodeState.RUNNING),
     ],
 )
 def test_retry_budget_exhaustion_follows_configured_behavior(
@@ -272,6 +273,38 @@ def test_retry_budget_exhaustion_follows_configured_behavior(
     if behavior is ExhaustionBehavior.FALLBACK:
         assert run.pending_execution_request is not None
         assert run.pending_execution_request.role == "fallback"
+
+
+def test_fallback_request_result_can_reenter_verification() -> None:
+    run = run_approved_goal_plan(
+        _plan(
+            budget=_budget(
+                max_implementation_retries=0,
+                exhaustion_behavior=ExhaustionBehavior.FALLBACK,
+            )
+        )
+    )
+    run = run.record_execution_result(ExecutionResult("a", True, "implemented"))
+    run = run.record_verification_outcome(
+        VerificationEvidence(
+            node_id="a",
+            gate=GateKind.TECHNICAL,
+            outcome=VerificationOutcome.RETRY,
+            evidence="retry exhausted",
+        )
+    )
+
+    assert run.state is GoalState.EXECUTING
+    assert run.pending_execution_request is not None
+    assert run.pending_execution_request.role == "fallback"
+
+    run = run.record_execution_result(ExecutionResult("a", True, "fallback fixed it"))
+
+    assert run.state is GoalState.VERIFYING
+    assert run.pending_execution_request is None
+    assert run.pending_verification_requests == (
+        VerificationRequest("goal-118", "a", GateKind.TECHNICAL),
+    )
 
 
 def test_fail_stops_goal_as_failed() -> None:

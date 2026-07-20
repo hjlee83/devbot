@@ -43,6 +43,7 @@
 - ESCALATE: `test_escalate_stops_autonomous_progress`
 - Budget enforcement:
   `test_retry_budget_exhaustion_follows_configured_behavior`,
+  `test_fallback_request_result_can_reenter_verification`,
   `test_architecture_review_budget_is_consumed_and_limited`,
   `test_architecture_review_budget_exhaustion_follows_configured_behavior`,
   `test_architecture_review_plan_must_fit_budget`
@@ -52,21 +53,18 @@
 - `uv run ruff check src/devbot/goal_execution_foundation.py tests/test_goal_execution_foundation.py`
   - PASS
 - `uv run pytest tests/test_goal_execution_foundation.py`
-  - PASS, 18 passed
+  - PASS, 19 passed
 - `uv run ruff check .`
   - PASS
 - `uv run pytest`
-  - PASS, 1406 passed in 182.54s
+  - PASS, 1407 passed in 158.81s
 - `uv run devbot doctor`
-  - FAIL: startup self-update가 Task branch에서 중단됨
-    (`skip_reason=current branch is not main:
-    task/118-approved-goal-plan-execution-foundation`). 운영 전제 조건 실패이며
-    코드 테스트 실패는 아님.
+  - FAIL: startup self-update가 dirty operator checkout에서 중단됨
+    (`skip_reason=operator checkout dirty`). 현재 rework 변경 파일 때문에 발생한
+    운영 전제 조건 실패이며 코드 테스트 실패는 아님.
 - `uv run devbot --once --dry-run`
-  - FAIL: startup self-update가 Task branch에서 중단됨
-    (`skip_reason=current branch is not main:
-    task/118-approved-goal-plan-execution-foundation`). 운영 전제 조건 실패이며
-    코드 테스트 실패는 아님.
+  - PASS: startup self-update는 dirty checkout 때문에 dry-run에서 skip,
+    workspace cleanliness/current branch compatibility 진단 후 `NO_RUNNABLE_TASK`.
 
 ## 수동 검증
 

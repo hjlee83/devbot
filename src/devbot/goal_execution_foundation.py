@@ -570,8 +570,8 @@ class GoalRun:
         if self.plan.budget.exhaustion_behavior is ExhaustionBehavior.FALLBACK:
             return replace(
                 self,
-                state=GoalState.REVISING,
-                graph=graph.replace_node(evidence.node_id, state=TaskNodeState.RETRYABLE),
+                state=GoalState.EXECUTING,
+                graph=graph.replace_node(evidence.node_id, state=TaskNodeState.RUNNING),
                 pending_execution_request=ExecutionRequest(
                     self.plan.goal_id, evidence.node_id, role="fallback"
                 ),
