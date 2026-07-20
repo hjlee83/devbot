@@ -20,6 +20,10 @@
   추가했다.
 - GitHubClient, WorktreeManager, AgentRunner, validation command seam을 조립하는
   `DevBotGoalExecutionAdapter`와 `DevBotGoalVerificationAdapter`를 추가했다.
+- `DevBotGoalExecutionAdapter`가 prepared workspace의 approved Task Contract를
+  로드/검증한 뒤 agent prompt evidence로 전달한다.
+- `advance-approved` verification 경로가 architecture gate에서 기존
+  `ReviewService.process()` seam을 호출하도록 review gate를 조립한다.
 - `devbot goal advance-approved` CLI가 persisted state의 pending execution 또는
   verification을 한 단계 처리한다.
 - `devbot goal validate-approved/start-approved/status-approved/resume-approved`
@@ -66,18 +70,19 @@
   `test_devbot_goal_execution_adapter_reaches_worktree_and_agent_seams`,
   `test_devbot_goal_verification_adapter_reaches_validation_seam`
 - CLI wiring:
-  `test_goal_approved_validate_start_status_resume_commands_are_wired`
+  `test_goal_approved_validate_start_status_resume_commands_are_wired`,
+  `test_goal_review_gate_reaches_review_service`
 
 ## Validation 결과
 
 - `uv run ruff check src/devbot/goal_runtime_adapter.py src/devbot/main.py tests/test_goal_runtime_adapter.py tests/test_main.py`
   - PASS
-- `uv run pytest tests/test_goal_runtime_adapter.py tests/test_main.py::test_goal_approved_validate_start_status_resume_commands_are_wired`
-  - PASS, 14 passed
+- `uv run pytest tests/test_goal_runtime_adapter.py tests/test_main.py::test_goal_approved_validate_start_status_resume_commands_are_wired tests/test_main.py::test_goal_review_gate_reaches_review_service`
+  - PASS, 15 passed
 - `uv run ruff check .`
   - PASS
 - `uv run pytest`
-  - PASS, 1422 passed in 56.76s
+  - PASS, 1423 passed in 56.55s
 - `uv run devbot doctor`
   - FAIL: startup self-update가 dirty operator checkout에서 중단됨
     (`skip_reason=operator checkout dirty`). 현재 rework 변경 파일 때문에 발생한
@@ -91,6 +96,10 @@
 - Issue #141 요구사항과 비교해 runtime concern이 foundation module로 침투하지
   않도록 확인했다.
 - Scheduler 제출은 기존 `RuntimeScheduler.execute()`를 사용한다.
+- Execution adapter가 `GoalTaskBinding.contract_path`와 prepared workspace의
+  contract path 일치를 확인하고 Contract parser를 호출하는 것을 테스트로 확인했다.
+- Architecture verification이 기존 `ReviewService.process()` seam에 도달하는 것을
+  테스트로 확인했다.
 
 ## 남은 TODO와 제한
 

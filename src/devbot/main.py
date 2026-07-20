@@ -46,6 +46,11 @@ from devbot.github_review_submission import (
     submit_github_review,
 )
 from devbot.github_write_client import GitHubWriteClient
+from devbot.goal_execution_foundation import (
+    VerificationEvidence,
+    VerificationOutcome,
+    VerificationRequest,
+)
 from devbot.goal_executor import (
     ExecutionPlan,
     ExecutionReport,
@@ -57,6 +62,7 @@ from devbot.goal_runtime_adapter import (
     DevBotGoalExecutionAdapter,
     DevBotGoalVerificationAdapter,
     GoalRuntimeAdapterError,
+    GoalTaskBinding,
     load_approved_goal_plan,
     load_goal_runtime_state,
     process_pending_verification,
@@ -887,11 +893,37 @@ def _run_goal_approved_command(args: argparse.Namespace, config: DevBotConfig) -
                 print("advanced: execution")
                 return 0
             if state.run.pending_verification_requests:
+                agent_registry = load_agent_registry(config)
+                reviewer_backend = resolve_agent(agent_registry, "reviewer").backend
+                reviewer_runner = build_agent_runner(reviewer_backend, dry_run=config.dry_run)
+                github_client = GitHubClient(config.github_token)
+                write_client = GitHubWriteClient(config.github_token)
+                review_service = ReviewService(
+                    state_writer=IssueStateWriter(
+                        client=write_client,
+                        dry_run=config.dry_run,
+                    ),
+                    write_client=write_client,
+                    reviewer_runner=reviewer_runner,
+                    dry_run=config.dry_run,
+                    actor=config.reviewer_agent,
+                    review_loop_limit=config.review_loop_limit,
+                    current_head_sha=lambda repository, pull_request: next(
+                        candidate.head_sha
+                        for candidate in github_client.list_pull_requests(repository)
+                        if candidate.number == pull_request.number
+                    ),
+                )
                 run = process_pending_verification(
                     plan_document=document,
                     state_path=args.state,
                     adapter=DevBotGoalVerificationAdapter(
                         repositories=config.enabled_repositories,
+                        review_gate=_build_goal_review_gate(
+                            repositories=config.enabled_repositories,
+                            github_client=github_client,
+                            review_service=review_service,
+                        ),
                     ),
                 )
                 print(f"goal_id: {run.plan.goal_id}")
@@ -903,10 +935,67 @@ def _run_goal_approved_command(args: argparse.Namespace, config: DevBotConfig) -
             print(f"state: {run.state.value}")
             print("advanced: none")
             return 0
-    except (AgentRegistryError, RoutingError, GoalRuntimeAdapterError) as exc:
+    except (AgentRegistryError, RoutingError, GoalRuntimeAdapterError, GitHubClientError) as exc:
         print(f"goal approved 오류: {exc}", file=sys.stderr)
         return 1
     return 1
+
+
+def _build_goal_review_gate(
+    *,
+    repositories: Sequence[RepositoryConfig],
+    github_client: GitHubClient,
+    review_service: ReviewService,
+):
+    def review_gate(
+        request: VerificationRequest, binding: GoalTaskBinding
+    ) -> VerificationEvidence:
+        repository = next(
+            (
+                candidate
+                for candidate in repositories
+                if candidate.full_name == binding.repository
+            ),
+            None,
+        )
+        if repository is None:
+            raise GoalRuntimeAdapterError(f"repository is not configured: {binding.repository}")
+        issue = github_client.get_issue(repository, binding.issue_number)
+        pull_request = next(
+            (
+                candidate
+                for candidate in github_client.list_pull_requests(repository, state="open")
+                if candidate.head_ref == binding.branch
+            ),
+            None,
+        )
+        if pull_request is None:
+            raise GoalRuntimeAdapterError(
+                "no open Pull Request matches approved Goal binding: "
+                f"repository={binding.repository} branch={binding.branch}"
+            )
+        result = review_service.process(repository, issue, pull_request)
+        if result.status == "MERGE READY":
+            outcome = VerificationOutcome.PASS
+            unresolved_findings: tuple[str, ...] = ()
+        elif result.status == "REQUEST CHANGES":
+            outcome = VerificationOutcome.RETRY
+            unresolved_findings = (result.message or result.diagnostic or result.status,)
+        else:
+            outcome = VerificationOutcome.ESCALATE
+            unresolved_findings = (
+                result.message or result.diagnostic or "review did not complete",
+            )
+        evidence = result.message or result.diagnostic or f"review status={result.status}"
+        return VerificationEvidence(
+            node_id=request.node_id,
+            gate=request.gate,
+            outcome=outcome,
+            evidence=evidence,
+            unresolved_findings=unresolved_findings,
+        )
+
+    return review_gate
 
 
 def _run_role_command(args: argparse.Namespace, config: DevBotConfig) -> int:

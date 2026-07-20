@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from devbot.github_client import WorkflowRun
+from devbot.github_client import GitHubIssue, PullRequest, WorkflowRun
 from devbot.goal_execution_foundation import (
     AgentSelection,
     AITokenBudget,
@@ -21,7 +21,9 @@ from devbot.goal_execution_foundation import (
     TaskGraph,
     TaskNode,
     VerificationGate,
+    VerificationOutcome,
     VerificationPlan,
+    VerificationRequest,
 )
 from devbot.goal_planner import GoalPlan
 from devbot.goal_runtime_adapter import (
@@ -31,10 +33,11 @@ from devbot.goal_runtime_adapter import (
     write_approved_goal_plan,
 )
 from devbot.lock import ProcessLock
-from devbot.main import _run_startup_self_update, main
-from devbot.models import DevBotConfig
+from devbot.main import _build_goal_review_gate, _run_startup_self_update, main
+from devbot.models import DevBotConfig, RepositoryConfig, TaskState
 from devbot.release_ops import PublishOutcome, ReleasePreview, ReleaseReadiness, ReleaseStatus
 from devbot.repository_registry import load_registry
+from devbot.review import ReviewResult
 from devbot.startup import (
     STARTUP_SELF_UPDATE_ENV,
     StartupSelfUpdateError,
@@ -2808,3 +2811,79 @@ def test_goal_approved_validate_start_status_resume_commands_are_wired(
         == 0
     )
     assert "pending_execution: node=a role=implementer" in capsys.readouterr().out
+
+
+def test_goal_review_gate_reaches_review_service() -> None:
+    repository = RepositoryConfig(
+        owner="someone",
+        repo="myrepo",
+        enabled=True,
+        local_path=Path("/tmp/myrepo"),
+    )
+    issue = GitHubIssue(
+        repository=repository.full_name,
+        number=141,
+        title="Task 141",
+        body="body",
+        state="open",
+        labels=("devbot:review",),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    pull_request = PullRequest(
+        number=142,
+        head_ref="task/141-a",
+        head_sha="head-sha",
+        body="body",
+        html_url="https://github.example/pr/142",
+    )
+    calls: list[str] = []
+
+    class FakeGitHubClient:
+        def get_issue(
+            self, received_repository: RepositoryConfig, issue_number: int
+        ) -> GitHubIssue:
+            assert received_repository == repository
+            assert issue_number == 141
+            calls.append("issue")
+            return issue
+
+        def list_pull_requests(
+            self, received_repository: RepositoryConfig, *, state: str = "open"
+        ) -> list[PullRequest]:
+            assert received_repository == repository
+            assert state == "open"
+            calls.append("prs")
+            return [pull_request]
+
+    class FakeReviewService:
+        def process(
+            self,
+            received_repository: RepositoryConfig,
+            received_issue: GitHubIssue,
+            received_pull_request: PullRequest,
+        ) -> ReviewResult:
+            assert received_repository == repository
+            assert received_issue == issue
+            assert received_pull_request == pull_request
+            calls.append("review")
+            return ReviewResult(
+                triggered=True,
+                status="MERGE READY",
+                issue_state=TaskState.REVIEW,
+                message="review passed",
+            )
+
+    gate = _build_goal_review_gate(
+        repositories=(repository,),
+        github_client=FakeGitHubClient(),  # type: ignore[arg-type]
+        review_service=FakeReviewService(),  # type: ignore[arg-type]
+    )
+
+    evidence = gate(
+        VerificationRequest("goal-141", "a", GateKind.ARCHITECTURE),
+        GoalTaskBinding("a", repository.full_name, 141, "tasks/141-a.md", "task/141-a"),
+    )
+
+    assert evidence.outcome is VerificationOutcome.PASS
+    assert evidence.evidence == "review passed"
+    assert calls == ["issue", "prs", "review"]

@@ -354,6 +354,12 @@ def test_devbot_goal_execution_adapter_reaches_worktree_and_agent_seams(tmp_path
             assert linked_pull_request is None
             calls.append("worktree")
             worktree = tmp_path / "worktree"
+            contract_path = worktree / binding.contract_path
+            contract_path.parent.mkdir(parents=True)
+            contract_path.write_text(
+                "# Task 141: Task 141\n\n## Goal\n\nLoad this Contract before dispatch.\n",
+                encoding="utf-8",
+            )
             return PreparedWorkspace(
                 repository=received_repository,
                 branch="task/141-a",
@@ -362,27 +368,35 @@ def test_devbot_goal_execution_adapter_reaches_worktree_and_agent_seams(tmp_path
                 pull_request=None,
                 worktree_path=worktree,
                 reused=False,
+                contract_path=binding.contract_path,
             )
 
     class FakeRunner:
         def run_context(self, context: object, prompt: str) -> AgentRunResult:
             assert "Task 141" in prompt
+            assert "Load this Contract before dispatch" in prompt
             assert getattr(context, "canonical_branch") == "task/141-a"
             calls.append("agent")
             return AgentRunResult(executed=True, dry_run=False, message="done", returncode=0)
+
+    def parse_contract(contract_text: str) -> object:
+        assert "Load this Contract before dispatch" in contract_text
+        calls.append("contract")
+        return object()
 
     adapter = DevBotGoalExecutionAdapter(
         repositories=(repository,),
         github_client=FakeGitHubClient(),  # type: ignore[arg-type]
         worktree_manager=FakeWorktreeManager(),  # type: ignore[arg-type]
         agent_runner=FakeRunner(),  # type: ignore[arg-type]
+        parse_contract=parse_contract,
     )
 
     result = adapter.execute(request, binding)
 
     assert result.success is True
     assert result.evidence == "done"
-    assert calls == ["issue", "prs", "worktree", "agent"]
+    assert calls == ["issue", "prs", "worktree", "contract", "agent"]
 
 
 def test_devbot_goal_verification_adapter_reaches_validation_seam(tmp_path: Path) -> None:

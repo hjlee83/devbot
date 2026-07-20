@@ -18,6 +18,7 @@ from typing import Protocol
 
 from devbot.agent_execution import AgentExecutionContext, AgentRole
 from devbot.agents.base import AgentRunner
+from devbot.contract_metadata import ContractMetadataError, parse_contract_metadata
 from devbot.github_client import GitHubClient, PullRequest
 from devbot.goal_execution_foundation import (
     AgentSelection,
@@ -46,7 +47,15 @@ from devbot.goal_execution_foundation import (
     VerificationPlan,
     VerificationRequest,
 )
-from devbot.models import IssueTask, Job, JobType, Priority, RepositoryConfig, TaskState
+from devbot.models import (
+    IssueComment,
+    IssueTask,
+    Job,
+    JobType,
+    Priority,
+    RepositoryConfig,
+    TaskState,
+)
 from devbot.runtime_scheduler import RuntimeScheduler
 from devbot.validation import (
     CommandExecution,
@@ -211,6 +220,7 @@ class DevBotGoalExecutionAdapter:
     github_client: GitHubClient
     worktree_manager: WorktreeManager
     agent_runner: AgentRunner
+    parse_contract: Callable[[str], object] = parse_contract_metadata
 
     def execute(self, request: ExecutionRequest, binding: GoalTaskBinding) -> ExecutionResult:
         repository = _repository_for_binding(self.repositories, binding)
@@ -220,6 +230,12 @@ class DevBotGoalExecutionAdapter:
             binding,
         )
         prepared = self.worktree_manager.prepare(repository, issue, linked_pull_request)
+        contract_text = _load_and_validate_contract(
+            prepared.worktree_path,
+            binding,
+            prepared.contract_path,
+            self.parse_contract,
+        )
         context = AgentExecutionContext(
             repository=repository,
             prepared_workspace=prepared,
@@ -229,7 +245,20 @@ class DevBotGoalExecutionAdapter:
             execution_id=f"{request.goal_id}:{request.node_id}:{request.role}",
             role=AgentRole.IMPLEMENT if request.role != "reviewer" else AgentRole.REVIEW,
         )
-        prompt = build_agent_prompt(repository, issue, [])
+        prompt = build_agent_prompt(
+            repository,
+            issue,
+            [
+                IssueComment(
+                    author="devbot",
+                    body=(
+                        f"Approved Goal Task Contract `{binding.contract_path}` "
+                        "loaded and validated before dispatch.\n\n"
+                        f"{contract_text}"
+                    ),
+                )
+            ],
+        )
         result = self.agent_runner.run_context(context, prompt)
         return ExecutionResult(
             node_id=request.node_id,
@@ -597,6 +626,33 @@ def _summarize_command_execution(execution: CommandExecution) -> str:
         output = output[:240]
     command = " ".join(execution.command)
     return f"{command} exit={execution.returncode}" + (f" output={output}" if output else "")
+
+
+def _load_and_validate_contract(
+    worktree_path: Path,
+    binding: GoalTaskBinding,
+    prepared_contract_path: str | None,
+    parse_contract: Callable[[str], object],
+) -> str:
+    if prepared_contract_path is not None and prepared_contract_path != binding.contract_path:
+        raise GoalRuntimeAdapterError(
+            "prepared workspace Contract path does not match approved Goal binding: "
+            f"prepared={prepared_contract_path!r} approved={binding.contract_path!r}"
+        )
+    contract_path = worktree_path / binding.contract_path
+    try:
+        contract_text = contract_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise GoalRuntimeAdapterError(
+            f"cannot read approved Goal Task Contract {binding.contract_path!r}: {exc}"
+        ) from exc
+    try:
+        parse_contract(contract_text)
+    except ContractMetadataError as exc:
+        raise GoalRuntimeAdapterError(
+            f"approved Goal Task Contract {binding.contract_path!r} failed validation: {exc}"
+        ) from exc
+    return contract_text
 
 
 def _atomic_write_json(path: Path, data: Mapping[str, object]) -> None:
