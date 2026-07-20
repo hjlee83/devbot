@@ -654,25 +654,20 @@ class PollingService:
         cycle_id: str,
         *,
         job_type: JobType,
+        pull_requests: Sequence[PullRequest],
     ) -> tuple[PullRequest | None, list[PullRequestComment], PollingResult | None]:
         """Resolve `issue`'s linked PR and that PR's own conversation
         comments (not `issue`'s comments - see the module docstring: both
         rework detection and review-marker detection now key off the PR,
-        which is where review feedback actually gets posted)."""
-        try:
-            pull_requests = self.github_client.list_pull_requests(repository)
-        except Exception as exc:  # noqa: BLE001 - must not crash the loop
-            self.logger.error(
-                "PR 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
-            )
-            return (
-                None,
-                [],
-                PollingResult(
-                    status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
-                ),
-            )
+        which is where review feedback actually gets posted).
 
+        `pull_requests` (Issue #126) is the repository's open-PR list,
+        fetched exactly once per repository per cycle by the caller
+        (`_collect_job_candidates`) and reused across every REVIEW/REWORK
+        candidate in that repository this cycle - not re-fetched per Issue,
+        which is what made this call site the one candidate-collection
+        redundantly repeated `list_pull_requests` for every matching Issue.
+        """
         linked_pull_request = find_linked_pull_request(issue, pull_requests)
         if linked_pull_request is None:
             resolution_failure = _planner_pr_resolution_failure(issue)
@@ -767,18 +762,28 @@ class PollingService:
         rework_task: IssueTask,
         issue: GitHubIssue,
         cycle_id: str,
+        *,
+        pull_requests: Sequence[PullRequest],
     ) -> tuple[Job | None, int | None, PollingResult | None]:
         """A `devbot:rework` Issue is a REWORK candidate only when its
         linked PR has an unprocessed `@devbot` comment (CP-014-3); other-
         wise it is excluded (DEBUG) and stays `devbot:rework`, waiting for
         feedback. Returns the candidate's linked PR number alongside the
         `Job` (Task 020 CP-020-4) so a caller that later selects this Job
-        can report it without a second GitHub lookup."""
+        can report it without a second GitHub lookup.
+
+        `pull_requests` (Issue #126): the repository's open-PR list,
+        fetched once per repository per cycle by the caller."""
         if self.rework_service is None:
             return None, None, None
 
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, rework_task, issue, cycle_id, job_type=JobType.REWORK
+            repository,
+            rework_task,
+            issue,
+            cycle_id,
+            job_type=JobType.REWORK,
+            pull_requests=pull_requests,
         )
         if error is not None:
             return None, None, error
@@ -810,6 +815,8 @@ class PollingService:
         review_task: IssueTask,
         issue: GitHubIssue,
         cycle_id: str,
+        *,
+        pull_requests: Sequence[PullRequest],
     ) -> tuple[Job | None, int | None, PollingResult | None]:
         """A `devbot:review` Issue is a REVIEW candidate whenever its
         linked PR's current head commit has no auto-review marker yet
@@ -817,12 +824,20 @@ class PollingService:
         Issues - `@devbot` feedback only exists on `devbot:rework` Issues
         now, CP-014-2/CP-014-3). Returns the candidate's linked PR number
         alongside the `Job` (Task 020 CP-020-4), same as
-        `_rework_state_candidate`."""
+        `_rework_state_candidate`.
+
+        `pull_requests` (Issue #126): the repository's open-PR list,
+        fetched once per repository per cycle by the caller."""
         if self.review_service is None:
             return None, None, None
 
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, review_task, issue, cycle_id, job_type=JobType.REVIEW
+            repository,
+            review_task,
+            issue,
+            cycle_id,
+            job_type=JobType.REVIEW,
+            pull_requests=pull_requests,
         )
         if error is not None:
             return None, None, error
@@ -900,30 +915,54 @@ class PollingService:
                     )
 
             rework_tasks = [task for task in repo_tasks if task.state == TaskState.REWORK]
-            for rework_task in rework_tasks:
-                issue = issues_by_key[(rework_task.repository, rework_task.number)]
-                job, pr_number, error = self._rework_state_candidate(
-                    repository, rework_task, issue, cycle_id
-                )
-                if error is not None:
-                    hard_errors.append(error)
-                elif job is not None:
-                    candidates.append(job)
-                    if pr_number is not None:
-                        candidate_pr_numbers[(job.task.repository, job.task.number)] = pr_number
-
             review_tasks = [task for task in repo_tasks if task.state == TaskState.REVIEW]
-            for review_task in review_tasks:
-                issue = issues_by_key[(review_task.repository, review_task.number)]
-                job, pr_number, error = self._review_state_candidate(
-                    repository, review_task, issue, cycle_id
-                )
-                if error is not None:
-                    hard_errors.append(error)
-                elif job is not None:
-                    candidates.append(job)
-                    if pr_number is not None:
-                        candidate_pr_numbers[(job.task.repository, job.task.number)] = pr_number
+
+            if rework_tasks or review_tasks:
+                # Issue #126: fetch this repository's open-PR list exactly
+                # once per cycle here, instead of once per REWORK/REVIEW
+                # Issue - the same per-repo-per-cycle caching
+                # `_process_ready_to_merge_candidates` already uses.
+                try:
+                    pull_requests = self.github_client.list_pull_requests(repository)
+                except Exception as exc:  # noqa: BLE001 - must not crash the loop
+                    for task in (*rework_tasks, *review_tasks):
+                        self.logger.error(
+                            "PR 조회 실패 (%s #%d): %s", task.repository, task.number, exc
+                        )
+                        hard_errors.append(
+                            PollingResult(
+                                status=PollingStatus.ITERATION_ERROR, task=task, message=str(exc)
+                            )
+                        )
+                    continue
+
+                for rework_task in rework_tasks:
+                    issue = issues_by_key[(rework_task.repository, rework_task.number)]
+                    job, pr_number, error = self._rework_state_candidate(
+                        repository, rework_task, issue, cycle_id, pull_requests=pull_requests
+                    )
+                    if error is not None:
+                        hard_errors.append(error)
+                    elif job is not None:
+                        candidates.append(job)
+                        if pr_number is not None:
+                            candidate_pr_numbers[(job.task.repository, job.task.number)] = (
+                                pr_number
+                            )
+
+                for review_task in review_tasks:
+                    issue = issues_by_key[(review_task.repository, review_task.number)]
+                    job, pr_number, error = self._review_state_candidate(
+                        repository, review_task, issue, cycle_id, pull_requests=pull_requests
+                    )
+                    if error is not None:
+                        hard_errors.append(error)
+                    elif job is not None:
+                        candidates.append(job)
+                        if pr_number is not None:
+                            candidate_pr_numbers[(job.task.repository, job.task.number)] = (
+                                pr_number
+                            )
 
             if rework_tasks or review_tasks:
                 # An unmerged PR already occupies this repository's
@@ -2513,8 +2552,23 @@ class PollingService:
             )
 
         issue = issues_by_key[(selected.repository, selected.number)]
+        try:
+            pull_requests = self.github_client.list_pull_requests(repository)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "PR 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, selected, issue, cycle_id, job_type=JobType.REWORK
+            repository,
+            selected,
+            issue,
+            cycle_id,
+            job_type=JobType.REWORK,
+            pull_requests=pull_requests,
         )
         if error is not None:
             return error
@@ -2638,8 +2692,23 @@ class PollingService:
             )
 
         issue = issues_by_key[(selected.repository, selected.number)]
+        try:
+            pull_requests = self.github_client.list_pull_requests(repository)
+        except Exception as exc:  # noqa: BLE001 - must not crash the loop
+            self.logger.error(
+                "PR 조회 실패 (%s #%d): %s", selected.repository, selected.number, exc
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
+            )
+
         linked_pull_request, pr_comments, error = self._fetch_linked_pull_request_and_comments(
-            repository, selected, issue, cycle_id, job_type=JobType.REVIEW
+            repository,
+            selected,
+            issue,
+            cycle_id,
+            job_type=JobType.REVIEW,
+            pull_requests=pull_requests,
         )
         if error is not None:
             return error

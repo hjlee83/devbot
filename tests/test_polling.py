@@ -3406,6 +3406,59 @@ def test_already_reviewed_head_is_not_reviewed_again() -> None:
     review_service.process.assert_not_called()
 
 
+def test_list_pull_requests_called_once_per_repository_per_cycle_for_multiple_review_issues() -> (
+    None
+):
+    """Issue #126: candidate collection previously called `list_pull_requests`
+    once per REVIEW/REWORK Issue (N+1 API calls per cycle). With two
+    devbot:review Issues sharing one repository, the fetch must now happen
+    exactly once per repository per cycle and be reused for both."""
+    repo = _repo("myrepo")
+    config = _config([repo])
+    review_issue_a = _issue(repo.full_name, 7, labels=["devbot:review"], title="Fix bug A")
+    review_issue_b = _issue(repo.full_name, 8, labels=["devbot:review"], title="Fix bug B")
+    linked_pr_a = _pull_request(101, issue_number=7, head_sha="sha-1")
+    linked_pr_b = _pull_request(102, issue_number=8, head_sha="sha-2")
+    marker_a = _comment(
+        comment_id=99, body=f"# Review Summary\n\n{build_review_marker('sha-1')}"
+    )
+    marker_b = _comment(
+        comment_id=100, body=f"# Review Summary\n\n{build_review_marker('sha-2')}"
+    )
+    github_client = FakeGitHubClient(
+        {repo.full_name: [review_issue_a, review_issue_b]},
+        comments_by_issue={
+            (repo.full_name, 101): [marker_a],
+            (repo.full_name, 102): [marker_b],
+        },
+        pull_requests_by_repo={repo.full_name: [linked_pr_a, linked_pr_b]},
+    )
+    list_pull_requests_calls = 0
+    original_list_pull_requests = github_client.list_pull_requests
+
+    def _counting_list_pull_requests(repository, **kwargs):
+        nonlocal list_pull_requests_calls
+        list_pull_requests_calls += 1
+        return original_list_pull_requests(repository, **kwargs)
+
+    github_client.list_pull_requests = _counting_list_pull_requests
+
+    review_service = MagicMock()
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        review_service=review_service,
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.SKIPPED_ACTIVE_TASK
+    review_service.process.assert_not_called()
+    assert list_pull_requests_calls == 1
+
+
 def test_failed_job_releases_concurrency_slot() -> None:
     """CP-012-13: a failing job in one repository does not prevent another
     repository's job from completing in the same cycle - the failure
@@ -3501,6 +3554,40 @@ def test_repository_error_during_candidate_collection_does_not_block_other_repos
     results_by_repo = {result.task.repository: result for result in results}
     assert results_by_repo[repo_a.full_name].status is PollingStatus.ITERATION_ERROR
     assert results_by_repo[repo_b.full_name].status is PollingStatus.AGENT_COMPLETED
+
+
+def test_shared_list_pull_requests_failure_reports_error_for_every_affected_task() -> None:
+    """Issue #126: the single per-repository `list_pull_requests` fetch now
+    guards multiple REWORK/REVIEW Issues at once - a failure there must
+    still surface as its own `ITERATION_ERROR` for *each* affected task
+    (matching the old per-task try/except's external behaviour), not just
+    the first one."""
+    repo = _repo("myrepo")
+    config = _config([repo], max_concurrent_jobs=2)
+    rework_issue = _issue(repo.full_name, 1, labels=["devbot:rework"], title="Needs rework")
+    review_issue = _issue(repo.full_name, 2, labels=["devbot:review"], title="Needs review")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [rework_issue, review_issue]},
+    )
+
+    def _list_pull_requests(repository, **_kwargs):
+        raise RuntimeError("network exploded")
+
+    github_client.list_pull_requests = _list_pull_requests  # type: ignore[method-assign]
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        rework_service=MagicMock(),
+        review_service=MagicMock(),
+    )
+
+    results = service.run_cycle()
+
+    results_by_issue = {result.task.number: result for result in results}
+    assert results_by_issue[1].status is PollingStatus.ITERATION_ERROR
+    assert results_by_issue[2].status is PollingStatus.ITERATION_ERROR
 
 
 # --- Task 013: observability / debug logging -------------------------------
