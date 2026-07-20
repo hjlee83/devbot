@@ -22,7 +22,7 @@ Every write is validated against the Issue's *current* label state before
 touching GitHub. If more than one `devbot:*` state label is present (a
 stale manual edit, or a previous write that partially applied), the
 transition is validated against a single label chosen deterministically by
-`_LABEL_PRECEDENCE` rather than failing closed - and every successful write
+`devbot.state_labels.LABEL_PRECEDENCE` rather than failing closed - and every successful write
 strips *every* `devbot:*` state label before adding the target, so the
 Issue always ends a transition with exactly one (CP-014-1).
 
@@ -54,10 +54,14 @@ from devbot import observability
 from devbot.github_client import GitHubIssue
 from devbot.github_write_client import GitHubWriteClient
 from devbot.models import JobType, RepositoryConfig, TaskState
+from devbot.state_labels import (
+    ALL_STATE_LABELS,
+    matched_task_states,
+    state_label,
+    task_state_from_labels,
+)
 
 _LOGGER_NAME = "devbot"
-
-_STATE_LABEL_PREFIX = "devbot:"
 
 _ALLOWED_TRANSITIONS: dict[TaskState, tuple[TaskState, ...]] = {
     TaskState.READY: (TaskState.WORKING,),
@@ -75,22 +79,6 @@ _ALLOWED_TRANSITIONS: dict[TaskState, tuple[TaskState, ...]] = {
     TaskState.DONE: (),
 }
 
-# Deterministic precedence used only when an Issue carries more than one
-# `devbot:*` state label at once. Later-workflow / terminal states win over
-# earlier ones, since a leftover label from an earlier step is the more
-# likely source of the ambiguity than a leftover from a later one.
-_LABEL_PRECEDENCE: tuple[TaskState, ...] = (
-    TaskState.DONE,
-    TaskState.BLOCKED,
-    TaskState.WORKING,
-    TaskState.MANUAL_ACTION,
-    TaskState.REWORK,
-    TaskState.REVIEW,
-    TaskState.READY,
-)
-
-_ALL_STATE_LABELS = frozenset(f"{_STATE_LABEL_PREFIX}{state.value}" for state in TaskState)
-
 
 class InvalidStateTransitionError(RuntimeError):
     """Raised when the Issue's current label state does not allow the
@@ -103,30 +91,19 @@ class ClaimConflictError(InvalidStateTransitionError):
     Job - the other claim owns it."""
 
 
-def _state_label(state: TaskState) -> str:
-    return f"{_STATE_LABEL_PREFIX}{state.value}"
-
-
 def _matched_state_labels(issue: GitHubIssue) -> list[TaskState]:
     """Return every `devbot:*` state label present on `issue`, in
     `TaskState` declaration order."""
-    label_set = set(issue.labels)
-    return [state for state in TaskState if _state_label(state) in label_set]
+
+    return matched_task_states(issue.labels)
 
 
 def _current_state(issue: GitHubIssue) -> TaskState | None:
     """Resolve `issue`'s single current state, normalizing away ambiguity
-    (CP-014-1) via `_LABEL_PRECEDENCE` when more than one `devbot:*` label
+    (CP-014-1) via `LABEL_PRECEDENCE` when more than one `devbot:*` label
     is present. `None` means no `devbot:*` label at all."""
-    matched = _matched_state_labels(issue)
-    if not matched:
-        return None
-    if len(matched) == 1:
-        return matched[0]
-    for state in _LABEL_PRECEDENCE:
-        if state in matched:
-            return state
-    return matched[0]  # unreachable: _LABEL_PRECEDENCE covers every TaskState
+
+    return task_state_from_labels(issue.labels)
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +146,7 @@ class IssueStateWriter:
                 elif len(matched) > 1:
                     current = (
                         f"conflicting labels (normalized to {from_state.value}): "
-                        + ", ".join(_state_label(s) for s in matched)
+                        + ", ".join(state_label(s) for s in matched)
                     )
                 else:
                     current = from_state.value
@@ -181,8 +158,8 @@ class IssueStateWriter:
             if to_state is TaskState.WORKING:
                 self._claimed.add(key)
 
-        new_labels = [label for label in issue.labels if label not in _ALL_STATE_LABELS]
-        new_labels.append(_state_label(to_state))
+        new_labels = [label for label in issue.labels if label not in ALL_STATE_LABELS]
+        new_labels.append(state_label(to_state))
 
         try:
             if not self.dry_run:

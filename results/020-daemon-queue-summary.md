@@ -358,23 +358,18 @@ head `20eae73` 대상이었고, 이번이 실제 구현이 반영된 head `3eb54
   않는다.
 - **`_task_state_from_labels`(스케줄링용)와 `issue_state._current_state`
   (전이 검증용)의 라벨 충돌 해석 순서가 서로 다르다**는 기존 불일치를
-  이번에 발견했지만 고치지 않았다 - 계약의 "Preserve ... state-machine
-  behavior"를 지키기 위해 의도적으로 그대로 두었다(`docs/07-decisions.md`
-  2026-07-15 "Queue summary reuses issue_to_task's state resolution..."
-  참고). 실무에서는 `devbot:*` 라벨이 두 개 이상 붙는 경우 자체가
-  이례적이며(정상 흐름에서는 상태 전이가 항상 라벨을 하나로 정규화한다,
-  Task 014 CP-014-1), 발생하면 이제 `state_label_conflict` 로그로
-  드러난다.
+  이번에 발견했지만 Task 020에서는 고치지 않았다. 이 후속 개선은 Issue
+  #128에서 `devbot.state_labels` 공유 precedence로 완료됐다.
 - **`state_label_conflict` 진단은 로그만 남기고 자동 교정하지 않는다** -
   Task 020 범위가 "진단"이지 "교정"이 아니기 때문이다(계약 CP-020-8
   문구: "diagnosed", not "corrected").
 
 ## Improvement Suggestions
 
-- `_task_state_from_labels`와 `issue_state._current_state`가 서로 다른
+- ~~`_task_state_from_labels`와 `issue_state._current_state`가 서로 다른
   라벨 우선순위를 쓰는 기존 불일치를 하나의 공유 규칙으로 통합하는 후속
-  Task를 고려한다 - 지금은 두 경로 모두 "라벨이 하나뿐인 정상 케이스"에서만
-  일치가 보장된다.
+  Task를 고려한다.~~ 완료: Issue #128 / Task 128에서 `devbot.state_labels`로
+  polling과 issue-state validation의 다중 라벨 해석을 통합했다.
 - `max_concurrent_jobs > 1` 배포를 위해, `Cycle Result`를 단일 값 대신
   선택된 Job 개수만큼의 목록(`results` 배열)으로 확장하는 방안을 검토할
   수 있다 - 이번 Task는 계약 예시가 항상 단일 Job인 점에 맞춰 단일 값

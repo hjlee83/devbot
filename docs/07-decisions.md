@@ -123,21 +123,18 @@ infinite retries" and "a clear recovery hint" (Task 019 CP-019-9).
 ## 2026-07-15 — Queue summary reuses issue_to_task's state resolution; it does not add a second ambiguity rule
 Task 020's queue summary counts each `IssueTask` into exactly one of six
 stable-state buckets by summing `IssueTask.state` - the single `TaskState`
-`devbot.polling.issue_to_task` (via `_matched_task_states`, first match in
-`TaskState` declaration order: READY, WORKING, REVIEW, REWORK,
-MANUAL_ACTION, BLOCKED, DONE) already resolves from an Issue's raw GitHub
-labels for scheduling. This guarantees the summary can never double-count
-an Issue across buckets (CP-020-8) without inventing a second resolution
-rule that could disagree with what the scheduler itself sees. When an
-Issue carries more than one `devbot:*` state label, `log_state_label_conflict`
-(DEBUG) surfaces the anomaly and which state won - it does not change the
-count. Note this first-match order is *not* the same precedence
-`devbot.issue_state._current_state` uses when validating a label
-*transition* (`_LABEL_PRECEDENCE`: DONE, BLOCKED, WORKING, MANUAL_ACTION,
-REWORK, REVIEW, READY - closer to reverse order) - that pre-existing
-inconsistency between candidate collection and transition validation is
-unchanged by this Task and out of scope here; see Improvement Suggestions
-in `results/020-daemon-queue-summary.md`.
+`devbot.polling.issue_to_task` resolves from an Issue's raw GitHub labels for
+scheduling. This guarantees the summary can never double-count an Issue across
+buckets (CP-020-8). When an Issue carries more than one `devbot:*` state label,
+`log_state_label_conflict` (DEBUG) surfaces the anomaly and which state won - it
+does not change the count.
+
+Task 128 removed the old split-brain behavior between candidate collection and
+transition validation. Both `devbot.polling` and `devbot.issue_state` now use
+`devbot.state_labels.task_state_from_labels()`, whose shared precedence is
+DONE, BLOCKED, WORKING, MANUAL_ACTION, REWORK, REVIEW, READY. Later-workflow and
+terminal states win over earlier states because a stale earlier label is the
+more likely ambiguity source after a partial label write or manual edit.
 
 ## 2026-07-15 — Agent outcome classification closes the contract-only-PR false-review path
 Task 021's motivating incident (Issue #41): an implementer Agent stopped
