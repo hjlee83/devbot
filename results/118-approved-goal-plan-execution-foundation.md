@@ -46,6 +46,7 @@
   `test_fallback_request_result_can_reenter_verification`,
   `test_architecture_review_budget_is_consumed_and_limited`,
   `test_architecture_review_budget_exhaustion_follows_configured_behavior`,
+  `test_architecture_review_budget_fallback_retries_verification_without_ai_budget`,
   `test_architecture_review_plan_must_fit_budget`
 
 ## Validation 결과
@@ -53,11 +54,11 @@
 - `uv run ruff check src/devbot/goal_execution_foundation.py tests/test_goal_execution_foundation.py`
   - PASS
 - `uv run pytest tests/test_goal_execution_foundation.py`
-  - PASS, 19 passed
+  - PASS, 20 passed
 - `uv run ruff check .`
   - PASS
 - `uv run pytest`
-  - PASS, 1407 passed in 158.81s
+  - PASS, 1408 passed in 151.43s
 - `uv run devbot doctor`
   - FAIL: startup self-update가 dirty operator checkout에서 중단됨
     (`skip_reason=operator checkout dirty`). 현재 rework 변경 파일 때문에 발생한

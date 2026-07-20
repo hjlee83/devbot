@@ -388,6 +388,45 @@ def test_architecture_review_budget_exhaustion_follows_configured_behavior() -> 
     assert run.graph.nodes[0].state is TaskNodeState.ESCALATED
 
 
+def test_architecture_review_budget_fallback_retries_verification_without_ai_budget() -> None:
+    plan = _plan(
+        graph=TaskGraph((TaskNode("a", "Review me"),)),
+        verification_plan=VerificationPlan(
+            (
+                VerificationGate(GateKind.ARCHITECTURE, ai_review_required=True),
+                VerificationGate(GateKind.ARCHITECTURE, ai_review_required=True),
+            )
+        ),
+        budget=_budget(
+            max_architecture_review_calls_per_node=1,
+            max_architecture_review_calls_per_goal=2,
+            exhaustion_behavior=ExhaustionBehavior.FALLBACK,
+        ),
+    )
+    run = run_approved_goal_plan(plan)
+    run = run.record_execution_result(ExecutionResult("a", True, "implemented"))
+    run = run.record_verification_outcome(_pass("a", GateKind.ARCHITECTURE))
+
+    run = run.record_verification_outcome(_pass("a", GateKind.ARCHITECTURE))
+
+    assert run.state is GoalState.VERIFYING
+    assert "architecture review budget exhausted for a" in run.reason
+    assert run.pending_verification_requests == (
+        VerificationRequest(
+            "goal-118",
+            "a",
+            GateKind.ARCHITECTURE,
+            consumes_ai_budget=False,
+        ),
+    )
+
+    run = run.record_verification_outcome(_pass("a", GateKind.ARCHITECTURE))
+    run = run.request_next_execution()
+
+    assert run.state is GoalState.REVIEW_REQUESTED
+    assert run.budget_consumption.architecture_review_calls_by_node["a"] == 1
+
+
 def test_architecture_review_plan_must_fit_budget() -> None:
     with pytest.raises(PlanValidationError, match="per-goal budget"):
         _plan(

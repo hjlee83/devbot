@@ -489,6 +489,7 @@ class GoalRun:
                     evidence=evidence,
                     reason=str(error),
                     graph=self._graph(),
+                    fallback_verification=True,
                 )
 
         graph = self._graph()
@@ -555,7 +556,12 @@ class GoalRun:
         )
 
     def _apply_budget_exhaustion(
-        self, *, evidence: VerificationEvidence, reason: str, graph: TaskGraph
+        self,
+        *,
+        evidence: VerificationEvidence,
+        reason: str,
+        graph: TaskGraph,
+        fallback_verification: bool = False,
     ) -> GoalRun:
         all_evidence = self.evidence + (evidence,)
         if self.plan.budget.exhaustion_behavior is ExhaustionBehavior.ESCALATE:
@@ -568,6 +574,23 @@ class GoalRun:
                 reason=reason,
             )
         if self.plan.budget.exhaustion_behavior is ExhaustionBehavior.FALLBACK:
+            if fallback_verification:
+                return replace(
+                    self,
+                    state=GoalState.VERIFYING,
+                    graph=graph.replace_node(evidence.node_id, state=TaskNodeState.VERIFYING),
+                    pending_execution_request=None,
+                    pending_verification_requests=(
+                        VerificationRequest(
+                            self.plan.goal_id,
+                            evidence.node_id,
+                            evidence.gate,
+                            consumes_ai_budget=False,
+                        ),
+                    ),
+                    evidence=all_evidence,
+                    reason=reason,
+                )
             return replace(
                 self,
                 state=GoalState.EXECUTING,
