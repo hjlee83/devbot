@@ -736,3 +736,36 @@
   강제하던 것을 PLANNING 시점의 invariant classification 기반 선택적
   호출로 바꾸고, budget에 per-node뿐 아니라 per-Goal 총량 상한을
   추가했다. 상세는 `ADR-005~007`, `docs/16~18`의 "Correction" 절 참고.
+
+- [x] Issue #122: repository registration with `devbot init`. 필수
+      `WORKSPACE_ROOT` 기반 저장소 discovery 대신, 대상 저장소 내부에서
+      실행하는 명시적 등록으로 대체한다 - `devbot.repository_registry`
+      (`src/devbot/repository_registry.py`)가 `<repo>/.devbot/config.yaml`
+      (owner/repo/enabled/default_branch/automerge_allowed/is_self_repo/
+      publish_strategy - `config/repositories.yaml` 항목과 동일한 필드)과
+      전역 registry(`~/.devbot/registry.yaml` 기본값,
+      `DEVBOT_REGISTRY_PATH`로 override, 절대 경로만 저장)를 분리해서
+      관리한다. `devbot init [--owner] [--repo] [--default-branch]
+      [--automerge-allowed] [--unregister]`은 `load_config()` 호출 전에
+      early-exit으로 처리된다(`WORKSPACE_ROOT`/`GITHUB_TOKEN`/
+      `config/repositories.yaml`이 아직 없어도 동작해야 하므로). owner/repo는
+      `--owner`/`--repo` 명시가 없으면 `origin` remote URL에서 추론하고,
+      둘 다 없으면 추측하지 않고 명시적으로 실패한다. `.devbot/config.yaml`
+      쓰기와 registry 등록 모두 재실행에 멱등이며, 이미 설정된 필드를
+      기본값으로 되돌리지 않는다. `devbot.config.load_config()`는
+      `WORKSPACE_ROOT`를 선택 사항으로 바꾸고(`DevBotConfig.workspace_root:
+      Path | None`), legacy(`WORKSPACE_ROOT` + `config/repositories.yaml`,
+      설정된 경우에만 로드)와 registry 두 소스를 합집합으로 관리한다 -
+      같은 owner/repo가 두 소스에 동시에 있으면 fail closed
+      (`ConfigError`). registry 쪽의 개별 문제(경로 이동/삭제, 같은
+      owner/repo 중복 등록, 손상된 `.devbot/config.yaml`)는 절대 예외를
+      던지지 않고 `RegistryDiagnostic`으로 수집해 다른 정상 저장소 관리를
+      막지 않으며, `DevBotConfig.registry_diagnostics`로 노출되고
+      `devbot doctor`의 새 `repository_registrations` 체크(비-fatal, 다른
+      체크와 동일한 패턴)로도 확인할 수 있다. `WorktreeManager.workspace_root`
+      는 애초에 클래스 내부에서 전혀 읽히지 않는 필드였음을 확인하고 같이
+      Optional로 넓혔다. Goal/Task/verification-gate 재설계, implementer/
+      reviewer/rework role 선택 변경, repository-map/자동 context 선택,
+      GitHub Release/패키지 배포 변경, `WORKSPACE_ROOT` 호환성 제거는 이번
+      범위에 포함하지 않았다(`src/devbot/repository_registry.py`,
+      `docs/19-repository-registration.md`).

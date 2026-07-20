@@ -46,8 +46,7 @@ Key invariants:
 ```bash
 uv sync
 cp .env.example .env
-# edit .env: set WORKSPACE_ROOT (directory holding your managed repository
-# checkouts) and GITHUB_TOKEN (read access to those repositories)
+# edit .env: set GITHUB_TOKEN (read access to the repositories you register)
 ```
 
 `UV_CACHE_DIR` defaults to `.uv-cache` in `.env.example` and the bundled
@@ -55,9 +54,43 @@ verification scripts. Keeping the `uv` cache inside the repository avoids
 permission errors in sandboxed review/agent environments that cannot read or
 write `~/.cache/uv`.
 
-Edit `config/repositories.yaml` to list the repositories DevBot manages.
-`local_path` for each repository is derived as `WORKSPACE_ROOT / repo`.
-Only `enabled: true` repositories are validated and managed.
+### Registering a repository (`devbot init`, Issue #122)
+
+DevBot's own checkout and the repositories it manages no longer need to share
+a parent directory. From inside each target repository:
+
+```bash
+cd /path/to/some-repo
+uv run --project /path/to/devbot devbot init
+```
+
+This creates `<repo>/.devbot/config.yaml` (that repository's own
+`owner`/`repo`/`enabled`/`default_branch`/`automerge_allowed`/
+`is_self_repo`/`publish_strategy` settings - the same fields a
+`config/repositories.yaml` entry carries) and records the repository's
+absolute path in a global registry (`~/.devbot/registry.yaml` by default,
+overridable via `DEVBOT_REGISTRY_PATH`). Re-running `devbot init` in the same
+repository is idempotent - it never duplicates the registration or silently
+reverts a setting a previous run already made. `devbot init --unregister`
+removes the registration (the repository-local `.devbot/config.yaml` is left
+in place). `--owner`/`--repo` override what would otherwise be inferred from
+the repository's `origin` remote; `--default-branch`/`--automerge-allowed` set
+the corresponding fields.
+
+`devbot doctor` reports any registered repository whose path has moved or
+been deleted, or whose `owner/repo` collides with another registration, as an
+actionable (but non-fatal) `repository_registrations` check.
+
+### Legacy: `WORKSPACE_ROOT` + `config/repositories.yaml`
+
+The original, still-supported configuration: set `WORKSPACE_ROOT` (the
+directory holding every managed repository checkout) in `.env`, and list
+repositories in `config/repositories.yaml` - each entry's `local_path` is
+derived as `WORKSPACE_ROOT / repo`, and only `enabled: true` repositories are
+validated and managed. This path is unchanged and keeps working exactly as
+before; it and `devbot init`-registered repositories may be used together -
+DevBot manages the union of both sources (an error if the same `owner/repo`
+appears in both).
 
 ## Run
 
@@ -173,8 +206,9 @@ docs/                    architecture, standards, runbooks, decisions
 tasks/                   Task Contracts
 results/                 implementation evidence and handoff records
 src/devbot/
-  main.py                CLI entry point (--once / --dry-run / continuous)
-  config.py              .env + config/repositories.yaml loader
+  main.py                CLI entry point (--once / --dry-run / continuous / init)
+  config.py              .env + config/repositories.yaml + registry loader
+  repository_registry.py `devbot init`: .devbot/config.yaml + global registry
   lock.py                single-process file lock
   models.py              configuration and queue data structures
   queue.py               global queue selection rules (no network)

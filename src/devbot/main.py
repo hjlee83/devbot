@@ -101,6 +101,14 @@ from devbot.release_recommendation_aggregation import (
     build_release_recommendation_aggregation,
     render_release_recommendation_aggregation,
 )
+from devbot.repository_registry import (
+    InitResult,
+    RepositoryRegistrationError,
+    default_registry_path,
+    find_git_repository_root,
+    initialize_repository,
+    unregister_repository,
+)
 from devbot.review import ReviewService
 from devbot.review_decision import (
     ReviewDecisionError,
@@ -1378,6 +1386,38 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="CI 검증용으로 Agent 실행 파일/사용자 로그인 검사를 생략합니다.",
     )
+    init_parser = subparsers.add_parser(
+        "init",
+        help=(
+            "현재 디렉터리의 Git 저장소를 DevBot에 등록합니다 (Issue #122) - "
+            "저장소별 .devbot/config.yaml을 만들고 전역 registry에 절대 경로를 기록합니다."
+        ),
+    )
+    init_parser.add_argument(
+        "--owner",
+        default=None,
+        help="GitHub owner. 생략하면 'origin' remote URL에서 추론합니다.",
+    )
+    init_parser.add_argument(
+        "--repo",
+        default=None,
+        help="GitHub repo 이름. 생략하면 'origin' remote URL에서 추론합니다.",
+    )
+    init_parser.add_argument(
+        "--default-branch",
+        default=None,
+        help="기본 브랜치 이름 (기본값: 기존 설정 유지, 없으면 'main').",
+    )
+    init_parser.add_argument(
+        "--automerge-allowed",
+        action="store_true",
+        help="이 저장소에 자동 머지 게이트(B2)를 허용합니다 (기본값: false).",
+    )
+    init_parser.add_argument(
+        "--unregister",
+        action="store_true",
+        help="현재 저장소를 registry에서 제거합니다 (.devbot/config.yaml은 남겨 둡니다).",
+    )
     return parser.parse_args(argv)
 
 
@@ -1471,6 +1511,54 @@ def _run_doctor_command(config: DevBotConfig, *, ci: bool = False) -> int:
     report = build_doctor_report(config, ci=ci)
     print(render_doctor_report(report))
     return 0 if report.safe_to_start else 1
+
+
+def _render_init_result(result: InitResult) -> str:
+    lines = [
+        f"저장소: {result.repo_root}",
+        f"owner/repo: {result.owner}/{result.repo}",
+        f"로컬 설정: {result.local_config_path}"
+        + (" (신규 작성)" if result.local_config_created else " (변경 없음, 이미 최신)"),
+        f"registry: {result.registry_path}"
+        + (" (이미 등록됨)" if result.already_registered else " (새로 등록)"),
+    ]
+    return "\n".join(lines)
+
+
+def _run_init_command(args: argparse.Namespace) -> int:
+    """`devbot init` (Issue #122): deliberately does not call `load_config()`
+    - it must work before `WORKSPACE_ROOT`/`GITHUB_TOKEN`/`config/
+    repositories.yaml` exist at all, since bootstrapping that configuration
+    is exactly what this command is for."""
+    repo_root = Path.cwd()
+
+    if args.unregister:
+        try:
+            git_root = find_git_repository_root(repo_root)
+            removed = unregister_repository(default_registry_path(), git_root)
+        except RepositoryRegistrationError as exc:
+            print(f"devbot init 오류: {exc}", file=sys.stderr)
+            return 1
+        if removed:
+            print(f"{git_root}의 registry 등록을 해제했습니다.")
+        else:
+            print(f"{git_root}는 registry에 등록되어 있지 않았습니다.")
+        return 0
+
+    try:
+        result = initialize_repository(
+            repo_root,
+            owner=args.owner,
+            repo=args.repo,
+            default_branch=args.default_branch,
+            automerge_allowed=args.automerge_allowed,
+        )
+    except RepositoryRegistrationError as exc:
+        print(f"devbot init 오류: {exc}", file=sys.stderr)
+        return 1
+
+    print(_render_init_result(result))
+    return 0
 
 
 def _sweep_stuck_working_issues(
@@ -1582,16 +1670,26 @@ def main(
     argv: Sequence[str] | None = None,
     env_path: Path | str | None = None,
     repositories_path: Path | str | None = None,
+    registry_path: Path | str | None = None,
 ) -> int:
     args = _parse_args(argv)
     if args.version:
         print(f"devbot {authoritative_version()}")
         return 0
 
+    # Issue #122: `devbot init` deliberately runs before `load_config()` -
+    # it must work even when WORKSPACE_ROOT/GITHUB_TOKEN/config/
+    # repositories.yaml do not exist yet, since creating that configuration
+    # (or the registry-based replacement for it) is exactly its job.
+    if args.command == "init":
+        return _run_init_command(args)
+
     logger = _configure_logging()
 
     try:
-        config = load_config(env_path=env_path, repositories_path=repositories_path)
+        config = load_config(
+            env_path=env_path, repositories_path=repositories_path, registry_path=registry_path
+        )
     except ConfigError as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 1

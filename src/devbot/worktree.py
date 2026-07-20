@@ -317,9 +317,15 @@ def _parse_worktree_list(raw: str) -> list[_WorktreeEntry]:
 @dataclass
 class WorktreeManager:
     """Prepares, reuses, reports on, and cleans up isolated Job worktrees
-    for one `workspace_root` (Scope §3/§8)."""
+    for one `workspace_root` (Scope §3/§8).
 
-    workspace_root: Path
+    `workspace_root` is stored but never read by this class - every actual
+    path this class computes (`worktree_path`/`worktree_root`) derives from
+    `repository.local_path` instead. Kept `Path | None` (Issue #122:
+    `DevBotConfig.workspace_root` is now optional) purely so callers do not
+    need a placeholder value for a field this class does not use."""
+
+    workspace_root: Path | None = None
     is_dirty: Callable[[Path], bool] = field(default=_is_dirty)
     # CP-B0-1: mirrors every sibling service's `dry_run` constructor kwarg
     # (DeliveryService, ReworkService, ReviewService, ...). Guards
