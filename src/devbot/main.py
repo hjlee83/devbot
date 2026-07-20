@@ -46,6 +46,11 @@ from devbot.github_review_submission import (
     submit_github_review,
 )
 from devbot.github_write_client import GitHubWriteClient
+from devbot.goal_execution_foundation import (
+    VerificationEvidence,
+    VerificationOutcome,
+    VerificationRequest,
+)
 from devbot.goal_executor import (
     ExecutionPlan,
     ExecutionReport,
@@ -53,6 +58,19 @@ from devbot.goal_executor import (
     execute_goal,
 )
 from devbot.goal_planner import GoalPlan, fetch_goal_plan
+from devbot.goal_runtime_adapter import (
+    DevBotGoalExecutionAdapter,
+    DevBotGoalVerificationAdapter,
+    GoalRuntimeAdapterError,
+    GoalTaskBinding,
+    load_approved_goal_plan,
+    load_goal_runtime_state,
+    process_pending_verification,
+    render_goal_runtime_status,
+    resume_goal_runtime,
+    start_goal_runtime,
+    submit_pending_execution,
+)
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
 from devbot.models import AgentOutcome, DevBotConfig, IssueComment, RepositoryConfig
@@ -328,6 +346,39 @@ def _build_goal_parser(subparsers: argparse._SubParsersAction) -> None:
             "goal execute와 동일하지만, 'implementer' Role이 어떤 Agent로 라우팅될지도 "
             "함께 보여줍니다 (Agent를 실제로 호출하지는 않습니다)."
         ),
+    )
+    validate_parser = goal_subparsers.add_parser(
+        "validate-approved",
+        help="versioned approved GoalExecutionPlan 문서를 검증합니다.",
+    )
+    validate_parser.add_argument(
+        "--plan", required=True, type=Path, help="approved plan JSON path."
+    )
+    start_parser = goal_subparsers.add_parser(
+        "start-approved",
+        help="approved GoalExecutionPlan을 로드해 runtime state를 시작합니다.",
+    )
+    start_parser.add_argument("--plan", required=True, type=Path, help="approved plan JSON path.")
+    start_parser.add_argument("--state", required=True, type=Path, help="runtime state JSON path.")
+    status_parser = goal_subparsers.add_parser(
+        "status-approved",
+        help="persisted Goal runtime state를 읽기 전용으로 조회합니다.",
+    )
+    status_parser.add_argument("--state", required=True, type=Path, help="runtime state JSON path.")
+    resume_parser = goal_subparsers.add_parser(
+        "resume-approved",
+        help="persisted Goal runtime state를 안전하게 resume합니다.",
+    )
+    resume_parser.add_argument("--state", required=True, type=Path, help="runtime state JSON path.")
+    advance_parser = goal_subparsers.add_parser(
+        "advance-approved",
+        help="persisted Goal runtime state의 pending request를 한 단계 처리합니다.",
+    )
+    advance_parser.add_argument(
+        "--plan", required=True, type=Path, help="approved plan JSON path."
+    )
+    advance_parser.add_argument(
+        "--state", required=True, type=Path, help="runtime state JSON path."
     )
 
 
@@ -779,6 +830,174 @@ def _run_goal_execute_command(
     return 0 if report.execution_plan.readiness.ready else 1
 
 
+def _run_goal_approved_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        if args.goal_command == "validate-approved":
+            document = load_approved_goal_plan(args.plan)
+            print(f"goal_id: {document.plan.goal_id}")
+            print(f"schema_version: {document.schema_version}")
+            print(f"task_count: {len(document.plan.task_graph.nodes)}")
+            print("valid: yes")
+            return 0
+        if args.goal_command == "start-approved":
+            document = load_approved_goal_plan(args.plan)
+            run = start_goal_runtime(document, args.state)
+            print(f"goal_id: {run.plan.goal_id}")
+            print(f"state: {run.state.value}")
+            if run.pending_execution_request is not None:
+                request = run.pending_execution_request
+                print(f"pending_execution: node={request.node_id} role={request.role}")
+            else:
+                print("pending_execution: none")
+            print(f"state_path: {args.state}")
+            return 0
+        if args.goal_command == "status-approved":
+            print(render_goal_runtime_status(load_goal_runtime_state(args.state)))
+            return 0
+        if args.goal_command == "resume-approved":
+            run = resume_goal_runtime(args.state)
+            print(f"goal_id: {run.plan.goal_id}")
+            print(f"state: {run.state.value}")
+            if run.pending_execution_request is not None:
+                request = run.pending_execution_request
+                print(f"pending_execution: node={request.node_id} role={request.role}")
+            else:
+                print("pending_execution: none")
+            return 0
+        if args.goal_command == "advance-approved":
+            document = load_approved_goal_plan(args.plan)
+            state = load_goal_runtime_state(args.state)
+            if state.run.pending_execution_request is not None:
+                agent_registry = load_agent_registry(config)
+                implementer_backend = resolve_agent(agent_registry, "implementer").backend
+                runner = build_agent_runner(implementer_backend, dry_run=config.dry_run)
+                run = submit_pending_execution(
+                    plan_document=document,
+                    state_path=args.state,
+                    scheduler=RuntimeScheduler(
+                        worker_count=config.max_concurrent_jobs,
+                        ai_concurrency=config.ai_concurrency,
+                    ),
+                    adapter=DevBotGoalExecutionAdapter(
+                        repositories=config.enabled_repositories,
+                        github_client=GitHubClient(config.github_token),
+                        worktree_manager=WorktreeManager(
+                            workspace_root=config.workspace_root,
+                            dry_run=config.dry_run,
+                        ),
+                        agent_runner=runner,
+                    ),
+                )
+                print(f"goal_id: {run.plan.goal_id}")
+                print(f"state: {run.state.value}")
+                print("advanced: execution")
+                return 0
+            if state.run.pending_verification_requests:
+                agent_registry = load_agent_registry(config)
+                reviewer_backend = resolve_agent(agent_registry, "reviewer").backend
+                reviewer_runner = build_agent_runner(reviewer_backend, dry_run=config.dry_run)
+                github_client = GitHubClient(config.github_token)
+                write_client = GitHubWriteClient(config.github_token)
+                review_service = ReviewService(
+                    state_writer=IssueStateWriter(
+                        client=write_client,
+                        dry_run=config.dry_run,
+                    ),
+                    write_client=write_client,
+                    reviewer_runner=reviewer_runner,
+                    dry_run=config.dry_run,
+                    actor=config.reviewer_agent,
+                    review_loop_limit=config.review_loop_limit,
+                    current_head_sha=lambda repository, pull_request: next(
+                        candidate.head_sha
+                        for candidate in github_client.list_pull_requests(repository)
+                        if candidate.number == pull_request.number
+                    ),
+                )
+                run = process_pending_verification(
+                    plan_document=document,
+                    state_path=args.state,
+                    adapter=DevBotGoalVerificationAdapter(
+                        repositories=config.enabled_repositories,
+                        review_gate=_build_goal_review_gate(
+                            repositories=config.enabled_repositories,
+                            github_client=github_client,
+                            review_service=review_service,
+                        ),
+                    ),
+                )
+                print(f"goal_id: {run.plan.goal_id}")
+                print(f"state: {run.state.value}")
+                print("advanced: verification")
+                return 0
+            run = resume_goal_runtime(args.state)
+            print(f"goal_id: {run.plan.goal_id}")
+            print(f"state: {run.state.value}")
+            print("advanced: none")
+            return 0
+    except (AgentRegistryError, RoutingError, GoalRuntimeAdapterError, GitHubClientError) as exc:
+        print(f"goal approved 오류: {exc}", file=sys.stderr)
+        return 1
+    return 1
+
+
+def _build_goal_review_gate(
+    *,
+    repositories: Sequence[RepositoryConfig],
+    github_client: GitHubClient,
+    review_service: ReviewService,
+):
+    def review_gate(
+        request: VerificationRequest, binding: GoalTaskBinding
+    ) -> VerificationEvidence:
+        repository = next(
+            (
+                candidate
+                for candidate in repositories
+                if candidate.full_name == binding.repository
+            ),
+            None,
+        )
+        if repository is None:
+            raise GoalRuntimeAdapterError(f"repository is not configured: {binding.repository}")
+        issue = github_client.get_issue(repository, binding.issue_number)
+        pull_request = next(
+            (
+                candidate
+                for candidate in github_client.list_pull_requests(repository, state="open")
+                if candidate.head_ref == binding.branch
+            ),
+            None,
+        )
+        if pull_request is None:
+            raise GoalRuntimeAdapterError(
+                "no open Pull Request matches approved Goal binding: "
+                f"repository={binding.repository} branch={binding.branch}"
+            )
+        result = review_service.process(repository, issue, pull_request)
+        if result.status == "MERGE READY":
+            outcome = VerificationOutcome.PASS
+            unresolved_findings: tuple[str, ...] = ()
+        elif result.status == "REQUEST CHANGES":
+            outcome = VerificationOutcome.RETRY
+            unresolved_findings = (result.message or result.diagnostic or result.status,)
+        else:
+            outcome = VerificationOutcome.ESCALATE
+            unresolved_findings = (
+                result.message or result.diagnostic or "review did not complete",
+            )
+        evidence = result.message or result.diagnostic or f"review status={result.status}"
+        return VerificationEvidence(
+            node_id=request.node_id,
+            gate=request.gate,
+            outcome=outcome,
+            evidence=evidence,
+            unresolved_findings=unresolved_findings,
+        )
+
+    return review_gate
+
+
 def _run_role_command(args: argparse.Namespace, config: DevBotConfig) -> int:
     try:
         agent_registry = load_agent_registry(config)
@@ -828,6 +1047,14 @@ def _run_goal_command(args: argparse.Namespace, config: DevBotConfig) -> int:
         return _run_goal_execute_command(args, config)
     if args.goal_command == "dispatch":
         return _run_goal_execute_command(args, config, show_role_resolution=True)
+    if args.goal_command in {
+        "validate-approved",
+        "start-approved",
+        "status-approved",
+        "resume-approved",
+        "advance-approved",
+    }:
+        return _run_goal_approved_command(args, config)
     return _run_goal_plan_command(args, config)
 
 
