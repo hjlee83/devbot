@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -162,6 +163,73 @@ def test_codex_runner_fails_closed_when_required_capability_is_missing() -> None
     assert "agent_configuration_invalid" in result.message
     assert "approval=never" in result.message
     assert not any(call.args[0][0:2] == ["codex", "exec"] for call in mock_run.call_args_list)
+
+
+# --------------------------------------------------------------------------
+# Issue #125: unlike ClaudeRunner, CodexRunner previously passed no
+# `timeout` to `subprocess.run`/`AgentLauncher.run` at all - a hung Codex
+# CLI blocked forever, and with `max_concurrent_jobs=1` (the default) that
+# wedges the whole daemon with no automatic recovery.
+# --------------------------------------------------------------------------
+
+
+def _capable_runner(**overrides: object) -> CodexRunner:
+    defaults: dict[str, object] = dict(
+        dry_run=False,
+        _capabilities={
+            "cd": True,
+            "add_dir": True,
+            "sandbox": True,
+            "approval": True,
+            "config": True,
+        },
+    )
+    defaults.update(overrides)
+    return CodexRunner(**defaults)  # type: ignore[arg-type]
+
+
+def _fake_git_metadata_run(args: list[str], **_kwargs: object) -> MagicMock:
+    if args[:2] == ["git", "rev-parse"] and args[2] == "--git-dir":
+        return MagicMock(returncode=0, stdout=".git/worktrees/issue-62\n", stderr="")
+    if args[:2] == ["git", "rev-parse"] and args[2] == "--git-common-dir":
+        return MagicMock(returncode=0, stdout="/tmp/workspace/.git\n", stderr="")
+    return MagicMock(returncode=0, stdout="ok", stderr="")
+
+
+def test_codex_runner_passes_configured_timeout_to_subprocess_run() -> None:
+    repository = _repository()
+    runner = _capable_runner(timeout_seconds=42)
+
+    with patch(
+        "devbot.agents.codex.subprocess.run", side_effect=_fake_git_metadata_run
+    ) as mock_run:
+        runner.run(repository, prompt="do the thing")
+
+    exec_call = next(
+        call for call in mock_run.call_args_list if call.args[0][:1] == ["codex"]
+    )
+    assert exec_call.kwargs["timeout"] == 42
+
+
+def test_codex_runner_reports_timeout_instead_of_hanging_forever() -> None:
+    """CP-011-6 equivalent for Codex: a run that exceeds the configured
+    timeout must not raise or block - it comes back as a structured
+    failure result, matching ClaudeRunner's existing behavior."""
+    repository = _repository()
+    runner = _capable_runner(timeout_seconds=5)
+
+    def _fake_run(args: list[str], **kwargs: object) -> MagicMock:
+        if args[:1] == ["codex"] and "exec" in args:
+            raise subprocess.TimeoutExpired(cmd="codex", timeout=5)
+        return _fake_git_metadata_run(args, **kwargs)
+
+    with patch("devbot.agents.codex.subprocess.run", side_effect=_fake_run):
+        result = runner.run(repository, prompt="do the thing")
+
+    assert result.executed is False
+    assert result.dry_run is False
+    assert "5" in result.message
+    assert result.outcome_hint is AgentOutcome.RESUMABLE_INTERRUPTION
 
 
 def test_codex_runner_fails_closed_when_git_metadata_root_is_missing() -> None:

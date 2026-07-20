@@ -12,6 +12,7 @@ from devbot.agents.base import AgentRunner, AgentRunResult
 from devbot.models import AgentOutcome, RepositoryConfig
 
 CODEX_COMMAND = "codex"
+DEFAULT_TIMEOUT_SECONDS = 1800.0
 
 
 class CodexConfigurationError(RuntimeError):
@@ -27,6 +28,13 @@ class CodexRunner(AgentRunner):
     sandbox_mode: str = "workspace-write"
     approval_mode: str = "never"
     network_mode: str = "enabled"
+    # Issue #125: unlike ClaudeRunner, this had no timeout at all until now
+    # - a hung Codex CLI process (network stall, an unexpected interactive
+    # prompt, an internal loop) blocked its subprocess call forever, and
+    # with the default MAX_CONCURRENT_JOBS=1 that wedges the whole daemon
+    # with no automatic recovery (run_forever()'s `except Exception` can't
+    # help - a blocked syscall never raises).
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     _capabilities: dict[str, bool] | None = field(default=None, repr=False)
     _CAPABILITY_CACHE: ClassVar[dict[str, bool] | None] = None
 
@@ -165,13 +173,22 @@ class CodexRunner(AgentRunner):
                 outcome_hint=AgentOutcome.AGENT_CONFIGURATION_INVALID,
             )
 
-        completed = subprocess.run(
-            command,
-            cwd=str(repository.local_path),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(repository.local_path),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return AgentRunResult(
+                executed=False,
+                dry_run=False,
+                message=f"Codex CLI 실행이 {self.timeout_seconds}초 안에 끝나지 않았습니다.",
+                outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
+            )
         return AgentRunResult(
             executed=True,
             dry_run=False,
@@ -201,7 +218,7 @@ class CodexRunner(AgentRunner):
                     capability_summary=capabilities,
                 ),
             )
-            completed = launcher.run(context, prompt)
+            completed = launcher.run(context, prompt, timeout=self.timeout_seconds)
         except CodexConfigurationError as exc:
             return AgentRunResult(
                 executed=False,
@@ -209,6 +226,13 @@ class CodexRunner(AgentRunner):
                 message=str(exc),
                 returncode=None,
                 outcome_hint=AgentOutcome.AGENT_CONFIGURATION_INVALID,
+            )
+        except subprocess.TimeoutExpired:
+            return AgentRunResult(
+                executed=False,
+                dry_run=False,
+                message=f"Codex CLI 실행이 {self.timeout_seconds}초 안에 끝나지 않았습니다.",
+                outcome_hint=AgentOutcome.RESUMABLE_INTERRUPTION,
             )
         return AgentRunResult(
             executed=True,

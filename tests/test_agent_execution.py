@@ -1,3 +1,4 @@
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,7 +12,7 @@ from devbot.agent_execution import (
 from devbot.agents.base import AgentRunner, AgentRunResult
 from devbot.agents.codex import CodexRunner
 from devbot.github_client import GitHubIssue, PullRequest
-from devbot.models import RepositoryConfig
+from devbot.models import AgentOutcome, RepositoryConfig
 from devbot.polling import build_agent_execution_context
 from devbot.worktree import PreparedWorkspace
 
@@ -257,6 +258,61 @@ def test_failed_capability_detection_remains_fail_closed() -> None:
         call.args[0][0:2] == ["codex", "exec"] and "--help" not in call.args[0]
         for call in mock_run.call_args_list
     )
+
+
+def test_codex_runner_run_context_reports_timeout_instead_of_hanging() -> None:
+    """Issue #125: `run_context()` - the path the real daemon uses, not the
+    legacy `run()` - must also pass a timeout through to
+    `AgentLauncher.run()` and convert `TimeoutExpired` into a structured
+    failure, the same as `run()` already does."""
+    CodexRunner._CAPABILITY_CACHE = None
+    runner = CodexRunner(
+        dry_run=False,
+        timeout_seconds=5,
+        _capabilities={
+            "cd": True,
+            "add_dir": True,
+            "sandbox": True,
+            "approval": True,
+            "config": True,
+        },
+    )
+    context = AgentExecutionContext(
+        repository=_repo(),
+        prepared_workspace=_prepared(),
+        canonical_branch="task/031-agent-execution-environment",
+        issue=_issue(),
+        pull_request=_pr(),
+        execution_id="exec-timeout",
+        role=AgentRole.IMPLEMENT,
+    )
+
+    # `devbot.agents.codex.subprocess` and `devbot.agent_execution.subprocess`
+    # are the same imported `subprocess` module object - patching
+    # `<module>.subprocess.run` under either dotted path patches the exact
+    # same underlying attribute, so two separate patches would silently
+    # collide (the second wins for every call, including the git-metadata
+    # and `--version` calls this test needs to keep succeeding). One patch,
+    # one dispatcher that only raises for the actual launcher invocation.
+    def _fake_subprocess_run(args: list[str], **kwargs: object) -> MagicMock:
+        if args[:2] == ["git", "rev-parse"] and args[2] == "--git-dir":
+            return MagicMock(returncode=0, stdout=".git/worktrees/issue-64\n", stderr="")
+        if args[:2] == ["git", "rev-parse"] and args[2] == "--git-common-dir":
+            return MagicMock(returncode=0, stdout="/tmp/workspace/.git\n", stderr="")
+        if args == ["codex", "--version"]:
+            return MagicMock(returncode=0, stdout="codex-cli 0.0.0\n", stderr="")
+        if args[:1] == ["codex"] and "exec" in args:
+            assert kwargs.get("timeout") == 5
+            raise subprocess.TimeoutExpired(cmd="codex", timeout=5)
+        raise AssertionError(f"unexpected subprocess.run call: {args!r}")
+
+    with patch("devbot.agent_execution.subprocess.run", side_effect=_fake_subprocess_run):
+        result = runner.run_context(context, "prompt")
+
+    assert result.executed is False
+    assert result.dry_run is False
+    assert "5" in result.message
+    assert result.outcome_hint is AgentOutcome.RESUMABLE_INTERRUPTION
 
 
 def test_all_agent_roles_execute_from_prepared_workspace() -> None:
