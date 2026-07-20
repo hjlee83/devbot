@@ -10,7 +10,12 @@ from devbot.agents.base import AgentRunResult
 from devbot.agents.codex import CodexRunner
 from devbot.automerge import AutomergeService
 from devbot.delivery import DeliveryResult, VerificationResult
-from devbot.github_client import GitHubIssue, PullRequest, PullRequestComment
+from devbot.github_client import (
+    GitHubAuthenticationError,
+    GitHubIssue,
+    PullRequest,
+    PullRequestComment,
+)
 from devbot.github_retry import GitHubTransientError
 from devbot.github_write_client import GitHubWriteClient, MergePullRequestResult, PullRequestInfo
 from devbot.issue_state import IssueStateWriter
@@ -769,6 +774,52 @@ def test_ready_to_merge_pr_is_merged_and_issue_marked_done() -> None:
         merge_method="merge",
     )
     write_client.set_labels.assert_called_once_with(repo, 42, ["devbot:done"])
+
+
+def test_run_cycle_does_not_crash_when_check_runs_lookup_fails() -> None:
+    """Issue #124: a `GitHubClientError` from the automerge check-runs
+    lookup (e.g. the deployed token's real, confirmed 403 on `.../check
+    -runs`) must not propagate out of `run_cycle()` - unlike
+    `run_forever()`, `devbot --once`'s call site has no top-level
+    try/except of its own, so this used to crash the whole process."""
+    repo = _automerge_repo("myrepo")
+    issue = _issue(
+        repo.full_name,
+        42,
+        labels=["devbot:review"],
+        body="Pull Request: #9",
+    )
+    pull_request = _ready_to_merge_pull_request(9, issue_number=42)
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]},
+        pull_requests_by_repo={repo.full_name: [pull_request]},
+    )
+    config = _config([repo], dry_run=False, automerge_enabled=True)
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+
+    def _raise_check_runs_error(
+        _repo: RepositoryConfig, _ref: str
+    ) -> list[dict[str, object]]:
+        raise GitHubAuthenticationError("GitHub authentication failed: 403 Forbidden")
+
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        state_writer=state_writer,
+        automerge_service=AutomergeService(
+            config=config,
+            write_client=write_client,
+            state_writer=state_writer,
+            list_check_runs_for_ref=_raise_check_runs_error,
+        ),
+    )
+
+    result = service.run_once()  # must not raise
+
+    assert result.status is PollingStatus.MERGE_BLOCKED
+    write_client.merge_pull_request.assert_not_called()
 
 
 def test_merged_linked_pr_reconciles_review_issue_to_done() -> None:

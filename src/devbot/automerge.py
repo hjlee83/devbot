@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from devbot.github_client import GitHubIssue, PullRequest
+from devbot.github_client import GitHubClientError, GitHubIssue, PullRequest
 from devbot.github_write_client import GitHubWriteClient, MergePullRequestResult
 from devbot.issue_state import IssueStateWriter
 from devbot.models import DevBotConfig, RepositoryConfig
@@ -142,9 +142,19 @@ class AutomergeService:
         if repository.is_self_repo:
             return f"{repository.full_name}는 DevBot 자기수정 저장소라 자동 머지하지 않습니다"
 
-        check_runs = summarize_check_runs(
-            self.list_check_runs_for_ref(repository, pull_request.head_sha)
-        )
+        try:
+            raw_check_runs = self.list_check_runs_for_ref(repository, pull_request.head_sha)
+        except GitHubClientError as exc:
+            # Issue #124: a failed check-runs lookup (403 permission gap,
+            # 404, transient API error, ...) must never be treated as "no
+            # check runs configured, proceed" - it means we genuinely don't
+            # know CI status, so this fails exactly like an unmet gate
+            # (`_record_blocked`, `devbot:ready-to-merge` kept, human can
+            # still merge manually) instead of letting the exception escape
+            # uncaught into `run_cycle()` and crash `--once`.
+            return f"CI gate 확인 불가: check-runs 조회 실패 ({exc})"
+
+        check_runs = summarize_check_runs(raw_check_runs)
         checks_green, reason = check_runs_are_green(check_runs)
         if not checks_green:
             return f"CI gate 실패: {reason}"
