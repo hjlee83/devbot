@@ -199,11 +199,30 @@ def check_worktree_health(
     return StartupCheck(name, report.safe_to_start, detail)
 
 
+def check_repository_registrations(config: DevBotConfig) -> StartupCheck:
+    """Issue #122: surfaces every problem `devbot.config.load_config()`
+    already found (and safely skipped, rather than crashed on) while
+    resolving `devbot init`-registered repositories - a moved/deleted
+    registered path, two paths registered under the same `owner/repo`, or
+    an unreadable `.devbot/config.yaml`. Informational, not fatal: exactly
+    like `check_worktree_health`, one broken registration should not stop
+    the daemon from managing every other (legacy or registered)
+    repository."""
+    if not config.registry_diagnostics:
+        return StartupCheck("repository_registrations", True, "no registration problems found")
+    return StartupCheck(
+        "repository_registrations",
+        False,
+        "; ".join(config.registry_diagnostics),
+    )
+
+
 def build_doctor_report(config: DevBotConfig, *, ci: bool = False) -> DoctorReport:
     checks = list(run_startup_checks(config).checks)
     checks.append(check_daemon_lock(config.lock_file))
     checks.append(check_github_connectivity(config))
     checks.append(check_agent_roles(config))
+    checks.append(check_repository_registrations(config))
     if ci:
         checks.append(
             StartupCheck(

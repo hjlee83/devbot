@@ -8,6 +8,7 @@ from devbot.doctor import (
     build_doctor_report,
     check_agent_execution_readiness,
     check_agent_roles,
+    check_repository_registrations,
     render_doctor_report,
 )
 from devbot.github_client import GitHubAuthenticationError, GitHubUser
@@ -289,3 +290,55 @@ def test_doctor_reports_worktree_health(tmp_path: Path) -> None:
     assert "conflicting=1" in conflicting_check.detail
     assert str(orphaned) in conflicting_check.detail
     assert report_with_conflict.safe_to_start is True
+
+
+# ---- Issue #122: doctor reports devbot init registration problems ----
+
+
+def test_check_repository_registrations_ok_when_no_diagnostics() -> None:
+    config = _config([], registry_diagnostics=())
+
+    check = check_repository_registrations(config)
+
+    assert check.ok is True
+    assert check.fatal is False
+
+
+def test_check_repository_registrations_reports_each_diagnostic() -> None:
+    config = _config(
+        [],
+        registry_diagnostics=(
+            "missing_path: registered repository path does not exist: /tmp/gone",
+            "duplicate_repository: someone/myrepo is registered at both /a and /b",
+        ),
+    )
+
+    check = check_repository_registrations(config)
+
+    assert check.ok is False
+    assert check.fatal is False
+    assert "missing_path" in check.detail
+    assert "/tmp/gone" in check.detail
+    assert "duplicate_repository" in check.detail
+
+
+def test_build_doctor_report_includes_repository_registrations_check(tmp_path: Path) -> None:
+    repo_path = tmp_path / "myrepo"
+    _init_git_repo(repo_path)
+    config = _config(
+        [_repo(repo_path)],
+        lock_file=tmp_path / "devbot.lock",
+        registry_diagnostics=("missing_path: /tmp/gone is missing",),
+    )
+
+    with patch(
+        "devbot.github_client.GitHubClient.get_authenticated_user",
+        side_effect=ConnectionError("no network in this sandbox"),
+    ):
+        report = build_doctor_report(config)
+
+    check = next(c for c in report.checks if c.name == "repository_registrations")
+    assert check.ok is False
+    # Informational, like every other non-lock check in this module - one
+    # broken registration must not stop the daemon from starting.
+    assert report.safe_to_start is True

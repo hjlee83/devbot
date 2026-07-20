@@ -1,4 +1,5 @@
 import logging
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from devbot.lock import ProcessLock
 from devbot.main import _run_startup_self_update, main
 from devbot.models import DevBotConfig
 from devbot.release_ops import PublishOutcome, ReleasePreview, ReleaseReadiness, ReleaseStatus
+from devbot.repository_registry import load_registry
 from devbot.startup import (
     STARTUP_SELF_UPDATE_ENV,
     StartupSelfUpdateError,
@@ -2451,3 +2453,189 @@ def test_main_starts_and_exits_successfully(
     post_exit_lock = ProcessLock(lock_file)
     post_exit_lock.acquire()
     post_exit_lock.release()
+
+
+# --------------------------------------------------------------------------
+# Issue #122: `devbot init`. Runs before `load_config()` - none of these
+# tests set up `WORKSPACE_ROOT`/`GITHUB_TOKEN`/`.env` at all, matching the
+# actual first-run scenario this command exists for.
+# --------------------------------------------------------------------------
+
+
+def _init_git_repo(path: Path, *, remote_url: str | None = None) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+    if remote_url is not None:
+        subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=str(path), check=True)
+    return path
+
+
+def test_init_command_never_calls_load_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The whole point of `devbot init` is to work before WORKSPACE_ROOT/
+    GITHUB_TOKEN/config/repositories.yaml exist - no `.env` fixture is
+    passed here at all, unlike every other `main()` test in this file."""
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(tmp_path / "registry.yaml"))
+
+    with patch("devbot.main.load_config") as mock_load_config:
+        exit_code = main(["init"])
+
+    assert exit_code == 0
+    mock_load_config.assert_not_called()
+    out = capsys.readouterr().out
+    assert "someone/myrepo" in out
+
+
+def test_init_command_registers_repository_and_writes_local_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    registry_path = tmp_path / "registry.yaml"
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(registry_path))
+
+    exit_code = main(["init"])
+
+    assert exit_code == 0
+    assert (repo_root / ".devbot" / "config.yaml").is_file()
+    assert registry_path.is_file()
+    out = capsys.readouterr().out
+    assert "신규 작성" in out
+    assert "새로 등록" in out
+
+
+def test_init_command_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(tmp_path / "registry.yaml"))
+
+    main(["init"])
+    capsys.readouterr()
+    exit_code = main(["init"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "변경 없음" in out
+    assert "이미 등록됨" in out
+
+
+def test_init_command_owner_repo_flags_override_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(tmp_path / "registry.yaml"))
+
+    exit_code = main(["init", "--owner", "other", "--repo", "renamed"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "other/renamed" in out
+
+
+def test_init_command_fails_actionably_outside_a_git_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plain_dir = tmp_path / "not-a-repo"
+    plain_dir.mkdir()
+    monkeypatch.chdir(plain_dir)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(tmp_path / "registry.yaml"))
+
+    exit_code = main(["init"])
+
+    assert exit_code == 1
+    assert "not inside a Git repository" in capsys.readouterr().err
+
+
+def test_init_command_unregister_removes_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    registry_path = tmp_path / "registry.yaml"
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(registry_path))
+    main(["init"])
+    capsys.readouterr()
+
+    exit_code = main(["init", "--unregister"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "등록을 해제했습니다" in out
+    assert load_registry(registry_path) == ()
+    # The repository-local config itself is left in place.
+    assert (repo_root / ".devbot" / "config.yaml").is_file()
+
+
+def test_init_command_unregister_reports_when_not_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = _init_git_repo(tmp_path / "repo")
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(tmp_path / "registry.yaml"))
+
+    exit_code = main(["init", "--unregister"])
+
+    assert exit_code == 0
+    assert "등록되어 있지 않았습니다" in capsys.readouterr().out
+
+
+def test_daemon_run_sees_a_devbot_init_registered_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """End-to-end: a repository registered purely via `devbot init` (no
+    WORKSPACE_ROOT, no config/repositories.yaml at all) is picked up by the
+    normal `--once` daemon path through `load_config()` and actually
+    queried for candidate Issues - `GitHubClient` is mocked (never a real
+    network call), matching every other `--once` test in this file.
+    Startup logs the managed-repository list via `devbot.observability`
+    (not `print`), so this asserts on `caplog`, matching
+    `tests/test_main_loop.py`'s established pattern for the same kind of
+    check - not `capsys`, which only sees `print()` output."""
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    registry_path = tmp_path / "registry.yaml"
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(registry_path))
+    main(["init"])
+
+    lock_file = tmp_path / "devbot.lock"
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"GITHUB_TOKEN=test-token\nDEVBOT_LOCK_FILE={lock_file}\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.main.GitHubClient") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="devbot"),
+    ):
+        mock_client_cls.return_value.list_issues.return_value = []
+        exit_code = main(
+            ["--once", "--dry-run"], env_path=env_path, registry_path=registry_path
+        )
+
+    assert exit_code == 0
+    repo_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "managed_repository"
+    ]
+    assert any("someone/myrepo" in record.getMessage() for record in repo_records)

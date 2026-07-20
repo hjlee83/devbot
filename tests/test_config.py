@@ -1,8 +1,10 @@
+import shutil
 from pathlib import Path
 
 import pytest
 
 from devbot.config import ConfigError, load_config
+from devbot.repository_registry import initialize_repository
 
 
 def _write_repositories_yaml(path: Path, repo: str = "myrepo", enabled: bool = True) -> Path:
@@ -96,12 +98,17 @@ def test_repositories_path_can_come_from_environment(
     assert config.repositories[0].enabled is False
 
 
-def test_missing_required_config_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_workspace_root_and_no_registry_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #122: `WORKSPACE_ROOT` alone is no longer required, but *some*
+    repository source (legacy or registry) must exist - neither present is
+    still a configuration error, just a different one than before."""
     env_path = _write_env(tmp_path, workspace_root=None)
-    repositories_path = _write_repositories_yaml(tmp_path)
+    registry_path = tmp_path / "registry.yaml"  # never written - stays absent
 
-    with pytest.raises(ConfigError, match="WORKSPACE_ROOT"):
-        load_config(env_path=env_path, repositories_path=repositories_path)
+    with pytest.raises(ConfigError, match="No repositories configured"):
+        load_config(env_path=env_path, registry_path=registry_path)
 
 
 def test_missing_github_token_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,3 +347,99 @@ def test_malformed_repositories_yaml_raises(
 
     with pytest.raises(ConfigError, match="repositories.yaml"):
         load_config(env_path=env_path, repositories_path=repositories_path)
+
+
+# --------------------------------------------------------------------------
+# Issue #122: `devbot init`-registered repositories, merged with (or fully
+# replacing) the legacy WORKSPACE_ROOT + config/repositories.yaml source.
+# --------------------------------------------------------------------------
+
+
+def test_workspace_root_is_optional_when_a_repository_is_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = _write_env(tmp_path, workspace_root=None)
+    registry_path = tmp_path / "registry.yaml"
+    repo_root = tmp_path / "registered-repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+    initialize_repository(
+        repo_root, owner="someone", repo="registered-repo", registry_path=registry_path
+    )
+
+    config = load_config(env_path=env_path, registry_path=registry_path)
+
+    assert config.workspace_root is None
+    assert len(config.repositories) == 1
+    assert config.repositories[0].owner == "someone"
+    assert config.repositories[0].repo == "registered-repo"
+    assert config.repositories[0].local_path == repo_root.resolve()
+    assert config.registry_diagnostics == ()
+
+
+def test_legacy_and_registered_repositories_are_merged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path, repo="legacy-repo")
+    registry_path = tmp_path / "registry.yaml"
+    repo_root = tmp_path / "registered-repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+    initialize_repository(
+        repo_root, owner="other", repo="registered-repo", registry_path=registry_path
+    )
+
+    config = load_config(
+        env_path=env_path, repositories_path=repositories_path, registry_path=registry_path
+    )
+
+    full_names = {repo.full_name for repo in config.repositories}
+    assert full_names == {"someone/legacy-repo", "other/registered-repo"}
+
+
+def test_same_repository_in_both_sources_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path, repo="myrepo")
+    registry_path = tmp_path / "registry.yaml"
+    repo_root = tmp_path / "registered-repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+    initialize_repository(repo_root, owner="someone", repo="myrepo", registry_path=registry_path)
+
+    with pytest.raises(ConfigError, match="someone/myrepo"):
+        load_config(
+            env_path=env_path, repositories_path=repositories_path, registry_path=registry_path
+        )
+
+
+def test_missing_registered_repository_path_is_a_diagnostic_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A moved/deleted registered repository must not prevent every other
+    (legacy or registered) repository from loading - it becomes a
+    `registry_diagnostics` entry instead."""
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path, repo="legacy-repo")
+    registry_path = tmp_path / "registry.yaml"
+    repo_root = tmp_path / "vanished-repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+    initialize_repository(
+        repo_root, owner="other", repo="vanished-repo", registry_path=registry_path
+    )
+    shutil.rmtree(repo_root)
+
+    config = load_config(
+        env_path=env_path, repositories_path=repositories_path, registry_path=registry_path
+    )
+
+    assert {repo.full_name for repo in config.repositories} == {"someone/legacy-repo"}
+    assert len(config.registry_diagnostics) == 1
+    assert "missing_path" in config.registry_diagnostics[0]
+    assert str(repo_root.resolve()) in config.registry_diagnostics[0]

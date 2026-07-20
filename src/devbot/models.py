@@ -140,7 +140,6 @@ class RepositoryConfig:
 class DevBotConfig:
     """Fully resolved DevBot runtime configuration."""
 
-    workspace_root: Path
     poll_interval_seconds: int
     lock_file: Path
     default_agent: str
@@ -150,6 +149,12 @@ class DevBotConfig:
     dry_run: bool
     github_token: str
     repositories: tuple[RepositoryConfig, ...]
+    # Issue #122: `WORKSPACE_ROOT` is now optional - a deployment that
+    # manages only `devbot init`-registered repositories never needs to
+    # set it. `None` here means exactly that; every actual consumer
+    # (`WorktreeManager.workspace_root`) already stores this value without
+    # reading it back, so `None` is safe to thread through unchanged.
+    workspace_root: Path | None = None
     automerge_enabled: bool = False
     log_level: str = "INFO"
     # Mirrors `devbot.review.DEFAULT_REVIEW_LOOP_LIMIT` - duplicated as a
@@ -157,6 +162,14 @@ class DevBotConfig:
     # transitively imports back to `devbot.models` via
     # `devbot.issue_state`/`devbot.observability`/`devbot.reliability`.
     review_loop_limit: int = 3
+    # Issue #122: human-readable problems found while resolving
+    # `devbot init`-registered repositories (missing/moved path, duplicate
+    # owner/repo across two paths, unreadable `.devbot/config.yaml`) - see
+    # `devbot.repository_registry.resolve_registered_repositories()`. Never
+    # raised from `load_config()`: one broken registration must not
+    # prevent every other repository (legacy or registered) from being
+    # managed. Empty for any deployment not using the registry.
+    registry_diagnostics: tuple[str, ...] = ()
 
     @property
     def enabled_repositories(self) -> tuple[RepositoryConfig, ...]:

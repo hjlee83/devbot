@@ -1,8 +1,20 @@
 """Configuration loading for DevBot.
 
 Loads environment values (via `.env` and the process environment) and the
-repository list (via `config/repositories.yaml`), then merges them into a
-single `DevBotConfig`.
+repository list, then merges them into a single `DevBotConfig`. Two
+independent, additive repository sources exist (Issue #122):
+
+- Legacy: `WORKSPACE_ROOT` + `config/repositories.yaml`, each repository's
+  `local_path` derived as `WORKSPACE_ROOT / repo`. Unchanged in behavior -
+  only loaded when `WORKSPACE_ROOT` is actually set, so an existing
+  deployment that never touches `devbot init` sees no difference.
+- Registered: `devbot init`-registered repositories
+  (`devbot.repository_registry`), each with its own authoritative absolute
+  path, independent of any shared parent directory.
+
+Both sources may be present at once (a deployment can migrate repository by
+repository); their `repositories` are simply concatenated, then checked for
+`owner/repo` collisions across the combined set.
 """
 
 from __future__ import annotations
@@ -15,6 +27,7 @@ from dotenv import load_dotenv
 
 from devbot.agents import KNOWN_AGENT_NAMES
 from devbot.models import DevBotConfig, RepositoryConfig
+from devbot.repository_registry import default_registry_path, resolve_registered_repositories
 
 DEFAULT_REPOSITORIES_PATH = Path("config/repositories.yaml")
 
@@ -167,22 +180,44 @@ def _load_repositories(
     return tuple(repositories)
 
 
+def _require_no_cross_source_duplicates(
+    legacy_repositories: tuple[RepositoryConfig, ...],
+    registry_repositories: tuple[RepositoryConfig, ...],
+) -> None:
+    """`resolve_registered_repositories()` already rejects a duplicate
+    `owner/repo` *within* the registry; this closes the remaining gap - the
+    same `owner/repo` declared once in `config/repositories.yaml` and once
+    more via `devbot init`, which is exactly as ambiguous."""
+
+    legacy_names = {repo.full_name for repo in legacy_repositories}
+    for repo in registry_repositories:
+        if repo.full_name in legacy_names:
+            raise ConfigError(
+                f"{repo.full_name} is configured both in config/repositories.yaml and in the "
+                "devbot init registry - remove one to resolve the ambiguity"
+            )
+
+
 def load_config(
     env_path: Path | str | None = None,
     repositories_path: Path | str | None = None,
+    registry_path: Path | str | None = None,
 ) -> DevBotConfig:
-    """Load `.env` and `config/repositories.yaml` into a `DevBotConfig`.
+    """Load `.env`, `config/repositories.yaml`, and the `devbot init`
+    registry into a `DevBotConfig`.
 
-    `env_path` and `repositories_path` allow tests (and alternate deployments)
-    to point at fixture files instead of the real project files. Existing
-    process environment variables always take precedence over `.env` values.
+    `env_path`, `repositories_path`, and `registry_path` allow tests (and
+    alternate deployments) to point at fixture files instead of the real
+    project/home-directory files. Existing process environment variables
+    always take precedence over `.env` values.
     """
     load_dotenv(dotenv_path=env_path, override=False)
 
+    # Issue #122: `WORKSPACE_ROOT` is optional - a deployment that manages
+    # only `devbot init`-registered repositories never needs it. `None`
+    # here simply means "skip the legacy repositories.yaml source below."
     workspace_root_raw = os.environ.get("WORKSPACE_ROOT")
-    if not workspace_root_raw:
-        raise ConfigError("Missing required environment variable: WORKSPACE_ROOT")
-    workspace_root = Path(workspace_root_raw).expanduser()
+    workspace_root = Path(workspace_root_raw).expanduser() if workspace_root_raw else None
 
     github_token = os.environ.get("GITHUB_TOKEN")
     if not github_token:
@@ -217,15 +252,34 @@ def load_config(
         _resolve_role_agent("REVIEWER_AGENT", raw_default_agent, _DEFAULT_REVIEWER_AGENT),
     )
 
-    repositories_path_raw = (
-        str(repositories_path)
-        if repositories_path is not None
-        else os.environ.get("DEVBOT_REPOSITORIES_PATH")
+    legacy_repositories: tuple[RepositoryConfig, ...] = ()
+    if workspace_root is not None:
+        repositories_path_raw = (
+            str(repositories_path)
+            if repositories_path is not None
+            else os.environ.get("DEVBOT_REPOSITORIES_PATH")
+        )
+        resolved_repositories_path = (
+            Path(repositories_path_raw) if repositories_path_raw else DEFAULT_REPOSITORIES_PATH
+        )
+        legacy_repositories = _load_repositories(resolved_repositories_path, workspace_root)
+
+    resolved_registry_path = (
+        Path(registry_path) if registry_path is not None else default_registry_path()
     )
-    resolved_repositories_path = (
-        Path(repositories_path_raw) if repositories_path_raw else DEFAULT_REPOSITORIES_PATH
+    registry_resolution = resolve_registered_repositories(resolved_registry_path)
+    registry_diagnostics = tuple(
+        f"{diagnostic.kind}: {diagnostic.message}" for diagnostic in registry_resolution.diagnostics
     )
-    repositories = _load_repositories(resolved_repositories_path, workspace_root)
+
+    repositories = legacy_repositories + registry_resolution.repositories
+    _require_no_cross_source_duplicates(legacy_repositories, registry_resolution.repositories)
+
+    if not repositories:
+        raise ConfigError(
+            "No repositories configured: set WORKSPACE_ROOT + config/repositories.yaml, "
+            "or register at least one repository with `devbot init`"
+        )
 
     return DevBotConfig(
         workspace_root=workspace_root,
@@ -241,4 +295,5 @@ def load_config(
         repositories=repositories,
         log_level=log_level,
         review_loop_limit=review_loop_limit,
+        registry_diagnostics=registry_diagnostics,
     )
