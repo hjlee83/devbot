@@ -725,6 +725,89 @@ def log_state_transition(
     )
 
 
+def _canonical_stage(stage: str) -> str:
+    aliases = {
+        "workspace_validate": "bootstrap",
+        "workspace_preparation": "bootstrap",
+        "agent_execution": "implement",
+        "rework_process": "implement",
+        "review_process": "review",
+        "delivery": "delivery",
+        "verification": "verify",
+        "automerge_gate": "delivery",
+    }
+    return aliases.get(stage, stage)
+
+
+@_safe_log
+def log_lifecycle_stage_started(
+    logger: logging.Logger,
+    cycle_id: str,
+    *,
+    repository: str,
+    issue_number: int,
+    stage: str,
+) -> None:
+    """INFO: a mobile-readable start marker for one execution lifecycle stage."""
+
+    lifecycle_stage = _canonical_stage(stage)
+    logger.info(
+        "stage=start cycle=%s repo=%s issue=#%d stage=%s",
+        cycle_id,
+        repository,
+        issue_number,
+        lifecycle_stage,
+        extra={
+            "event": "lifecycle_stage_started",
+            "cycle_id": cycle_id,
+            "repository": repository,
+            "issue_number": issue_number,
+            "stage": lifecycle_stage,
+            "raw_stage": stage,
+        },
+    )
+
+
+@_safe_log
+def log_lifecycle_stage_finished(
+    logger: logging.Logger,
+    cycle_id: str,
+    *,
+    repository: str,
+    issue_number: int,
+    stage: str,
+    start: float,
+    status: str = "completed",
+    detail: str = "",
+) -> None:
+    """INFO: a mobile-readable end/failure marker with elapsed time."""
+
+    lifecycle_stage = _canonical_stage(stage)
+    duration_ms = elapsed_ms(start)
+    redacted_detail = redact_secrets(detail) if detail else ""
+    logger.info(
+        "stage=end cycle=%s repo=%s issue=#%d stage=%s status=%s elapsed_ms=%d detail=%s",
+        cycle_id,
+        repository,
+        issue_number,
+        lifecycle_stage,
+        status,
+        duration_ms,
+        redacted_detail or "-",
+        extra={
+            "event": "lifecycle_stage_finished",
+            "cycle_id": cycle_id,
+            "repository": repository,
+            "issue_number": issue_number,
+            "stage": lifecycle_stage,
+            "raw_stage": stage,
+            "status": status,
+            "elapsed_ms": duration_ms,
+            "detail": redacted_detail,
+        },
+    )
+
+
 @_safe_log
 def log_stage(
     logger: logging.Logger,
@@ -738,6 +821,14 @@ def log_stage(
     """DEBUG: one named sub-step's elapsed time within a Job (agent
     execution, verification/commit/push/PR delivery, GitHub state write -
     Task 013 #5's "주요 단계별 소요 시간")."""
+    log_lifecycle_stage_finished(
+        logger,
+        cycle_id,
+        repository=repository,
+        issue_number=issue_number,
+        stage=stage,
+        start=start,
+    )
     duration_ms = elapsed_ms(start)
     logger.debug(
         "단계 완료: cycle_id=%s repo=%s issue=#%d stage=%s 소요=%dms",
