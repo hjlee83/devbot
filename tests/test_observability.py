@@ -327,6 +327,7 @@ def test_log_startup_never_includes_github_token(caplog: pytest.LogCaptureFixtur
     assert len(startup_records) == 1
     assert startup_records[0].implementer_agent == "claude"
     assert startup_records[0].reviewer_agent == "codex"
+    assert startup_records[0].ai_concurrency == 1
     repo_records = [r for r in caplog.records if getattr(r, "event", None) == "managed_repository"]
     assert repo_records[0].repository == "someone/myrepo"
 

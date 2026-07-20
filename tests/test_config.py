@@ -443,3 +443,28 @@ def test_missing_registered_repository_path_is_a_diagnostic_not_a_crash(
     assert len(config.registry_diagnostics) == 1
     assert "missing_path" in config.registry_diagnostics[0]
     assert str(repo_root.resolve()) in config.registry_diagnostics[0]
+
+
+def test_ai_concurrency_defaults_to_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AI_CONCURRENCY", raising=False)
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    config = load_config(env_path=env_path, repositories_path=repositories_path)
+
+    assert config.ai_concurrency == 1
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "not-a-number", "1.5"])
+def test_invalid_ai_concurrency_is_rejected(
+    tmp_path: Path, bad_value: str
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    env_path = _write_env(tmp_path, workspace_root, AI_CONCURRENCY=bad_value)
+    repositories_path = _write_repositories_yaml(tmp_path)
+
+    with pytest.raises(ConfigError, match="AI_CONCURRENCY"):
+        load_config(env_path=env_path, repositories_path=repositories_path)

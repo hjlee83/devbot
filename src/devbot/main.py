@@ -118,6 +118,7 @@ from devbot.review_decision import (
     review_report_to_dict,
 )
 from devbot.rework import ReworkService
+from devbot.runtime_scheduler import RuntimeScheduler
 from devbot.specification import (
     SpecificationError,
     generate_specification,
@@ -1390,6 +1391,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     _build_agent_parser(subparsers)
     _build_specification_parser(subparsers)
     _build_review_parser(subparsers)
+    subparsers.add_parser("status", help="runtime scheduler 상태를 조회합니다 (읽기 전용).")
+
     doctor_parser = subparsers.add_parser(
         "doctor",
         help=(
@@ -1517,6 +1520,25 @@ def _run_timeline_command(args: argparse.Namespace, config: DevBotConfig) -> int
         return 1
 
     print(outcome.status_card)
+    return 0
+
+
+
+def _run_status_command(config: DevBotConfig) -> int:
+    scheduler = RuntimeScheduler(
+        worker_count=config.max_concurrent_jobs, ai_concurrency=config.ai_concurrency
+    )
+    snapshot = scheduler.snapshot()
+    print("runtime_scheduler:")
+    print(f"  worker_count: {snapshot.worker_count}")
+    print(f"  ai_concurrency: {snapshot.ai_concurrency}")
+    for worker in snapshot.workers:
+        print(
+            "  worker "
+            f"{worker.worker_id}: state={worker.state.value} "
+            f"repo={worker.repository or '-'} issue={worker.issue_number or '-'} "
+            f"job_type={worker.job_type or '-'}"
+        )
     return 0
 
 
@@ -1739,6 +1761,9 @@ def main(
 
     if args.command == "review":
         return _run_review_command(args, config)
+
+    if args.command == "status":
+        return _run_status_command(config)
 
     if args.command == "doctor":
         if not args.ci and not _run_startup_self_update(config, logger):

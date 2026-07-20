@@ -41,6 +41,7 @@ _DEFAULTS: dict[str, str] = {
     "DEVBOT_LOCK_FILE": "/tmp/devbot.lock",
     "DEFAULT_AGENT": "codex",
     "MAX_CONCURRENT_JOBS": "1",
+    "AI_CONCURRENCY": "1",
     "DRY_RUN": "true",
     "AUTOMERGE_ENABLED": "false",
     "LOG_LEVEL": "INFO",
@@ -227,6 +228,9 @@ def load_config(
     max_concurrent_jobs = _require_positive_int(
         "MAX_CONCURRENT_JOBS", _parse_int("MAX_CONCURRENT_JOBS", _get_env("MAX_CONCURRENT_JOBS"))
     )
+    ai_concurrency = _require_positive_int(
+        "AI_CONCURRENCY", _parse_int("AI_CONCURRENCY", _get_env("AI_CONCURRENCY"))
+    )
     # No positivity floor: `ReviewService.process()` (`devbot.review`)
     # already treats `review_loop_limit <= 0` as "unlimited", so 0/negative
     # are meaningful values here, not configuration errors.
@@ -289,6 +293,7 @@ def load_config(
         implementer_agent=implementer_agent,
         reviewer_agent=reviewer_agent,
         max_concurrent_jobs=max_concurrent_jobs,
+        ai_concurrency=ai_concurrency,
         dry_run=dry_run,
         automerge_enabled=automerge_enabled,
         github_token=github_token,
