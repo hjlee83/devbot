@@ -107,11 +107,13 @@
       repo/issue/pr/job_type) / Cycle Result(`NO_RUNNABLE_TASK` 또는
       `IMPLEMENT`/`REVIEW`/`REWORK` 또는 `FailureCategory` 코드로 정규화된
       값 하나) 세 블록으로 대체한다. `devbot:*` 상태 라벨이 두 개 이상
-      붙은 Issue는 `issue_to_task`가 이미 쓰던 첫 일치 규칙으로 정확히 한
+      붙은 Issue는 `issue_to_task`가 공유 state-label precedence로 정확히 한
       버킷에만 집계하고, 그 충돌 자체는 `state_label_conflict`(DEBUG)로
-      드러낸다. 스케줄러 우선순위/동시성, 상태 머신, 재시도, Timeline
-      동작은 전혀 바꾸지 않는다(`src/devbot/observability.py`,
-      `src/devbot/polling.py`, `results/020-daemon-queue-summary.md`).
+      드러낸다. Task 128에서 polling과 issue-state 전이 검증의 다중 라벨
+      해석을 `devbot.state_labels`로 통합했다(`src/devbot/observability.py`,
+      `src/devbot/polling.py`, `src/devbot/state_labels.py`,
+      `results/020-daemon-queue-summary.md`,
+      `results/128-devbot-label-state-precedence.md`).
 - [x] Task 021: agent outcome classification hardening. Implementer Agent가
       네트워크/승인 요구로 중단되고 repository 변경이 없는데도 기존
       Task-contract-only PR이 연결되어 있다는 이유만으로 review로

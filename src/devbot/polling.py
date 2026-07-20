@@ -88,6 +88,7 @@ from devbot.reliability import (
 from devbot.review import ReviewService, has_review_marker_for_head
 from devbot.rework import ReworkService, find_unprocessed_devbot_comments
 from devbot.scheduler import select_jobs_with_exclusions
+from devbot.state_labels import matched_task_states, task_state_from_labels
 from devbot.timeline import TimelineService, safe_end, safe_ready, safe_start
 from devbot.validation import ValidationFailureCategory
 from devbot.workspace import (
@@ -108,7 +109,6 @@ from devbot.worktree import (
     render_resume_workspace_context,
 )
 
-_STATE_LABEL_PREFIX = "devbot:"
 _PRIORITY_LABEL_PREFIX = "priority:"
 
 _LOGGER_NAME = "devbot"
@@ -324,19 +324,17 @@ def _normalized_cycle_result(selected_jobs: Sequence[Job], results: Sequence[Pol
 
 
 def _matched_task_states(labels: Iterable[str]) -> list[TaskState]:
-    """Every `devbot:*` state label present on `labels`, in `TaskState`
-    declaration order (READY, WORKING, REVIEW, REWORK, MANUAL_ACTION,
-    BLOCKED, DONE). `_task_state_from_labels` picks the first of these when
-    more than one is present - an existing, unchanged rule (Task 020 only
-    makes the ambiguity visible via `observability.log_state_label_conflict`,
-    CP-020-8)."""
-    label_set = set(labels)
-    return [state for state in TaskState if f"{_STATE_LABEL_PREFIX}{state.value}" in label_set]
+    """Every `devbot:*` state label present on `labels`, in declaration order.
+
+    Ambiguous labels are resolved by `_task_state_from_labels`, which delegates
+    to the same project-wide precedence as `devbot.issue_state`.
+    """
+
+    return matched_task_states(labels)
 
 
 def _task_state_from_labels(labels: Iterable[str]) -> TaskState | None:
-    matched = _matched_task_states(labels)
-    return matched[0] if matched else None
+    return task_state_from_labels(labels)
 
 
 def _priority_from_labels(labels: Iterable[str]) -> Priority:
@@ -598,7 +596,7 @@ class PollingService:
                         repository=issue.repository,
                         issue_number=issue.number,
                         matched_states=matched_states,
-                        resolved_state=matched_states[0],
+                        resolved_state=_task_state_from_labels(issue.labels),
                     )
                 task = issue_to_task(issue)
                 if task is None:

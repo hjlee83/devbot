@@ -19,12 +19,13 @@ from devbot.github_client import (
 )
 from devbot.github_retry import GitHubTransientError
 from devbot.github_write_client import GitHubWriteClient, MergePullRequestResult, PullRequestInfo
-from devbot.issue_state import IssueStateWriter
+from devbot.issue_state import IssueStateWriter, _current_state
 from devbot.models import AgentOutcome, DevBotConfig, RepositoryConfig, TaskState
 from devbot.polling import (
     RESUME_ATTEMPT_LIMIT,
     PollingService,
     PollingStatus,
+    _task_state_from_labels,
     find_linked_pull_request,
 )
 from devbot.review import ReviewService, build_review_marker
@@ -4030,6 +4031,17 @@ def test_queue_logging_preserves_structured_context(caplog: pytest.LogCaptureFix
     assert isinstance(result.elapsed_ms, float)
 
 
+def test_polling_and_issue_state_use_same_multi_label_precedence() -> None:
+    issue = _issue(
+        "someone/myrepo",
+        8,
+        labels=["devbot:ready", "devbot:done"],
+        title="Conflicting terminal label",
+    )
+
+    assert _task_state_from_labels(issue.labels) is TaskState.DONE
+    assert _current_state(issue) is TaskState.DONE
+
 def test_queue_summary_does_not_double_count_issue_state(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -4064,17 +4076,16 @@ def test_queue_summary_does_not_double_count_issue_state(
         + record.working
     )
     assert total == 1
-    # `TaskState` declaration order (READY, WORKING, REVIEW, REWORK,
-    # MANUAL_ACTION, BLOCKED, DONE) resolves the conflict to REVIEW here -
-    # the same rule `issue_to_task` already used before Task 020.
-    assert record.review == 1
-    assert record.blocked == 0
+    # Shared state-label precedence resolves the conflict to BLOCKED, matching
+    # `devbot.issue_state` instead of `TaskState` declaration order.
+    assert record.review == 0
+    assert record.blocked == 1
 
     conflicts = [r for r in caplog.records if getattr(r, "event", None) == "state_label_conflict"]
     assert len(conflicts) == 1
     assert conflicts[0].repository == repo.full_name
     assert conflicts[0].issue_number == 9
-    assert conflicts[0].resolved_state == "review"
+    assert conflicts[0].resolved_state == "blocked"
     assert set(conflicts[0].matched_states) == {"review", "blocked"}
 
 
