@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -764,3 +765,39 @@ def test_task_issue_pr_number_is_parsed() -> None:
 def test_parse_contract_path_returns_none_without_convention() -> None:
     assert parse_contract_path_from_issue_body("just a plain manual issue body") is None
     assert parse_result_path_from_issue_body("just a plain manual issue body") is None
+
+
+def test_cleanup_stale_prunes_only_git_prunable_worktrees(tmp_path: Path) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    active_issue = _issue(number=10, title="Active worktree", body=_bootstrap_body())
+    stale_issue = _issue(number=11, title="Stale worktree", body=_bootstrap_body())
+    active = manager.prepare(repository, active_issue, None)
+    stale = manager.prepare(repository, stale_issue, None)
+    shutil.rmtree(stale.worktree_path)
+
+    report_before = manager.health(repository)
+    assert active.worktree_path in report_before.active
+    assert stale.worktree_path in report_before.stale
+
+    removed = manager.cleanup_stale(repository)
+
+    assert removed == (stale.worktree_path,)
+    report_after = manager.health(repository)
+    assert active.worktree_path in report_after.active
+    assert stale.worktree_path not in report_after.stale
+    listed = _git_output("worktree", "list", "--porcelain", cwd=repository.local_path)
+    assert str(active.worktree_path) in listed
+    assert str(stale.worktree_path) not in listed
+
+
+def test_cleanup_stale_returns_empty_when_no_prunable_worktrees(tmp_path: Path) -> None:
+    repository, _origin = _make_operator_repo(tmp_path)
+    manager = WorktreeManager(workspace_root=tmp_path / "workspace")
+    active_issue = _issue(number=12, title="Active worktree", body=_bootstrap_body())
+    active = manager.prepare(repository, active_issue, None)
+
+    removed = manager.cleanup_stale(repository)
+
+    assert removed == ()
+    assert active.worktree_path.is_dir()

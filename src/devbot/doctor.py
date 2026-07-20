@@ -194,6 +194,8 @@ def check_worktree_health(
         f"root={report.worktree_root} active={len(report.active)} "
         f"stale={len(report.stale)} conflicting={len(report.conflicting)}"
     )
+    if report.stale:
+        detail += " cleanup_hint='devbot worktree cleanup --stale'"
     if report.conflicting:
         detail += f" conflicting_paths={', '.join(str(path) for path in report.conflicting)}"
     return StartupCheck(name, report.safe_to_start, detail)

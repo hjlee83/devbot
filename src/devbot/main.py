@@ -261,9 +261,15 @@ def _build_worktree_parser(subparsers: argparse._SubParsersAction) -> None:
     )
 
     cleanup_parser = worktree_subparsers.add_parser(
-        "cleanup", help="지정한 Issue의 worktree를 명시적으로 제거합니다."
+        "cleanup", help="Issue worktree를 명시적으로 제거합니다."
     )
-    cleanup_parser.add_argument("--issue", type=int, required=True, help="대상 GitHub Issue 번호.")
+    cleanup_target = cleanup_parser.add_mutually_exclusive_group(required=True)
+    cleanup_target.add_argument("--issue", type=int, help="대상 GitHub Issue 번호.")
+    cleanup_target.add_argument(
+        "--stale",
+        action="store_true",
+        help="Git이 prunable로 표시한 stale Job worktree를 일괄 정리합니다.",
+    )
     cleanup_parser.add_argument(
         "--repo", default=None, help="owner/repo 형식. 생략하면 단일 enabled 저장소를 씁니다."
     )
@@ -271,7 +277,7 @@ def _build_worktree_parser(subparsers: argparse._SubParsersAction) -> None:
         "--force",
         action="store_true",
         default=True,
-        help="미커밋 변경이 있어도 강제로 제거합니다 (기본값).",
+        help="--issue 정리 시 미커밋 변경이 있어도 강제로 제거합니다 (기본값).",
     )
 
 
@@ -1335,11 +1341,21 @@ def _run_worktree_command(args: argparse.Namespace, config: DevBotConfig) -> int
         return 0
 
     try:
-        manager.cleanup(repository, args.issue, force=args.force)
+        if args.stale:
+            removed = manager.cleanup_stale(repository)
+        else:
+            manager.cleanup(repository, args.issue, force=args.force)
+            removed = (manager.worktree_path(repository, args.issue),)
     except WorkspacePreparationError as exc:
         print(f"worktree cleanup 오류: [{exc.category.value}] {exc}", file=sys.stderr)
         return 1
-    print(f"worktree 제거 완료: issue #{args.issue}")
+
+    if args.stale:
+        print(f"stale worktree 정리 완료: {len(removed)}개")
+        for path in removed:
+            print(f"  - {path}")
+    else:
+        print(f"worktree 제거 완료: issue #{args.issue}")
     return 0
 
 

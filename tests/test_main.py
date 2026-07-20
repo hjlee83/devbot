@@ -2639,3 +2639,27 @@ def test_daemon_run_sees_a_devbot_init_registered_repository(
         if getattr(record, "event", None) == "managed_repository"
     ]
     assert any("someone/myrepo" in record.getMessage() for record in repo_records)
+
+
+def test_worktree_cleanup_stale_command_is_wired(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    removed_path = tmp_path / "workspace" / "myrepo" / ".worktrees" / "issue-30"
+
+    with patch("devbot.main.WorktreeManager") as manager_class:
+        manager = manager_class.return_value
+        manager.cleanup_stale.return_value = (removed_path,)
+
+        exit_code = main(
+            ["worktree", "cleanup", "--stale"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    manager.cleanup_stale.assert_called_once()
+    manager.cleanup.assert_not_called()
+    out = capsys.readouterr().out
+    assert "stale worktree 정리 완료: 1개" in out
+    assert str(removed_path) in out
