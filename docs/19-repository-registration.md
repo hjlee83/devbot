@@ -84,9 +84,9 @@ sources:
 
 ```text
 legacy_repositories    <- WORKSPACE_ROOT + config/repositories.yaml,
-                          loaded only when WORKSPACE_ROOT is set (unchanged
-                          behavior otherwise - an existing deployment that
-                          never touches `devbot init` sees no difference)
+                          loaded when WORKSPACE_ROOT is set and the legacy
+                          file is explicitly configured or exists in the
+                          runtime directory
 registry_repositories   <- devbot.repository_registry
                            .resolve_registered_repositories()
 
@@ -99,6 +99,15 @@ repository), or - if neither yields anything - `load_config()` raises
 `ConfigError("No repositories configured: ...")`, the same fail-closed
 discipline the rest of this codebase already uses for missing required
 configuration.
+
+The default legacy path (`config/repositories.yaml`) is optional when one or
+more registry repositories resolve successfully. This is what lets an installed
+DevBot daemon run from `~/runtime/devbot` or another empty operational
+directory after repositories have been registered with `devbot init`.
+Explicit legacy paths remain strict: if `DEVBOT_REPOSITORIES_PATH` or a caller
+provided `repositories_path` points at a missing or malformed file,
+`load_config()` raises `ConfigError` instead of silently ignoring the
+operator's requested source.
 
 ## Diagnostics: never crash on one bad registration
 

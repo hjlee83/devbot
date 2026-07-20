@@ -256,6 +256,14 @@ def load_config(
         _resolve_role_agent("REVIEWER_AGENT", raw_default_agent, _DEFAULT_REVIEWER_AGENT),
     )
 
+    resolved_registry_path = (
+        Path(registry_path) if registry_path is not None else default_registry_path()
+    )
+    registry_resolution = resolve_registered_repositories(resolved_registry_path)
+    registry_diagnostics = tuple(
+        f"{diagnostic.kind}: {diagnostic.message}" for diagnostic in registry_resolution.diagnostics
+    )
+
     legacy_repositories: tuple[RepositoryConfig, ...] = ()
     if workspace_root is not None:
         repositories_path_raw = (
@@ -266,20 +274,27 @@ def load_config(
         resolved_repositories_path = (
             Path(repositories_path_raw) if repositories_path_raw else DEFAULT_REPOSITORIES_PATH
         )
-        legacy_repositories = _load_repositories(resolved_repositories_path, workspace_root)
-
-    resolved_registry_path = (
-        Path(registry_path) if registry_path is not None else default_registry_path()
-    )
-    registry_resolution = resolve_registered_repositories(resolved_registry_path)
-    registry_diagnostics = tuple(
-        f"{diagnostic.kind}: {diagnostic.message}" for diagnostic in registry_resolution.diagnostics
-    )
+        legacy_path_is_explicit = repositories_path_raw is not None
+        if resolved_repositories_path.is_file() or legacy_path_is_explicit:
+            legacy_repositories = _load_repositories(resolved_repositories_path, workspace_root)
 
     repositories = legacy_repositories + registry_resolution.repositories
     _require_no_cross_source_duplicates(legacy_repositories, registry_resolution.repositories)
 
     if not repositories:
+        if workspace_root is not None:
+            repositories_path_raw = (
+                str(repositories_path)
+                if repositories_path is not None
+                else os.environ.get("DEVBOT_REPOSITORIES_PATH")
+            )
+            resolved_repositories_path = (
+                Path(repositories_path_raw) if repositories_path_raw else DEFAULT_REPOSITORIES_PATH
+            )
+            if not resolved_repositories_path.is_file():
+                raise ConfigError(
+                    f"Missing required repositories file: {resolved_repositories_path}"
+                )
         raise ConfigError(
             "No repositories configured: set WORKSPACE_ROOT + config/repositories.yaml, "
             "or register at least one repository with `devbot init`"

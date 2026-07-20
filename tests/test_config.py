@@ -377,6 +377,29 @@ def test_workspace_root_is_optional_when_a_repository_is_registered(
     assert config.registry_diagnostics == ()
 
 
+def test_default_legacy_repositories_file_is_optional_with_registered_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_root = tmp_path / "legacy-workspace"
+    env_path = _write_env(tmp_path, workspace_root)
+    registry_path = tmp_path / "registry.yaml"
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    repo_root = tmp_path / "registered-repo"
+    repo_root.mkdir()
+    (repo_root / ".git").mkdir()
+    initialize_repository(
+        repo_root, owner="someone", repo="registered-repo", registry_path=registry_path
+    )
+    monkeypatch.chdir(runtime_dir)
+
+    config = load_config(env_path=env_path, registry_path=registry_path)
+
+    assert config.workspace_root == workspace_root
+    assert {repo.full_name for repo in config.repositories} == {"someone/registered-repo"}
+    assert not (runtime_dir / "config" / "repositories.yaml").exists()
+
+
 def test_legacy_and_registered_repositories_are_merged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

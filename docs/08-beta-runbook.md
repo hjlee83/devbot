@@ -116,8 +116,15 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 EOF
 mkdir tests && echo 'def test_ok() -> None:\n    assert True' > tests/test_dummy.py
 uv sync -q && git add -A && git commit -q -m init
+uv run --project /path/to/devbot devbot init --owner someone --repo myrepo
 
-# 2. Point DevBot at it.
+# Registry-based runtime operation can start from an unrelated directory with
+# no config/repositories.yaml.
+mkdir -p /tmp/devbot-smoke/runtime && cd /tmp/devbot-smoke/runtime
+uv run --project /path/to/devbot devbot doctor
+uv run --project /path/to/devbot devbot --once --dry-run
+
+# 2. Legacy fallback: point DevBot at it with WORKSPACE_ROOT + repositories.yaml.
 cd /path/to/devbot
 cat > /tmp/devbot-smoke/.env <<EOF
 WORKSPACE_ROOT=/tmp/devbot-smoke/workspace

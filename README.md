@@ -81,6 +81,24 @@ the corresponding fields.
 been deleted, or whose `owner/repo` collides with another registration, as an
 actionable (but non-fatal) `repository_registrations` check.
 
+After registration, the daemon and read-only operational commands can run from
+a dedicated runtime directory. The process no longer needs to start inside the
+DevBot source checkout or a directory containing `config/repositories.yaml`:
+
+```bash
+mkdir -p ~/runtime/devbot
+cd ~/runtime/devbot
+uv run --project ~/workspace/devbot devbot doctor
+uv run --project ~/workspace/devbot devbot --once --dry-run
+uv run --project ~/workspace/devbot devbot
+```
+
+Configuration lookup is deterministic: an explicit `--env`/test fixture path
+or process environment provides runtime settings, `DEVBOT_REGISTRY_PATH` (or
+`~/.devbot/registry.yaml`) provides registered repositories, and the legacy
+`config/repositories.yaml` source is loaded only when it is explicitly
+configured or exists in the current runtime directory.
+
 ### Legacy: `WORKSPACE_ROOT` + `config/repositories.yaml`
 
 The original, still-supported configuration: set `WORKSPACE_ROOT` (the
