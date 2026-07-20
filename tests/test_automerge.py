@@ -8,7 +8,12 @@ from devbot.automerge import (
     check_runs_are_green,
     summarize_check_runs,
 )
-from devbot.github_client import GitHubIssue, PullRequest
+from devbot.github_client import (
+    GitHubAPIError,
+    GitHubAuthenticationError,
+    GitHubIssue,
+    PullRequest,
+)
 from devbot.github_write_client import MergePullRequestResult
 from devbot.models import DevBotConfig, RepositoryConfig
 
@@ -143,6 +148,80 @@ def test_automerge_blocks_self_repo_even_when_enabled_and_allowlisted() -> None:
     assert result.decision is AutomergeDecision.BLOCKED
     assert "자기수정 저장소" in result.message
     write_client.merge_pull_request.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# Issue #124: a failed check-runs lookup (403 permission gap, 404,
+# transient API error, ...) must fail closed - blocked, not merged - and
+# never let the exception escape `AutomergeService.process()` uncaught.
+# The previous behavior let this propagate all the way out of
+# `PollingService.run_cycle()`, which crashes `devbot --once` (unlike
+# `run_forever()`, which happens to catch it one level up).
+# --------------------------------------------------------------------------
+
+
+def _raise_github_error(_repo: RepositoryConfig, _sha: str) -> list[dict[str, object]]:
+    raise GitHubAuthenticationError("GitHub authentication failed: 403 Forbidden")
+
+
+def test_automerge_fails_closed_when_check_runs_lookup_raises() -> None:
+    repo = _repo()
+    write_client = MagicMock()
+    state_writer = MagicMock()
+    service = AutomergeService(
+        config=_config(repo, automerge_enabled=True),
+        write_client=write_client,
+        state_writer=state_writer,
+        list_check_runs_for_ref=_raise_github_error,
+    )
+
+    result = service.process(repo, _issue(repo), _pull_request())
+
+    assert result.decision is AutomergeDecision.BLOCKED
+    assert "CI gate 확인 불가" in result.message
+    write_client.merge_pull_request.assert_not_called()
+    state_writer.mark_done.assert_not_called()
+
+
+def test_automerge_reports_blocked_comment_when_check_runs_lookup_raises() -> None:
+    repo = _repo()
+    write_client = MagicMock()
+    state_writer = MagicMock()
+    create_comment = MagicMock()
+    service = AutomergeService(
+        config=_config(repo, automerge_enabled=True, dry_run=False),
+        write_client=write_client,
+        state_writer=state_writer,
+        list_check_runs_for_ref=_raise_github_error,
+        create_comment=create_comment,
+    )
+
+    service.process(repo, _issue(repo), _pull_request())
+
+    create_comment.assert_called_once()
+    posted_body = create_comment.call_args.args[2]
+    assert "devbot:ready-to-merge" in posted_body
+
+
+def test_automerge_fails_closed_for_generic_github_api_error_too() -> None:
+    """Not just the 403 case - any `GitHubClientError` subtype must be
+    caught, since the underlying cause (network hiccup, rate limit, 5xx)
+    can vary."""
+    repo = _repo()
+
+    def _raise_api_error(_repo: RepositoryConfig, _sha: str) -> list[dict[str, object]]:
+        raise GitHubAPIError("GitHub API error 500: internal error")
+
+    service = AutomergeService(
+        config=_config(repo, automerge_enabled=True),
+        write_client=MagicMock(),
+        state_writer=MagicMock(),
+        list_check_runs_for_ref=_raise_api_error,
+    )
+
+    result = service.process(repo, _issue(repo), _pull_request())
+
+    assert result.decision is AutomergeDecision.BLOCKED
 
 
 def test_automerge_merges_and_marks_issue_done_when_all_gates_pass() -> None:
