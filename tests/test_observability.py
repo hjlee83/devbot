@@ -26,6 +26,8 @@ from devbot.observability import (
     install_secret_filter,
     log_candidate_excluded,
     log_job_finished,
+    log_lifecycle_stage_finished,
+    log_lifecycle_stage_started,
     log_startup,
     new_cycle_id,
     redact_secrets,
@@ -327,6 +329,46 @@ def test_log_startup_never_includes_github_token(caplog: pytest.LogCaptureFixtur
     assert startup_records[0].reviewer_agent == "codex"
     repo_records = [r for r in caplog.records if getattr(r, "event", None) == "managed_repository"]
     assert repo_records[0].repository == "someone/myrepo"
+
+
+
+def test_lifecycle_stage_logs_start_and_end_with_elapsed_ms(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = logging.getLogger("devbot.test-lifecycle-stage")
+    logger.propagate = True
+    start = time.monotonic()
+
+    with caplog.at_level(logging.INFO, logger="devbot.test-lifecycle-stage"):
+        log_lifecycle_stage_started(
+            logger, "cyc-1", repository="someone/myrepo", issue_number=42, stage="agent_execution"
+        )
+        log_lifecycle_stage_finished(
+            logger,
+            "cyc-1",
+            repository="someone/myrepo",
+            issue_number=42,
+            stage="agent_execution",
+            start=start,
+            status="failed",
+            detail="token=super-secret-token invalid",
+        )
+
+    start_records = [
+        r for r in caplog.records if getattr(r, "event", None) == "lifecycle_stage_started"
+    ]
+    end_records = [
+        r for r in caplog.records if getattr(r, "event", None) == "lifecycle_stage_finished"
+    ]
+    assert len(start_records) == 1
+    assert start_records[0].stage == "implement"
+    assert start_records[0].raw_stage == "agent_execution"
+    assert len(end_records) == 1
+    assert end_records[0].stage == "implement"
+    assert end_records[0].status == "failed"
+    assert end_records[0].elapsed_ms >= 0
+    assert "stage=start" in caplog.text
+    assert "stage=end" in caplog.text
 
 
 def test_log_job_finished_records_status_and_elapsed_ms(

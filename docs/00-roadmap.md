@@ -782,3 +782,12 @@
       자동 정리, daemon polling 중 자동 cleanup, repository별 cleanup cadence는
       범위에 포함하지 않았다(`src/devbot/worktree.py`, `src/devbot/main.py`,
       `src/devbot/doctor.py`, `results/129-bulk-worktree-cleanup.md`).
+
+- [x] Issue #130: execution lifecycle logging and job status visibility.
+      `observability.log_lifecycle_stage_started`/`log_lifecycle_stage_finished`를
+      추가하고 `PollingService` 주요 단계에 INFO start/end 로그를 배선했다.
+      operator-facing stage는 `bootstrap`, `implement`, `verify`, `delivery`,
+      `review`로 정규화하며, end 로그에는 `elapsed_ms`를 포함한다. 기존
+      DEBUG `stage_finished`, Job failure summary, diagnostic report는 유지한다
+      (`src/devbot/observability.py`, `src/devbot/polling.py`,
+      `results/130-lifecycle-logging.md`).

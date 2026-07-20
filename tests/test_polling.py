@@ -4461,3 +4461,56 @@ def test_existing_workflows_compatible_with_timeline_auto_recording(tmp_path: Pa
 
     assert service.timeline is None
     assert result.status is PollingStatus.DELIVERED
+
+
+def test_implement_job_emits_lifecycle_stage_logs(caplog: pytest.LogCaptureFixture) -> None:
+    repo = _repo("myrepo")
+    config = _config([repo])
+    issue = _issue(repo.full_name, 130, labels=["devbot:ready"], title="Lifecycle logging")
+    linked_pr = _pull_request(130, issue_number=130, head_ref="task/130-lifecycle")
+    github_client = FakeGitHubClient(
+        {repo.full_name: [issue]}, pull_requests_by_repo={repo.full_name: [linked_pr]}
+    )
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    agent_runner = MagicMock()
+    agent_runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+    delivery = MagicMock()
+    delivery.deliver.return_value = DeliveryResult(
+        verification=VerificationResult(passed=True),
+        committed=True,
+        pushed=True,
+        pull_request=PullRequestInfo(number=130, html_url=linked_pr.html_url),
+        dry_run=False,
+        message="delivered",
+    )
+    service = PollingService(
+        config=config,
+        github_client=github_client,
+        implementer_runner=agent_runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        state_writer=state_writer,
+        delivery=delivery,
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        service.run_once()
+
+    started = [
+        getattr(record, "stage", None)
+        for record in caplog.records
+        if getattr(record, "event", None) == "lifecycle_stage_started"
+        and getattr(record, "issue_number", None) == 130
+    ]
+    finished = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "lifecycle_stage_finished"
+        and getattr(record, "issue_number", None) == 130
+    ]
+    assert {"bootstrap", "implement", "verify", "delivery"}.issubset(set(started))
+    finished_by_stage = {record.stage: record for record in finished}
+    for stage in ("bootstrap", "implement", "verify", "delivery"):
+        assert stage in finished_by_stage
+        assert finished_by_stage[stage].status == "completed"
+        assert finished_by_stage[stage].elapsed_ms >= 0

@@ -1437,6 +1437,13 @@ class PollingService:
         Agent - no claim, no GitHub write, nothing that could ever leave an
         Issue stuck in `working`."""
         workspace_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="workspace_validate",
+        )
         try:
             self.ensure_workspace_ready(repository)
         except WorkspaceValidationError as exc:
@@ -1464,6 +1471,13 @@ class PollingService:
         )
 
         agent_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="agent_execution",
+        )
         try:
             agent_result = self.implementer_runner.run(repository, prompt)
         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - must not crash the loop
@@ -1511,6 +1525,13 @@ class PollingService:
         CP-014-6); the caller's own `except Exception` is the last-resort
         safety net for anything unexpected (CP-014-7)."""
         workspace_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="workspace_validate",
+        )
         try:
             if self.prepare_workspace is not None:
                 # Task 023 Scope §11: a Job that prepares its own isolated
@@ -1595,6 +1616,13 @@ class PollingService:
                         message=f"{resolution_failure.category.value}: {resolution_failure}",
                     )
             prep_start = time.monotonic()
+            observability.log_lifecycle_stage_started(
+                self.logger,
+                cycle_id,
+                repository=selected.repository,
+                issue_number=selected.number,
+                stage="workspace_preparation",
+            )
             try:
                 prepared = self.prepare_workspace(repository, issue, linked_pull_request)
             except WorkspacePreparationError as exc:
@@ -1742,6 +1770,13 @@ class PollingService:
         )
 
         agent_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="agent_execution",
+        )
         try:
             context = (
                 build_agent_execution_context(
@@ -2130,6 +2165,20 @@ class PollingService:
         self.logger.info("Delivery 시작: branch=%s", branch)
 
         delivery_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="verification",
+        )
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="delivery",
+        )
         try:
             delivery_result = self.delivery.deliver(
                 work_repository, issue, branch, [], linked_pull_request=linked_pull_request
@@ -2161,6 +2210,14 @@ class PollingService:
                 status=PollingStatus.BLOCKED, task=selected, message=str(exc)
             )
         finally:
+            observability.log_stage(
+                self.logger,
+                cycle_id,
+                repository=selected.repository,
+                issue_number=selected.number,
+                stage="verification",
+                start=delivery_start,
+            )
             observability.log_stage(
                 self.logger,
                 cycle_id,
@@ -2529,6 +2586,13 @@ class PollingService:
         )
 
         workspace_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="workspace_validate",
+        )
         try:
             if self.prepare_workspace is None:
                 self.ensure_workspace_ready(repository)
@@ -2578,6 +2642,13 @@ class PollingService:
             return workspace_error
 
         rework_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="rework_process",
+        )
         try:
             execution_context = (
                 build_agent_execution_context(
@@ -2669,6 +2740,13 @@ class PollingService:
         )
 
         workspace_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="workspace_validate",
+        )
         try:
             if self.prepare_workspace is None:
                 self.ensure_workspace_ready(repository)
@@ -2739,6 +2817,13 @@ class PollingService:
                 )
 
         review_start = time.monotonic()
+        observability.log_lifecycle_stage_started(
+            self.logger,
+            cycle_id,
+            repository=selected.repository,
+            issue_number=selected.number,
+            stage="review_process",
+        )
         try:
             execution_context = (
                 build_agent_execution_context(
