@@ -107,7 +107,7 @@ Each problem becomes a `RegistryDiagnostic` instead:
 | `kind` | Cause | Effect |
 |---|---|---|
 | `missing_path` | Registered path no longer exists (moved/deleted) | That entry excluded, `registry_diagnostics` records it |
-| `duplicate_repository` | Same `owner/repo` registered at two paths | Only the first-seen path kept, the rest excluded |
+| `duplicate_repository` | Same `owner/repo` registered at two paths | Every entry for that ambiguous `owner/repo` excluded |
 | `invalid_config` | `.devbot/config.yaml` missing/unreadable/malformed | That entry excluded |
 
 The **same** `owner/repo` declared once in `config/repositories.yaml` and

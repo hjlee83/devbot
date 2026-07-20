@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -271,7 +272,20 @@ def _write_registry(registry_path: Path, entries: tuple[RegistryEntry, ...]) -> 
         ]
     }
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    serialized = yaml.safe_dump(payload, sort_keys=False)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{registry_path.name}.", suffix=".tmp", dir=registry_path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, registry_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def register_repository(registry_path: Path, repo_root: Path) -> bool:
@@ -308,9 +322,9 @@ def resolve_registered_repositories(registry_path: Path) -> RegistryResolution:
     docstring)."""
 
     entries = load_registry(registry_path)
-    repositories: list[RepositoryConfig] = []
     diagnostics: list[RegistryDiagnostic] = []
-    seen_full_names: dict[str, Path] = {}
+    candidates: list[tuple[RegistryEntry, RepositoryLocalConfig]] = []
+    paths_by_full_name: dict[str, list[Path]] = {}
 
     for entry in entries:
         if not entry.path.is_dir():
@@ -335,20 +349,33 @@ def resolve_registered_repositories(registry_path: Path) -> RegistryResolution:
             continue
 
         full_name = f"{local_config.owner}/{local_config.repo}"
-        if full_name in seen_full_names:
-            diagnostics.append(
-                RegistryDiagnostic(
-                    kind="duplicate_repository",
-                    path=entry.path,
-                    message=(
-                        f"{full_name} is registered at both {seen_full_names[full_name]} and "
-                        f"{entry.path} - remove one registration to resolve the ambiguity"
-                    ),
-                )
-            )
-            continue
-        seen_full_names[full_name] = entry.path
+        candidates.append((entry, local_config))
+        paths_by_full_name.setdefault(full_name, []).append(entry.path)
 
+    duplicate_full_names = {
+        full_name
+        for full_name, registered_paths in paths_by_full_name.items()
+        if len(registered_paths) > 1
+    }
+    for full_name in sorted(duplicate_full_names):
+        registered_paths = paths_by_full_name[full_name]
+        diagnostics.append(
+            RegistryDiagnostic(
+                kind="duplicate_repository",
+                path=registered_paths[0],
+                message=(
+                    f"{full_name} is registered at multiple paths: "
+                    f"{', '.join(str(path) for path in registered_paths)} - remove duplicate "
+                    "registrations to resolve the ambiguity"
+                ),
+            )
+        )
+
+    repositories: list[RepositoryConfig] = []
+    for entry, local_config in candidates:
+        full_name = f"{local_config.owner}/{local_config.repo}"
+        if full_name in duplicate_full_names:
+            continue
         repositories.append(
             RepositoryConfig(
                 owner=local_config.owner,

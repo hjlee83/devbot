@@ -140,6 +140,29 @@ def test_register_repository_is_idempotent(tmp_path: Path) -> None:
     assert len(load_registry(registry_path)) == 1
 
 
+def test_register_repository_keeps_existing_registry_when_atomic_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry_path = tmp_path / "registry.yaml"
+    repo_a = tmp_path / "a"
+    repo_b = tmp_path / "b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    register_repository(registry_path, repo_a)
+    original_contents = registry_path.read_text(encoding="utf-8")
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("devbot.repository_registry.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        register_repository(registry_path, repo_b)
+
+    assert registry_path.read_text(encoding="utf-8") == original_contents
+    assert [entry.path for entry in load_registry(registry_path)] == [repo_a.resolve()]
+
+
 def test_unregister_repository_returns_false_when_not_registered(tmp_path: Path) -> None:
     registry_path = tmp_path / "registry.yaml"
     repo_root = tmp_path / "repo"
@@ -200,19 +223,25 @@ def test_resolve_registered_repositories_reports_duplicate_owner_repo(
     registry_path = tmp_path / "registry.yaml"
     repo_a = tmp_path / "a"
     repo_b = tmp_path / "b"
+    repo_c = tmp_path / "c"
     repo_a.mkdir()
     repo_b.mkdir()
+    repo_c.mkdir()
     write_repository_local_config(repo_a, RepositoryLocalConfig(owner="someone", repo="myrepo"))
     write_repository_local_config(repo_b, RepositoryLocalConfig(owner="someone", repo="myrepo"))
+    write_repository_local_config(repo_c, RepositoryLocalConfig(owner="someone", repo="otherrepo"))
     register_repository(registry_path, repo_a)
     register_repository(registry_path, repo_b)
+    register_repository(registry_path, repo_c)
 
     resolution = resolve_registered_repositories(registry_path)
 
     assert len(resolution.repositories) == 1
-    assert resolution.repositories[0].local_path == repo_a.resolve()
+    assert resolution.repositories[0].local_path == repo_c.resolve()
     assert len(resolution.diagnostics) == 1
     assert resolution.diagnostics[0].kind == "duplicate_repository"
+    assert str(repo_a.resolve()) in resolution.diagnostics[0].message
+    assert str(repo_b.resolve()) in resolution.diagnostics[0].message
 
 
 def test_resolve_registered_repositories_reports_invalid_config(tmp_path: Path) -> None:

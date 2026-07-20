@@ -23,6 +23,9 @@
   변경 없는 재실행은 아무것도 쓰지 않고, 이미 설정된 필드(예:
   `--automerge-allowed`로 한 번 켠 것)를 재실행 시 기본값으로 되돌리지
   않는다.
+- registry 파일 갱신은 같은 디렉터리의 임시 파일에 먼저 쓰고 fsync 후
+  `os.replace()`로 교체한다. replace 전 실패하면 기존 registry 파일은
+  그대로 유지된다.
 - `devbot.config.load_config()`가 `WORKSPACE_ROOT`를 선택 사항으로
   바꿨다(`DevBotConfig.workspace_root: Path | None`). legacy(`WORKSPACE_ROOT`
   + `config/repositories.yaml`, `WORKSPACE_ROOT`가 설정된 경우에만 로드-
@@ -53,7 +56,8 @@
   배선했다 - `load_config()`가 필요로 하는 어떤 설정도 아직 없는 상태가
   이 명령의 정상적인 첫 실행 시나리오이기 때문이다.
 - registry 쪽 문제는 "탐지는 하되 절대 다른 저장소를 막지 않는다"는
-  원칙으로 처리했다(missing path, 중복, 손상된 config 모두 skip +
+  원칙으로 처리했다(missing path, 손상된 config는 해당 entry만 skip +
+  diagnostic, 같은 owner/repo 중복은 그 identity의 모든 entry 격리 +
   diagnostic). 반면 legacy와 registry 두 소스에 동시에 등록된 같은
   owner/repo는 진짜 모호한 경우라 fail closed했다 - 어느 쪽 설정이
   맞는지 추측할 근거가 없기 때문이다.
@@ -85,6 +89,7 @@
 
 - Naming/idempotency/collision: `tests/test_repository_registry.py`
   (`test_register_repository_is_idempotent`,
+  `test_register_repository_keeps_existing_registry_when_atomic_replace_fails`,
   `test_initialize_repository_is_idempotent`,
   `test_initialize_repository_preserves_existing_settings_on_rerun`)
 - 필수 metadata 검증(owner/repo 추론 실패): `test_initialize_repository
@@ -105,11 +110,11 @@
 ## Validation 결과
 
 ```
-$ UV_CACHE_DIR=.uv-cache uv run ruff check .
+$ uv run ruff check .
 All checks passed!
 
-$ UV_CACHE_DIR=.uv-cache uv run pytest
-1334 passed in 129.98s
+$ uv run pytest
+1335 passed in 220.26s
 
 $ UV_CACHE_DIR=.uv-cache uv run devbot --help
 (exit 0, `init` 서브커맨드 노출 확인)
