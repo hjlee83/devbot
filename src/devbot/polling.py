@@ -52,7 +52,6 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
@@ -87,6 +86,7 @@ from devbot.reliability import (
 )
 from devbot.review import ReviewService, has_review_marker_for_head
 from devbot.rework import ReworkService, find_unprocessed_devbot_comments
+from devbot.runtime_scheduler import RuntimeScheduler, RuntimeSchedulerSnapshot
 from devbot.scheduler import select_jobs_with_exclusions
 from devbot.state_labels import matched_task_states, task_state_from_labels
 from devbot.timeline import TimelineService, safe_end, safe_ready, safe_start
@@ -513,6 +513,7 @@ class PollingService:
     # `review_service`). `None` (every existing caller/test that doesn't set
     # this) is a silent no-op - see `devbot.timeline.safe_start`/`safe_end`.
     timeline: TimelineService | None = None
+    runtime_scheduler: RuntimeScheduler | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
     def __post_init__(self) -> None:
@@ -520,6 +521,15 @@ class PollingService:
         # the `observability.log_*` helpers - must survive a broken
         # handler/formatter without changing a Job's outcome.
         self.logger = observability.ensure_safe_logger(self.logger)
+        if self.runtime_scheduler is None:
+            self.runtime_scheduler = RuntimeScheduler(
+                worker_count=self.config.max_concurrent_jobs,
+                ai_concurrency=self.config.ai_concurrency,
+            )
+
+    def runtime_status(self) -> RuntimeSchedulerSnapshot:
+        assert self.runtime_scheduler is not None
+        return self.runtime_scheduler.snapshot()
 
     def _block(
         self,
@@ -1130,36 +1140,23 @@ class PollingService:
         if not jobs:
             return []
 
-        if len(jobs) == 1:
-            return [self._execute_job(jobs[0], repositories, issues_by_key, cycle_id)]
+        assert self.runtime_scheduler is not None
 
-        results: list[PollingResult] = [
-            PollingResult(status=PollingStatus.ITERATION_ERROR, task=job.task) for job in jobs
-        ]
-        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-            future_to_index = {
-                executor.submit(
-                    self._execute_job, job, repositories, issues_by_key, cycle_id
-                ): index
-                for index, job in enumerate(jobs)
-            }
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                try:
-                    results[index] = future.result()
-                except Exception as exc:  # noqa: BLE001 - must not crash other jobs/the next cycle
-                    self.logger.error(
-                        "Job 실행 중 예외 (%s #%d): %s",
-                        jobs[index].task.repository,
-                        jobs[index].task.number,
-                        exc,
-                    )
-                    results[index] = PollingResult(
-                        status=PollingStatus.ITERATION_ERROR,
-                        task=jobs[index].task,
-                        message=str(exc),
-                    )
-        return results
+        def run_job(job: Job) -> PollingResult:
+            return self._execute_job(job, repositories, issues_by_key, cycle_id)
+
+        def make_error_result(job: Job, exc: BaseException) -> PollingResult:
+            self.logger.error(
+                "Job 실행 중 예외 (%s #%d): %s",
+                job.task.repository,
+                job.task.number,
+                exc,
+            )
+            return PollingResult(
+                status=PollingStatus.ITERATION_ERROR, task=job.task, message=str(exc)
+            )
+
+        return self.runtime_scheduler.execute(jobs, run_job, make_error_result)
 
     def run_cycle(self) -> list[PollingResult]:
         """Run one scheduling cycle: collect every repository's job

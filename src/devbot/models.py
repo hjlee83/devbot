@@ -170,6 +170,7 @@ class DevBotConfig:
     # prevent every other repository (legacy or registered) from being
     # managed. Empty for any deployment not using the registry.
     registry_diagnostics: tuple[str, ...] = ()
+    ai_concurrency: int = 1
 
     @property
     def enabled_repositories(self) -> tuple[RepositoryConfig, ...]:

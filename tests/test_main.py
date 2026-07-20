@@ -2663,3 +2663,23 @@ def test_worktree_cleanup_stale_command_is_wired(
     out = capsys.readouterr().out
     assert "stale worktree 정리 완료: 1개" in out
     assert str(removed_path) in out
+
+
+def test_status_command_reports_runtime_scheduler_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MAX_CONCURRENT_JOBS", raising=False)
+    monkeypatch.delenv("AI_CONCURRENCY", raising=False)
+    env_path, repositories_path = _release_env(tmp_path)
+    env_text = env_path.read_text(encoding="utf-8")
+    env_path.write_text(env_text + "MAX_CONCURRENT_JOBS=2\nAI_CONCURRENCY=1\n", encoding="utf-8")
+
+    exit_code = main(["status"], env_path=env_path, repositories_path=repositories_path)
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "runtime_scheduler:" in out
+    assert "worker_count: 2" in out
+    assert "ai_concurrency: 1" in out
+    assert "worker 0: state=idle" in out
+    assert "worker 1: state=idle" in out

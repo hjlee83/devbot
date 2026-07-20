@@ -216,7 +216,7 @@ def log_startup(logger: logging.Logger, config: DevBotConfig) -> None:
     repositories = config.enabled_repositories
     logger.info(
         "DevBot 시작: version=%s implementer=%s reviewer=%s dry_run=%s "
-        "poll_interval_seconds=%d max_concurrent_jobs=%d log_level=%s "
+        "poll_interval_seconds=%d max_concurrent_jobs=%d ai_concurrency=%d log_level=%s "
         "관리 저장소 수=%d",
         _resolve_version(),
         config.implementer_agent,
@@ -224,6 +224,7 @@ def log_startup(logger: logging.Logger, config: DevBotConfig) -> None:
         config.dry_run,
         config.poll_interval_seconds,
         config.max_concurrent_jobs,
+        config.ai_concurrency,
         config.log_level,
         len(repositories),
         extra={
@@ -233,6 +234,7 @@ def log_startup(logger: logging.Logger, config: DevBotConfig) -> None:
             "dry_run": config.dry_run,
             "poll_interval_seconds": config.poll_interval_seconds,
             "max_concurrent_jobs": config.max_concurrent_jobs,
+            "ai_concurrency": config.ai_concurrency,
             "managed_repository_count": len(repositories),
         },
     )

@@ -791,3 +791,14 @@
       DEBUG `stage_finished`, Job failure summary, diagnostic report는 유지한다
       (`src/devbot/observability.py`, `src/devbot/polling.py`,
       `results/130-lifecycle-logging.md`).
+
+- [x] Issue #138: runtime scheduler architecture. Polling에서 선택된 Job을
+      `RuntimeScheduler`로 전달해 단일 daemon 안에서 configurable worker pool,
+      repository별 FIFO queue, per-repository lock, 독립 `AI_CONCURRENCY`
+      semaphore를 적용한다. 서로 다른 repository 작업은 worker/AI capacity가
+      허용하는 범위에서 병렬 실행되고, 같은 repository 작업은 순차 실행된다.
+      `devbot status`는 runtime scheduler 설정과 worker snapshot을 읽기 전용으로
+      출력한다. GoalExecutionPlan/DAG/retry priority/multi-agent orchestration과
+      per-repository polling cadence는 범위에 포함하지 않았다
+      (`src/devbot/runtime_scheduler.py`, `src/devbot/polling.py`,
+      `results/138-runtime-scheduler.md`).
