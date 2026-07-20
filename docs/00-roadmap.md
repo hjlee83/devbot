@@ -739,6 +739,24 @@
   호출로 바꾸고, budget에 per-node뿐 아니라 per-Goal 총량 상한을
   추가했다. 상세는 `ADR-005~007`, `docs/16~18`의 "Correction" 절 참고.
 
+- [x] Issue #118: approved Goal plan execution foundation. Issue #116/
+      PR #117이 정의한 Goal Execution Plan을 재계획 없이 받아 실행하는
+      순수 domain foundation을 추가했다. `GoalExecutionPlan` 계약,
+      DAG Task Graph 검증과 stable ready-node selection, Goal 상태 전이,
+      provider-neutral execution/verification request, PASS/RETRY/FAIL/
+      ESCALATE 처리, retry 및 architecture-review budget enforcement,
+      Completion Snapshot을 `src/devbot/goal_execution_foundation.py`로
+      모델링했다. 실제 Codex/Claude/API/local runtime 호출, GitHub webhook
+      orchestration, persistence, final Goal audit은 범위 밖으로 유지했다
+      (`results/118-approved-goal-plan-execution-foundation.md`).
+
+- [ ] Next Goal: approved GoalExecutionPlan integration adapter. 저장된
+      approved plan을 CLI/daemon에서 로드하고, `ExecutionRequest`와
+      `VerificationRequest`를 기존 `WorktreeManager`, Validation Gate,
+      Specification Validator, ReviewReport evidence, Task Issue/Branch/
+      Contract/PR 흐름에 연결한다. 이 단계에서도 새 scope planning이나
+      provider hard-coding은 금지한다.
+
 - [x] Issue #122: repository registration with `devbot init`. 필수
       `WORKSPACE_ROOT` 기반 저장소 discovery 대신, 대상 저장소 내부에서
       실행하는 명시적 등록으로 대체한다 - `devbot.repository_registry`
