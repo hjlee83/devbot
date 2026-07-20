@@ -2713,6 +2713,53 @@ def test_daemon_run_sees_a_devbot_init_registered_repository(
     assert any("someone/myrepo" in record.getMessage() for record in repo_records)
 
 
+def test_daemon_run_from_unrelated_runtime_dir_uses_registry_without_legacy_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    registry_path = tmp_path / "registry.yaml"
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(registry_path))
+    main(["init"])
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    workspace_root = tmp_path / "legacy-workspace"
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            (
+                "GITHUB_TOKEN=test-token",
+                f"DEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}",
+                f"WORKSPACE_ROOT={workspace_root}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(runtime_dir)
+
+    with (
+        patch("devbot.main._run_startup_self_update", return_value=True),
+        patch("devbot.main.GitHubClient") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="devbot"),
+    ):
+        mock_client_cls.return_value.list_issues.return_value = []
+        exit_code = main(
+            ["--once", "--dry-run"], env_path=env_path, registry_path=registry_path
+        )
+
+    assert exit_code == 0
+    assert not (runtime_dir / "config" / "repositories.yaml").exists()
+    assert any(
+        "someone/myrepo" in record.getMessage()
+        for record in caplog.records
+        if getattr(record, "event", None) == "managed_repository"
+    )
+
+
 def test_worktree_cleanup_stale_command_is_wired(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
