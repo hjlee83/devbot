@@ -138,6 +138,42 @@ def test_approved_plan_runs_dependent_tasks_to_review_requested() -> None:
     assert snapshot.reason == "all required task nodes passed verification"
 
 
+@pytest.mark.parametrize(
+    "verification_plan",
+    [
+        VerificationPlan(()),
+        VerificationPlan((VerificationGate(GateKind.TECHNICAL, required=False),)),
+        VerificationPlan((VerificationGate(GateKind.TECHNICAL, node_ids=("b",)),)),
+    ],
+)
+def test_task_with_no_required_verification_requests_completes_without_stalling(
+    verification_plan: VerificationPlan,
+) -> None:
+    run = run_approved_goal_plan(
+        _plan(
+            graph=TaskGraph(
+                (
+                    TaskNode("a", "First task"),
+                    TaskNode("b", "Second task", dependencies=("a",)),
+                )
+            ),
+            verification_plan=verification_plan,
+        )
+    )
+
+    run = run.record_execution_result(ExecutionResult("a", True, "implemented a"))
+
+    assert run.state is GoalState.EXECUTING
+    assert run.pending_execution_request is None
+    assert run.pending_verification_requests == ()
+    assert run.graph is not None
+    assert run.graph.nodes[0].state is TaskNodeState.COMPLETED
+
+    run = run.request_next_execution()
+    assert run.pending_execution_request is not None
+    assert run.pending_execution_request.node_id == "b"
+
+
 def test_task_graph_ready_nodes_are_stable_and_dependency_aware() -> None:
     graph = TaskGraph(
         (

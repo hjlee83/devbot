@@ -443,6 +443,14 @@ class GoalRun:
             for gate in self.plan.verification_plan.gates
             if gate.applies_to(self._node(result.node_id, graph)) and gate.required
         )
+        if not requests:
+            return replace(
+                self,
+                state=GoalState.EXECUTING,
+                graph=graph.replace_node(result.node_id, state=TaskNodeState.COMPLETED),
+                pending_execution_request=None,
+                pending_verification_requests=(),
+            )
         return replace(
             self,
             state=GoalState.VERIFYING,
