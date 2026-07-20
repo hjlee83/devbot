@@ -9,11 +9,13 @@ from devbot.doctor import (
     check_agent_execution_readiness,
     check_agent_roles,
     check_repository_registrations,
+    check_worktree_health,
     render_doctor_report,
 )
 from devbot.github_client import GitHubAuthenticationError, GitHubUser
 from devbot.lock import ProcessLock
 from devbot.models import DevBotConfig, RepositoryConfig
+from devbot.worktree import WorktreeHealthReport
 
 
 def _repo(local_path: Path) -> RepositoryConfig:
@@ -290,6 +292,26 @@ def test_doctor_reports_worktree_health(tmp_path: Path) -> None:
     assert "conflicting=1" in conflicting_check.detail
     assert str(orphaned) in conflicting_check.detail
     assert report_with_conflict.safe_to_start is True
+
+
+def test_worktree_health_reports_stale_cleanup_hint(tmp_path: Path) -> None:
+    repository = _repo(tmp_path / "myrepo")
+    stale_path = tmp_path / "myrepo" / ".worktrees" / "issue-30"
+    manager = MagicMock()
+    manager.health.return_value = WorktreeHealthReport(
+        operator_checkout_path=repository.local_path,
+        operator_branch="main",
+        worktree_root=tmp_path / "myrepo" / ".worktrees",
+        active=(),
+        stale=(stale_path,),
+        conflicting=(),
+    )
+
+    check = check_worktree_health(repository, manager)
+
+    assert check.ok is True
+    assert "stale=1" in check.detail
+    assert "devbot worktree cleanup --stale" in check.detail
 
 
 # ---- Issue #122: doctor reports devbot init registration problems ----

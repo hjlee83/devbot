@@ -771,3 +771,14 @@
       GitHub Release/패키지 배포 변경, `WORKSPACE_ROOT` 호환성 제거는 이번
       범위에 포함하지 않았다(`src/devbot/repository_registry.py`,
       `docs/19-repository-registration.md`).
+
+- [x] Issue #129: bulk stale worktree cleanup. 기존 `devbot worktree cleanup
+      --issue <N>` 명시 정리 정책은 유지하면서, Git이 `prunable`로 표시한
+      stale Job worktree만 대상으로 하는 `devbot worktree cleanup --stale`을
+      추가했다. `WorktreeManager.cleanup_stale()`는 active/non-prunable
+      worktree를 보존하고 `git worktree prune`으로 stale 등록만 정리한다.
+      `devbot doctor`의 `worktree_health[...]`는 stale 항목이 있으면 바로
+      실행 가능한 cleanup hint를 표시한다. GitHub closed/done 상태 조회 기반
+      자동 정리, daemon polling 중 자동 cleanup, repository별 cleanup cadence는
+      범위에 포함하지 않았다(`src/devbot/worktree.py`, `src/devbot/main.py`,
+      `src/devbot/doctor.py`, `results/129-bulk-worktree-cleanup.md`).

@@ -85,7 +85,11 @@ Issue 본문에서 best-effort로만 파싱된다, 4절 참고).
 - **보존**: Job 실행/Delivery 실패 시 worktree를 자동으로 지우지 않는다.
   정리는 항상 명시적으로만 일어난다.
 - **명시적 정리**: `devbot worktree cleanup --issue <N> [--repo owner/repo]
-  [--force]` (서비스 API: `WorktreeManager.cleanup()`).
+  [--force]` (서비스 API: `WorktreeManager.cleanup()`). Git이 이미
+  `prunable`로 표시한 stale Job worktree는 `devbot worktree cleanup --stale
+  [--repo owner/repo]`로 일괄 정리할 수 있다(서비스 API:
+  `WorktreeManager.cleanup_stale()`). 둘 다 operator가 명시적으로 실행할 때만
+  쓰며, daemon polling은 cleanup을 자동 실행하지 않는다.
 - **충돌 거부**: 같은 경로에 다른 branch가 dirty 상태로 이미 존재하면
   `WorkspacePreparationFailure.WORKTREE_CONFLICT`로 거부한다(안전하지 않은
   재사용 금지).
@@ -146,9 +150,10 @@ preflight 실패와 동일한 복구 경로다.
 
 `devbot doctor`는 활성화된 저장소마다 `worktree_health[<repo>]` 항목을
 보고한다: operator 현재 branch, worktree root, active/stale/conflicting
-worktree 수. `conflicting`(Git이 모르는, worktree root 아래의 디스크
-디렉터리)이 있으면 그 항목만 `FAIL`로 표시되지만 - 다른 startup check와
-마찬가지로 - daemon 전체를 막는 `fatal` 조건은 아니다.
+worktree 수. stale worktree가 있으면 `devbot worktree cleanup --stale`
+힌트를 함께 표시한다. `conflicting`(Git이 모르는, worktree root 아래의
+디스크 디렉터리)이 있으면 그 항목만 `FAIL`로 표시되지만 - 다른 startup
+check와 마찬가지로 - daemon 전체를 막는 `fatal` 조건은 아니다.
 
 ## 7. 기존 워크플로와의 호환성
 

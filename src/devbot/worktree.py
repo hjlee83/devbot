@@ -688,6 +688,31 @@ class WorktreeManager:
             )
         _run_git(repository.local_path, "worktree", "prune")
 
+    def cleanup_stale(self, repository: RepositoryConfig) -> tuple[Path, ...]:
+        """Explicit bulk cleanup for Git-prunable Job worktrees.
+
+        This never removes active registered worktrees. It only prunes entries
+        Git already marks as `prunable` under DevBot's repository-local
+        worktree root, matching the same stale definition `health()` reports.
+        """
+
+        root = self.worktree_root(repository)
+        stale = tuple(
+            entry.path
+            for entry in self._list_worktrees(repository)
+            if root in entry.path.parents and entry.prunable
+        )
+        if not stale:
+            return ()
+
+        completed = _run_git(repository.local_path, "worktree", "prune")
+        if completed.returncode != 0:
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.WORKTREE_CREATION_FAILED,
+                f"git worktree prune failed: {completed.stderr or completed.stdout}",
+            )
+        return stale
+
     def health(self, repository: RepositoryConfig) -> WorktreeHealthReport:
         """Read-only diagnostic view for `devbot doctor` (Scope §10). Never
         raises, even when the operator checkout itself does not exist yet -
