@@ -15,7 +15,11 @@ from devbot.github_client import CombinedCommitStatus, WorkflowRun
 
 
 def _workflow_run(
-    *, status: str = "completed", conclusion: str | None = "success", name: str = "ci"
+    *,
+    status: str = "completed",
+    conclusion: str | None = "success",
+    name: str = "ci",
+    event: str = "pull_request",
 ) -> WorkflowRun:
     return WorkflowRun(
         id=1,
@@ -25,7 +29,7 @@ def _workflow_run(
         html_url="https://github.com/someone/myrepo/actions/runs/1",
         created_at=datetime(2026, 1, 1),
         head_sha="abc123",
-        event="pull_request",
+        event=event,
     )
 
 
@@ -60,6 +64,54 @@ def test_classify_workflow_runs_green_when_all_passing() -> None:
 
     assert isinstance(result, CISourceReading)
     assert result.verdict is CIVerdict.GREEN
+
+
+# --------------------------------------------------------------------------
+# PR #134 review: a workflow run's `head_sha` matching a PR's head is not,
+# by itself, evidence that run validated *this PR* - only `pull_request`/
+# `pull_request_target`-triggered runs count; unrelated `push`/
+# `workflow_dispatch`/`schedule` runs on the same SHA must not influence
+# the verdict either way.
+# --------------------------------------------------------------------------
+
+
+def test_classify_workflow_runs_unavailable_when_only_unrelated_events_succeed() -> None:
+    """A successful `push` or `workflow_dispatch` run on the same SHA must
+    not be mistaken for PR CI having passed."""
+    result = classify_workflow_runs(
+        [
+            _workflow_run(event="push", conclusion="success"),
+            _workflow_run(event="workflow_dispatch", conclusion="success"),
+        ]
+    )
+
+    assert isinstance(result, CISourceUnavailable)
+    assert result.source is CISource.WORKFLOW_RUNS
+
+
+def test_classify_workflow_runs_green_ignores_unrelated_event_failure() -> None:
+    """A failing/pending unrelated workflow (deploy, notify, ...) on the
+    same SHA must not block automerge when the actual PR-validation
+    workflow passed."""
+    result = classify_workflow_runs(
+        [
+            _workflow_run(event="pull_request", conclusion="success"),
+            _workflow_run(event="push", conclusion="failure"),
+        ]
+    )
+
+    assert isinstance(result, CISourceReading)
+    assert result.verdict is CIVerdict.GREEN
+
+
+def test_classify_workflow_runs_unavailable_when_no_relevant_workflow_at_all() -> None:
+    """A repository whose only workflow trigger for this SHA is a
+    `schedule` (cron) run has no PR-validation signal at all - this must
+    read as unavailable, not as silently passing or failing."""
+    result = classify_workflow_runs([_workflow_run(event="schedule", conclusion="success")])
+
+    assert isinstance(result, CISourceUnavailable)
+    assert result.source is CISource.WORKFLOW_RUNS
 
 
 # --- classify_combined_status -------------------------------------------

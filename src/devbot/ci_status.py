@@ -21,6 +21,14 @@ from devbot.github_client import CombinedCommitStatus, WorkflowRun
 
 _PASSING_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 
+# A workflow run's `head_sha` matching a PR's head is not, by itself,
+# evidence that run validated *this PR* - an unrelated `push`,
+# `workflow_dispatch`, or `schedule` run can share the same SHA (e.g. any
+# workflow configured `on: push` fires for every push, including a PR
+# branch's, regardless of whether it has anything to do with PR gating).
+# Only runs GitHub triggered *because* of the PR itself are counted.
+_RELEVANT_WORKFLOW_EVENTS = frozenset({"pull_request", "pull_request_target"})
+
 
 class CIVerdict(StrEnum):
     GREEN = "green"
@@ -87,21 +95,24 @@ def summarize_check_runs(
 def classify_workflow_runs(
     runs: Sequence[WorkflowRun],
 ) -> CISourceReading | CISourceUnavailable:
-    if not runs:
-        return CISourceUnavailable(CISource.WORKFLOW_RUNS, "이 커밋에 대한 workflow run 없음")
+    relevant = [run for run in runs if run.event in _RELEVANT_WORKFLOW_EVENTS]
+    if not relevant:
+        return CISourceUnavailable(
+            CISource.WORKFLOW_RUNS, "이 커밋에 대한 PR 검증(pull_request) workflow run 없음"
+        )
 
-    pending = [run for run in runs if run.status != "completed"]
+    pending = [run for run in relevant if run.status != "completed"]
     if pending:
         names = ", ".join(f"{run.name}: status={run.status}" for run in pending)
         return CISourceReading(CISource.WORKFLOW_RUNS, CIVerdict.PENDING, f"미완료: {names}")
 
-    failing = [run for run in runs if run.conclusion not in _PASSING_CONCLUSIONS]
+    failing = [run for run in relevant if run.conclusion not in _PASSING_CONCLUSIONS]
     if failing:
         names = ", ".join(f"{run.name}: conclusion={run.conclusion}" for run in failing)
         return CISourceReading(CISource.WORKFLOW_RUNS, CIVerdict.FAILING, f"실패: {names}")
 
     return CISourceReading(
-        CISource.WORKFLOW_RUNS, CIVerdict.GREEN, f"workflow run {len(runs)}개 모두 green"
+        CISource.WORKFLOW_RUNS, CIVerdict.GREEN, f"workflow run {len(relevant)}개 모두 green"
     )
 
 

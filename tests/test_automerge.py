@@ -72,7 +72,11 @@ def _pull_request(*, labels: tuple[str, ...] = ("devbot:ready-to-merge",)) -> Pu
 
 
 def _workflow_run(
-    head_sha: str, *, status: str = "completed", conclusion: str | None = "success"
+    head_sha: str,
+    *,
+    status: str = "completed",
+    conclusion: str | None = "success",
+    event: str = "pull_request",
 ) -> WorkflowRun:
     return WorkflowRun(
         id=1,
@@ -82,7 +86,7 @@ def _workflow_run(
         html_url="https://github.com/someone/myrepo/actions/runs/1",
         created_at=datetime(2026, 1, 1),
         head_sha=head_sha,
-        event="pull_request",
+        event=event,
     )
 
 
@@ -271,6 +275,32 @@ def test_automerge_proceeds_when_check_runs_403s_but_workflow_runs_are_green() -
 
     assert result.decision is AutomergeDecision.MERGED
     write_client.merge_pull_request.assert_called_once()
+
+
+def test_automerge_does_not_merge_on_unrelated_successful_workflow_alone() -> None:
+    """PR #134 review: an unrelated `push`/`workflow_dispatch` run
+    succeeding on the same head SHA is not evidence the PR's own CI
+    passed - with no other confirming source, this must still fail
+    closed, not merge."""
+    repo = _repo()
+    write_client = MagicMock()
+    service = AutomergeService(
+        config=_config(repo, automerge_enabled=True),
+        write_client=write_client,
+        state_writer=MagicMock(),
+        list_workflow_runs_for_ref=lambda _repo, sha: [
+            _workflow_run(sha, event="push"),
+            _workflow_run(sha, event="workflow_dispatch"),
+        ],
+        get_combined_status_for_ref=_no_combined_status,
+        list_check_runs_for_ref=_no_check_runs,
+    )
+
+    result = service.process(repo, _issue(repo), _pull_request())
+
+    assert result.decision is AutomergeDecision.BLOCKED
+    assert "CI gate 확인 불가" in result.message
+    write_client.merge_pull_request.assert_not_called()
 
 
 def test_automerge_blocks_when_a_ci_source_reports_failure() -> None:
