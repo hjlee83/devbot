@@ -1,3 +1,4 @@
+import multiprocessing
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,6 +29,51 @@ def _init_git_repo(path: Path, *, remote_url: str | None = None) -> Path:
             ["git", "remote", "add", "origin", remote_url], cwd=str(path), check=True
         )
     return path
+
+
+def _register_repository_process(
+    registry_path: str, repo_root: str, result_queue: multiprocessing.Queue
+) -> None:
+    from pathlib import Path
+
+    from devbot.repository_registry import register_repository
+
+    try:
+        result_queue.put(("ok", register_repository(Path(registry_path), Path(repo_root))))
+    except Exception as exc:  # noqa: BLE001 - test helper returns the child failure
+        result_queue.put(("error", repr(exc)))
+
+
+def _unregister_repository_process(
+    registry_path: str, repo_root: str, result_queue: multiprocessing.Queue
+) -> None:
+    from pathlib import Path
+
+    from devbot.repository_registry import unregister_repository
+
+    try:
+        result_queue.put(("ok", unregister_repository(Path(registry_path), Path(repo_root))))
+    except Exception as exc:  # noqa: BLE001 - test helper returns the child failure
+        result_queue.put(("error", repr(exc)))
+
+
+def _hold_registry_lock_process(
+    registry_path: str, ready_queue: multiprocessing.Queue, release_event: multiprocessing.Event
+) -> None:
+    import fcntl
+    import os
+    from pathlib import Path
+
+    lock_path = Path(registry_path).with_name(f".{Path(registry_path).name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready_queue.put("locked")
+        release_event.wait(timeout=10)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 # --------------------------------------------------------------------------
@@ -161,6 +207,100 @@ def test_register_repository_keeps_existing_registry_when_atomic_replace_fails(
 
     assert registry_path.read_text(encoding="utf-8") == original_contents
     assert [entry.path for entry in load_registry(registry_path)] == [repo_a.resolve()]
+
+
+def test_concurrent_register_repository_preserves_both_entries(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.yaml"
+    repo_a = tmp_path / "a"
+    repo_b = tmp_path / "b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    result_queue: multiprocessing.Queue = multiprocessing.Queue()
+    processes = [
+        multiprocessing.Process(
+            target=_register_repository_process,
+            args=(str(registry_path), str(repo_a), result_queue),
+        ),
+        multiprocessing.Process(
+            target=_register_repository_process,
+            args=(str(registry_path), str(repo_b), result_queue),
+        ),
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert [result_queue.get(timeout=5)[0] for _ in processes] == ["ok", "ok"]
+    assert {entry.path for entry in load_registry(registry_path)} == {
+        repo_a.resolve(),
+        repo_b.resolve(),
+    }
+
+
+def test_concurrent_register_and_unregister_does_not_lose_updates(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.yaml"
+    repo_a = tmp_path / "a"
+    repo_b = tmp_path / "b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    register_repository(registry_path, repo_a)
+    result_queue: multiprocessing.Queue = multiprocessing.Queue()
+    processes = [
+        multiprocessing.Process(
+            target=_unregister_repository_process,
+            args=(str(registry_path), str(repo_a), result_queue),
+        ),
+        multiprocessing.Process(
+            target=_register_repository_process,
+            args=(str(registry_path), str(repo_b), result_queue),
+        ),
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert [result_queue.get(timeout=5)[0] for _ in processes] == ["ok", "ok"]
+    assert [entry.path for entry in load_registry(registry_path)] == [repo_b.resolve()]
+
+
+def test_register_repository_lock_timeout_preserves_existing_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry_path = tmp_path / "registry.yaml"
+    repo_a = tmp_path / "a"
+    repo_b = tmp_path / "b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    register_repository(registry_path, repo_a)
+    original_contents = registry_path.read_text(encoding="utf-8")
+    ready_queue: multiprocessing.Queue = multiprocessing.Queue()
+    release_event = multiprocessing.Event()
+    holder = multiprocessing.Process(
+        target=_hold_registry_lock_process,
+        args=(str(registry_path), ready_queue, release_event),
+    )
+    holder.start()
+    try:
+        assert ready_queue.get(timeout=5) == "locked"
+        monkeypatch.setenv("DEVBOT_REGISTRY_LOCK_TIMEOUT_SECONDS", "0.01")
+
+        with pytest.raises(RepositoryRegistrationError, match="registry lock timeout"):
+            register_repository(registry_path, repo_b)
+
+        assert registry_path.read_text(encoding="utf-8") == original_contents
+        assert [entry.path for entry in load_registry(registry_path)] == [repo_a.resolve()]
+    finally:
+        release_event.set()
+        holder.join(timeout=10)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=10)
 
 
 def test_unregister_repository_returns_false_when_not_registered(tmp_path: Path) -> None:

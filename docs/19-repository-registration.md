@@ -60,7 +60,11 @@ devbot init [--owner OWNER] [--repo REPO] [--default-branch BRANCH]
    a previous `--automerge-allowed` run) is preserved rather than reset to
    its default when re-run without that flag.
 4. Register the repository's absolute path in the global registry -
-   idempotent: registering the same resolved path twice is a no-op.
+   idempotent: registering the same resolved path twice is a no-op. Registry
+   updates hold a registry-path-specific advisory lock across the whole
+   load/mutate/atomic-replace sequence, so concurrent `devbot init` or
+   `devbot init --unregister` processes cannot overwrite each other's
+   updates.
 
 `devbot init` deliberately runs **before** `devbot.config.load_config()` -
 see `main()`'s dispatch order (`src/devbot/main.py`). It must work even when

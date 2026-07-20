@@ -24,13 +24,16 @@ from being managed. Each problem is instead returned as a
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import TracebackType
 
 import yaml
 
@@ -40,6 +43,8 @@ REPO_LOCAL_CONFIG_DIRNAME = ".devbot"
 REPO_LOCAL_CONFIG_FILENAME = "config.yaml"
 DEFAULT_REGISTRY_DIRNAME = ".devbot"
 DEFAULT_REGISTRY_FILENAME = "registry.yaml"
+DEFAULT_REGISTRY_LOCK_TIMEOUT_SECONDS = 30.0
+REGISTRY_LOCK_TIMEOUT_ENV = "DEVBOT_REGISTRY_LOCK_TIMEOUT_SECONDS"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -55,6 +60,55 @@ class RepositoryRegistrationError(RuntimeError):
     """Raised for a registration action that cannot proceed safely - never
     for a single read-side entry that should instead become a
     `RegistryDiagnostic` (see module docstring)."""
+
+
+class RegistryLock:
+    """Advisory file lock for one registry's read-modify-write sequence."""
+
+    def __init__(self, registry_path: Path) -> None:
+        self.registry_path = registry_path
+        self.path = registry_path.with_name(f".{registry_path.name}.lock")
+        self._fd: int | None = None
+
+    def acquire(self) -> None:
+        if self._fd is not None:
+            return
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR, 0o644)
+        deadline = time.monotonic() + _registry_lock_timeout_seconds()
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    raise RepositoryRegistrationError(
+                        f"registry lock timeout for {self.registry_path}: {self.path}"
+                    ) from exc
+                time.sleep(0.01)
+                continue
+            self._fd = fd
+            return
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fcntl.flock(self._fd, fcntl.LOCK_UN)
+        os.close(self._fd)
+        self._fd = None
+
+    def __enter__(self) -> RegistryLock:
+        self.acquire()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +174,23 @@ def default_registry_path() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / DEFAULT_REGISTRY_DIRNAME / DEFAULT_REGISTRY_FILENAME
+
+
+def _registry_lock_timeout_seconds() -> float:
+    raw = os.environ.get(REGISTRY_LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_REGISTRY_LOCK_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise RepositoryRegistrationError(
+            f"{REGISTRY_LOCK_TIMEOUT_ENV} must be a number of seconds, got: {raw!r}"
+        ) from exc
+    if timeout < 0:
+        raise RepositoryRegistrationError(
+            f"{REGISTRY_LOCK_TIMEOUT_ENV} must be >= 0, got: {raw!r}"
+        )
+    return timeout
 
 
 def find_git_repository_root(start: Path) -> Path:
@@ -293,12 +364,13 @@ def register_repository(registry_path: Path, repo_root: Path) -> bool:
     returns `False`. Returns `True` when a new entry was actually added."""
 
     resolved = repo_root.resolve()
-    entries = load_registry(registry_path)
-    if any(entry.path == resolved for entry in entries):
-        return False
+    with RegistryLock(registry_path):
+        entries = load_registry(registry_path)
+        if any(entry.path == resolved for entry in entries):
+            return False
 
-    new_entry = RegistryEntry(path=resolved, registered_at=datetime.now(UTC).isoformat())
-    _write_registry(registry_path, (*entries, new_entry))
+        new_entry = RegistryEntry(path=resolved, registered_at=datetime.now(UTC).isoformat())
+        _write_registry(registry_path, (*entries, new_entry))
     return True
 
 
@@ -308,11 +380,12 @@ def unregister_repository(registry_path: Path, repo_root: Path) -> bool:
     deterministic behavior for ... unregistration" requirement."""
 
     resolved = repo_root.resolve()
-    entries = load_registry(registry_path)
-    remaining = tuple(entry for entry in entries if entry.path != resolved)
-    if len(remaining) == len(entries):
-        return False
-    _write_registry(registry_path, remaining)
+    with RegistryLock(registry_path):
+        entries = load_registry(registry_path)
+        remaining = tuple(entry for entry in entries if entry.path != resolved)
+        if len(remaining) == len(entries):
+            return False
+        _write_registry(registry_path, remaining)
     return True
 
 

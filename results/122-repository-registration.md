@@ -26,6 +26,10 @@
 - registry 파일 갱신은 같은 디렉터리의 임시 파일에 먼저 쓰고 fsync 후
   `os.replace()`로 교체한다. replace 전 실패하면 기존 registry 파일은
   그대로 유지된다.
+- registry 등록/해제는 registry path별 advisory lock을 잡은 뒤
+  `load_registry()` -> mutate -> atomic replace 전체를 수행한다. 동시에
+  여러 `devbot init`/`devbot init --unregister`가 실행되어도 마지막 writer가
+  앞선 갱신을 덮어쓰는 lost update를 만들지 않는다.
 - `devbot.config.load_config()`가 `WORKSPACE_ROOT`를 선택 사항으로
   바꿨다(`DevBotConfig.workspace_root: Path | None`). legacy(`WORKSPACE_ROOT`
   + `config/repositories.yaml`, `WORKSPACE_ROOT`가 설정된 경우에만 로드-
@@ -90,6 +94,9 @@
 - Naming/idempotency/collision: `tests/test_repository_registry.py`
   (`test_register_repository_is_idempotent`,
   `test_register_repository_keeps_existing_registry_when_atomic_replace_fails`,
+  `test_concurrent_register_repository_preserves_both_entries`,
+  `test_concurrent_register_and_unregister_does_not_lose_updates`,
+  `test_register_repository_lock_timeout_preserves_existing_registry`,
   `test_initialize_repository_is_idempotent`,
   `test_initialize_repository_preserves_existing_settings_on_rerun`)
 - 필수 metadata 검증(owner/repo 추론 실패): `test_initialize_repository
@@ -114,7 +121,7 @@ $ uv run ruff check .
 All checks passed!
 
 $ uv run pytest
-1335 passed in 220.26s
+1338 passed in 109.06s
 
 $ UV_CACHE_DIR=.uv-cache uv run devbot --help
 (exit 0, `init` 서브커맨드 노출 확인)
