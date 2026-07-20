@@ -255,6 +255,64 @@ def test_get_pull_request_unmerged_reports_merged_false() -> None:
     assert detail.author_login == "another-user"
 
 
+def test_list_workflow_runs_for_ref_filters_by_head_sha_and_paginates() -> None:
+    session = MagicMock()
+    page_1 = {
+        "workflow_runs": [
+            {
+                "id": 1,
+                "name": "ci",
+                "status": "completed",
+                "conclusion": "success",
+                "html_url": "https://github.com/someone/myrepo/actions/runs/1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "head_sha": "abc123",
+                "event": "pull_request",
+            }
+        ]
+    }
+    page_2 = {"workflow_runs": []}
+    session.get.side_effect = [
+        _mock_response(json_data=page_1),
+        _mock_response(json_data=page_2),
+    ]
+    client = GitHubClient("token123", session=session)
+
+    runs = client.list_workflow_runs_for_ref(_repository(), "abc123", per_page=1)
+
+    assert [run.id for run in runs] == [1]
+    assert runs[0].status == "completed"
+    assert runs[0].conclusion == "success"
+    first_call, second_call = session.get.call_args_list
+    assert first_call.kwargs["params"]["head_sha"] == "abc123"
+    assert first_call.args[0].endswith("/repos/someone/myrepo/actions/runs")
+    assert second_call.kwargs["params"]["page"] == 2
+
+
+def test_get_combined_status_for_ref_parses_state_and_total_count() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response(
+        json_data={"state": "success", "total_count": 2, "statuses": []}
+    )
+    client = GitHubClient("token123", session=session)
+
+    status = client.get_combined_status_for_ref(_repository(), "abc123")
+
+    assert status.state == "success"
+    assert status.total_count == 2
+    assert session.get.call_args.args[0].endswith("/repos/someone/myrepo/commits/abc123/status")
+
+
+def test_get_combined_status_for_ref_defaults_when_no_statuses_posted() -> None:
+    session = MagicMock()
+    session.get.return_value = _mock_response(json_data={"state": "pending", "total_count": 0})
+    client = GitHubClient("token123", session=session)
+
+    status = client.get_combined_status_for_ref(_repository(), "abc123")
+
+    assert status.total_count == 0
+
+
 def test_github_error_is_translated() -> None:
     session = MagicMock()
     session.get.return_value = _mock_response(status_code=404, json_data={"message": "Not Found"})
@@ -460,6 +518,10 @@ def test_client_exposes_read_operations_only() -> None:
         "get_file_content",
         # Task 052: release recommendation aggregation - full PR detail.
         "get_pull_request",
+        # Issue #127: provider-neutral CI status sources for the automerge
+        # gate, usable without the fine-grained PAT "Checks" permission.
+        "list_workflow_runs_for_ref",
+        "get_combined_status_for_ref",
     }
     forbidden_names = {
         "create_issue",

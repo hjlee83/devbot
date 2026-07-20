@@ -8,14 +8,30 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from devbot.github_client import GitHubClientError, GitHubIssue, PullRequest
+from devbot.ci_status import (
+    CISource,
+    CISourceReading,
+    CISourceUnavailable,
+    CIStatusResult,
+    CIVerdict,
+    classify_check_runs,
+    classify_combined_status,
+    classify_workflow_runs,
+    evaluate_ci_status,
+    summarize_check_runs,
+)
+from devbot.github_client import (
+    CombinedCommitStatus,
+    GitHubClientError,
+    GitHubIssue,
+    PullRequest,
+    WorkflowRun,
+)
 from devbot.github_write_client import GitHubWriteClient, MergePullRequestResult
 from devbot.issue_state import IssueStateWriter
 from devbot.models import DevBotConfig, RepositoryConfig
 
 READY_TO_MERGE_LABEL = "devbot:ready-to-merge"
-
-_PASSING_CHECK_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 
 
 class AutomergeDecision(StrEnum):
@@ -25,17 +41,18 @@ class AutomergeDecision(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class CheckRunSummary:
-    name: str
-    status: str
-    conclusion: str | None
-
-
-@dataclass(frozen=True, slots=True)
 class AutomergeResult:
     decision: AutomergeDecision
     message: str
     merge_result: MergePullRequestResult | None = None
+
+
+class ListWorkflowRunsForRefFn(Protocol):
+    def __call__(self, repository: RepositoryConfig, head_sha: str) -> Sequence[WorkflowRun]: ...
+
+
+class GetCombinedStatusForRefFn(Protocol):
+    def __call__(self, repository: RepositoryConfig, ref: str) -> CombinedCommitStatus: ...
 
 
 class ListCheckRunsForRefFn(Protocol):
@@ -43,41 +60,6 @@ class ListCheckRunsForRefFn(Protocol):
 
 
 CreateCommentFn = Callable[[RepositoryConfig, int, str], None]
-
-
-def summarize_check_runs(
-    raw_check_runs: Sequence[dict[str, object]],
-) -> tuple[CheckRunSummary, ...]:
-    return tuple(
-        CheckRunSummary(
-            name=str(raw.get("name") or raw.get("id") or "unknown"),
-            status=str(raw.get("status") or "unknown"),
-            conclusion=(
-                str(raw["conclusion"]) if raw.get("conclusion") is not None else None
-            ),
-        )
-        for raw in raw_check_runs
-    )
-
-
-def check_runs_are_green(check_runs: Sequence[CheckRunSummary]) -> tuple[bool, str]:
-    if not check_runs:
-        return False, "GitHub check-runs가 없습니다"
-
-    failing: list[str] = []
-    pending: list[str] = []
-    for check_run in check_runs:
-        if check_run.status != "completed":
-            pending.append(f"{check_run.name}: status={check_run.status}")
-            continue
-        if check_run.conclusion not in _PASSING_CHECK_CONCLUSIONS:
-            failing.append(f"{check_run.name}: conclusion={check_run.conclusion}")
-
-    if pending:
-        return False, "완료되지 않은 check-run: " + "; ".join(pending)
-    if failing:
-        return False, "통과하지 않은 check-run: " + "; ".join(failing)
-    return True, "모든 check-run이 초록입니다"
 
 
 class AutomergeService:
@@ -89,6 +71,8 @@ class AutomergeService:
         config: DevBotConfig,
         write_client: GitHubWriteClient,
         state_writer: IssueStateWriter,
+        list_workflow_runs_for_ref: ListWorkflowRunsForRefFn,
+        get_combined_status_for_ref: GetCombinedStatusForRefFn,
         list_check_runs_for_ref: ListCheckRunsForRefFn,
         create_comment: CreateCommentFn | None = None,
         logger: logging.Logger | None = None,
@@ -96,6 +80,8 @@ class AutomergeService:
         self.config = config
         self.write_client = write_client
         self.state_writer = state_writer
+        self.list_workflow_runs_for_ref = list_workflow_runs_for_ref
+        self.get_combined_status_for_ref = get_combined_status_for_ref
         self.list_check_runs_for_ref = list_check_runs_for_ref
         self.create_comment = create_comment or write_client.create_comment
         self.logger = logger or logging.getLogger("devbot")
@@ -142,23 +128,57 @@ class AutomergeService:
         if repository.is_self_repo:
             return f"{repository.full_name}는 DevBot 자기수정 저장소라 자동 머지하지 않습니다"
 
-        try:
-            raw_check_runs = self.list_check_runs_for_ref(repository, pull_request.head_sha)
-        except GitHubClientError as exc:
-            # Issue #124: a failed check-runs lookup (403 permission gap,
-            # 404, transient API error, ...) must never be treated as "no
-            # check runs configured, proceed" - it means we genuinely don't
-            # know CI status, so this fails exactly like an unmet gate
-            # (`_record_blocked`, `devbot:ready-to-merge` kept, human can
-            # still merge manually) instead of letting the exception escape
-            # uncaught into `run_cycle()` and crash `--once`.
-            return f"CI gate 확인 불가: check-runs 조회 실패 ({exc})"
-
-        check_runs = summarize_check_runs(raw_check_runs)
-        checks_green, reason = check_runs_are_green(check_runs)
-        if not checks_green:
-            return f"CI gate 실패: {reason}"
+        ci_result = self._evaluate_ci_status(repository, pull_request.head_sha)
+        if ci_result.verdict is CIVerdict.UNKNOWN:
+            # Issue #124: when no source can confirm CI status at all
+            # (permission gaps, 404s, transient API errors, ...), that must
+            # never be treated as "nothing configured, proceed" - it means
+            # we genuinely don't know CI status, so this fails exactly like
+            # an unmet gate (`_record_blocked`, `devbot:ready-to-merge`
+            # kept, human can still merge manually) instead of letting the
+            # exception escape uncaught into `run_cycle()` and crash
+            # `--once`.
+            return f"CI gate 확인 불가: {ci_result.reason}"
+        if ci_result.verdict is not CIVerdict.GREEN:
+            return f"CI gate 실패: {ci_result.reason}"
         return None
+
+    def _evaluate_ci_status(
+        self, repository: RepositoryConfig, head_sha: str
+    ) -> CIStatusResult:
+        # Issue #127: a fine-grained PAT frequently cannot be granted the
+        # "Checks" repository permission, so `list_check_runs_for_ref`
+        # alone 403s and cannot be the single source of truth. Each source
+        # below is consulted independently and a failure/permission gap in
+        # one does not block the others from still confirming CI status.
+        readings: list[CISourceReading] = []
+        unavailable: list[CISourceUnavailable] = []
+
+        try:
+            workflow_runs = self.list_workflow_runs_for_ref(repository, head_sha)
+        except GitHubClientError as exc:
+            unavailable.append(CISourceUnavailable(CISource.WORKFLOW_RUNS, str(exc)))
+        else:
+            reading = classify_workflow_runs(workflow_runs)
+            (readings if isinstance(reading, CISourceReading) else unavailable).append(reading)
+
+        try:
+            combined_status = self.get_combined_status_for_ref(repository, head_sha)
+        except GitHubClientError as exc:
+            unavailable.append(CISourceUnavailable(CISource.COMMIT_STATUS, str(exc)))
+        else:
+            reading = classify_combined_status(combined_status)
+            (readings if isinstance(reading, CISourceReading) else unavailable).append(reading)
+
+        try:
+            raw_check_runs = self.list_check_runs_for_ref(repository, head_sha)
+        except GitHubClientError as exc:
+            unavailable.append(CISourceUnavailable(CISource.CHECK_RUNS, str(exc)))
+        else:
+            reading = classify_check_runs(summarize_check_runs(raw_check_runs))
+            (readings if isinstance(reading, CISourceReading) else unavailable).append(reading)
+
+        return evaluate_ci_status(readings, unavailable)
 
     def _record_blocked(
         self,

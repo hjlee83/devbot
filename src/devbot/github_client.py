@@ -157,6 +157,17 @@ class WorkflowRun:
     event: str
 
 
+@dataclass(frozen=True, slots=True)
+class CombinedCommitStatus:
+    """The combined state of every commit status posted for a ref, per
+    `GET /repos/{owner}/{repo}/commits/{ref}/status` - the older Statuses
+    API that third-party CI providers report through when they use
+    neither GitHub Actions nor the Checks API (Issue #127)."""
+
+    state: str
+    total_count: int
+
+
 def _error_message(response: requests.Response) -> str:
     try:
         payload = response.json()
@@ -600,6 +611,50 @@ class GitHubClient:
             f"/repos/{repository.owner}/{repository.repo}/actions/runs/{run_id}"
         ).json()
         return _parse_workflow_run(payload)
+
+    def list_workflow_runs_for_ref(
+        self,
+        repository: RepositoryConfig,
+        head_sha: str,
+        *,
+        per_page: int = DEFAULT_PER_PAGE,
+    ) -> list[WorkflowRun]:
+        """List every Actions workflow run across *all* workflow files
+        whose head commit is exactly `head_sha`
+        (`GET /repos/{owner}/{repo}/actions/runs` filtered by `head_sha`).
+
+        Unlike `list_workflow_runs`, this does not require knowing a
+        specific `workflow_file` name in advance - a fine-grained PAT
+        needs only "Actions: Read" for this endpoint, not the "Checks"
+        permission `list_check_runs_for_ref` requires, which makes it a
+        usable CI-status source when that permission is unavailable
+        (Issue #127)."""
+        runs: list[WorkflowRun] = []
+        page = 1
+        while True:
+            payload = self._get(
+                f"/repos/{repository.owner}/{repository.repo}/actions/runs",
+                params={"head_sha": head_sha, "page": page, "per_page": per_page},
+            ).json()
+            raw_page = payload.get("workflow_runs", [])
+            runs.extend(_parse_workflow_run(raw_run) for raw_run in raw_page)
+            if len(raw_page) < per_page:
+                break
+            page += 1
+        return runs
+
+    def get_combined_status_for_ref(
+        self, repository: RepositoryConfig, ref: str
+    ) -> CombinedCommitStatus:
+        """Fetch the combined Statuses-API state for `ref`
+        (`GET /repos/{owner}/{repo}/commits/{ref}/status`, Issue #127)."""
+        payload = self._get(
+            f"/repos/{repository.owner}/{repository.repo}/commits/{ref}/status"
+        ).json()
+        return CombinedCommitStatus(
+            state=str(payload.get("state") or "pending"),
+            total_count=int(payload.get("total_count") or 0),
+        )
 
     def download_release_asset(self, repository: RepositoryConfig, asset_id: int) -> bytes:
         """Download a Release asset's raw bytes
