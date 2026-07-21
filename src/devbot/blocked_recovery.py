@@ -140,7 +140,20 @@ def validate_blocked_resume(
             "필요하면 devbot worktree cleanup으로 정리하세요.",
         )
     contract_path = parse_contract_path_from_issue_body(issue.body)
-    if contract_path is not None and not (worktree_path / contract_path).exists():
+    if contract_path is None:
+        return ResumeValidation(
+            False,
+            "Task Contract 경로가 Issue 본문에 선언되어 있지 않아 resume을 거부합니다.",
+        )
+    worktree_root = worktree_path.resolve()
+    contract_file = (worktree_path / contract_path).resolve()
+    if not contract_file.is_relative_to(worktree_root):
+        return ResumeValidation(
+            False,
+            f"Task Contract 경로가 worktree 밖을 가리킵니다: {contract_path}. "
+            "Issue metadata를 수정하세요.",
+        )
+    if not contract_file.exists():
         return ResumeValidation(
             False,
             f"Task Contract가 worktree에 없습니다: {contract_path}. worktree 상태를 확인하세요.",

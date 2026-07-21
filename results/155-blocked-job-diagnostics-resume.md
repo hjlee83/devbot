@@ -12,6 +12,8 @@
 - `devbot resume <repository> <issue-number>` CLI를 추가했다.
 - resume command는 blocked Issue, preserved worktree, Task Contract 존재를 검증한 뒤
   `devbot:blocked -> devbot:ready`로 복구하고 timeline start/end를 기록한다.
+- Task Contract path가 Issue 본문에 없거나, worktree 밖으로 이탈하거나, 선언된 파일이
+  없으면 resume을 fail-closed로 거부한다.
 - unsafe resume은 fail-closed로 거부하고 cleanup/restart 안내를 출력한다.
 
 ## 주요 설계 결정
@@ -43,6 +45,9 @@
   `test_resume_command_restores_blocked_issue_when_worktree_is_safe`
 - Unsafe resume refusal:
   `test_validate_blocked_resume_rejects_missing_worktree`,
+  `test_validate_blocked_resume_rejects_missing_contract_metadata`,
+  `test_validate_blocked_resume_rejects_missing_declared_contract`,
+  `test_validate_blocked_resume_rejects_contract_path_traversal`,
   `test_resume_command_refuses_missing_worktree`
 
 ## Validation 결과
@@ -50,11 +55,11 @@
 - `uv run ruff check src/devbot/blocked_recovery.py src/devbot/polling.py src/devbot/main.py tests/test_blocked_recovery.py tests/test_polling.py tests/test_main.py`
   - PASS
 - `uv run pytest tests/test_blocked_recovery.py tests/test_polling.py::test_unexpected_exception_never_leaves_issue_working tests/test_main.py::test_resume_command_restores_blocked_issue_when_worktree_is_safe tests/test_main.py::test_resume_command_refuses_missing_worktree`
-  - PASS, 6 passed
+  - PASS, 9 passed
 - `uv run ruff check .`
   - PASS
 - `uv run pytest`
-  - PASS, 1455 passed in 169.18s
+  - PASS, 1458 passed in 156.38s
 - `uv run devbot doctor`
   - FAIL: startup self-update가 dirty operator checkout에서 중단됨
     (`skip_reason=operator checkout dirty`). 현재 Task 변경 파일 때문에 발생한 운영
@@ -67,7 +72,7 @@
 
 - `FileNotFoundError`의 `filename`을 diagnostic의 missing path로 렌더링한다.
 - `devbot resume`은 blocked label, worktree existence, Git checkout, declared Task Contract
-  presence를 모두 확인한 뒤에만 `devbot:ready`로 복구한다.
+  metadata, path containment, file presence를 모두 확인한 뒤에만 `devbot:ready`로 복구한다.
 - unsafe resume은 label write 없이 stderr에 거부 사유와 cleanup/restart 안내를 출력한다.
 
 ## 남은 TODO와 제한
@@ -76,6 +81,16 @@
   performs the actual preserved-worktree continuation.
 - Duplicate suppression for repeated identical block writes is covered by blocked Issues being
   unschedulable. A future update can actively update an existing diagnostic marker instead.
+
+## Review Follow-up
+
+- PR review comment 반영: Task Contract path 미선언 시 resume을 거부하도록 변경했다.
+- PR review comment 반영: declared Task Contract path가 preserved worktree 밖으로 이탈하면
+  resume을 거부하도록 변경했다.
+- Regression 추가:
+  `test_validate_blocked_resume_rejects_missing_contract_metadata`,
+  `test_validate_blocked_resume_rejects_missing_declared_contract`,
+  `test_validate_blocked_resume_rejects_contract_path_traversal`.
 
 ## 위험 요소
 

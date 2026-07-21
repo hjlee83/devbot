@@ -16,12 +16,17 @@ def _repo(path: Path) -> RepositoryConfig:
     return RepositoryConfig(owner="someone", repo="myrepo", enabled=True, local_path=path)
 
 
-def _issue(*, labels: tuple[str, ...] = ("devbot:blocked",)) -> GitHubIssue:
+def _issue(
+    *,
+    labels: tuple[str, ...] = ("devbot:blocked",),
+    body: str | None = None,
+) -> GitHubIssue:
     return GitHubIssue(
         repository="someone/myrepo",
         number=155,
         title="Recover blocked job",
-        body=(
+        body=body
+        or (
             "- Branch: `task/155-recovery`\n"
             "- Contract: `tasks/155-recovery.md`\n"
         ),
@@ -87,3 +92,52 @@ def test_validate_blocked_resume_rejects_missing_worktree(tmp_path: Path) -> Non
     assert result.ok is False
     assert "보존된 worktree가 없습니다" in result.message
 
+
+def test_validate_blocked_resume_rejects_missing_contract_metadata(tmp_path: Path) -> None:
+    worktree = tmp_path / ".worktrees" / "issue-155"
+    (worktree / ".git").mkdir(parents=True)
+
+    result = validate_blocked_resume(
+        repository=_repo(tmp_path),
+        issue=_issue(body="- Branch: `task/155-recovery`\n"),
+        worktree_path=worktree,
+    )
+
+    assert result.ok is False
+    assert "Task Contract 경로" in result.message
+    assert "선언되어 있지 않아" in result.message
+
+
+def test_validate_blocked_resume_rejects_missing_declared_contract(tmp_path: Path) -> None:
+    worktree = tmp_path / ".worktrees" / "issue-155"
+    (worktree / ".git").mkdir(parents=True)
+
+    result = validate_blocked_resume(
+        repository=_repo(tmp_path),
+        issue=_issue(),
+        worktree_path=worktree,
+    )
+
+    assert result.ok is False
+    assert "Task Contract가 worktree에 없습니다" in result.message
+
+
+def test_validate_blocked_resume_rejects_contract_path_traversal(tmp_path: Path) -> None:
+    worktree = tmp_path / ".worktrees" / "issue-155"
+    (worktree / ".git").mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("not this contract\n", encoding="utf-8")
+
+    result = validate_blocked_resume(
+        repository=_repo(tmp_path),
+        issue=_issue(
+            body=(
+                "- Branch: `task/155-recovery`\n"
+                "- Contract: `../../outside.md`\n"
+            )
+        ),
+        worktree_path=worktree,
+    )
+
+    assert result.ok is False
+    assert "worktree 밖" in result.message
