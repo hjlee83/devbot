@@ -62,6 +62,7 @@ from devbot.state_labels import (
 )
 
 _LOGGER_NAME = "devbot"
+VALIDATION_PAUSED_LABEL = "devbot:validation-paused"
 
 _ALLOWED_TRANSITIONS: dict[TaskState, tuple[TaskState, ...]] = {
     TaskState.READY: (TaskState.WORKING,),
@@ -128,6 +129,7 @@ class IssueStateWriter:
         *,
         job_type: JobType | None = None,
         reason: str = "",
+        extra_labels: tuple[str, ...] = (),
     ) -> GitHubIssue:
         key = (repository.full_name, issue.number)
         from_state = _current_state(issue)
@@ -158,7 +160,15 @@ class IssueStateWriter:
             if to_state is TaskState.WORKING:
                 self._claimed.add(key)
 
-        new_labels = [label for label in issue.labels if label not in ALL_STATE_LABELS]
+        new_labels = [
+            label
+            for label in issue.labels
+            if label not in ALL_STATE_LABELS
+            and not (to_state is TaskState.WORKING and label == VALIDATION_PAUSED_LABEL)
+        ]
+        for label in extra_labels:
+            if label not in new_labels:
+                new_labels.append(label)
         new_labels.append(state_label(to_state))
 
         try:
@@ -207,13 +217,21 @@ class IssueStateWriter:
         *,
         job_type: JobType | None = None,
         reason: str = "preflight validation failed before Agent execution",
+        extra_labels: tuple[str, ...] = (),
     ) -> GitHubIssue:
         """Move a `working` Issue back to `to_state` (whichever stable
         state - `ready`/`review`/`rework` - it was claimed from). Used when
         a preflight check (before any Agent execution) fails right after
         `claim()` (CP-014-5): the claim never should have happened, so it
         is undone rather than recorded as a `blocked` failure."""
-        return self._transition(repository, issue, to_state, job_type=job_type, reason=reason)
+        return self._transition(
+            repository,
+            issue,
+            to_state,
+            job_type=job_type,
+            reason=reason,
+            extra_labels=extra_labels,
+        )
 
     def block(
         self,

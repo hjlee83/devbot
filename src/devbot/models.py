@@ -108,6 +108,7 @@ class ExclusionReason(StrEnum):
     NOT_READY = "not_ready"
     LOWER_PRIORITY = "lower_priority"
     DRY_RUN = "dry_run"
+    VALIDATION_PAUSED = "validation_paused"
 
 
 @dataclass(frozen=True, slots=True)

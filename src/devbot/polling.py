@@ -45,6 +45,7 @@ wired one simply never sees that job type as a candidate.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import logging
 import re
@@ -64,7 +65,7 @@ from devbot.automerge import READY_TO_MERGE_LABEL, AutomergeDecision, AutomergeS
 from devbot.delivery import DeliveryService, branch_has_implementation_evidence
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_retry import GitHubTransientError
-from devbot.issue_state import ClaimConflictError, IssueStateWriter
+from devbot.issue_state import VALIDATION_PAUSED_LABEL, ClaimConflictError, IssueStateWriter
 from devbot.models import (
     AgentOutcome,
     CandidateExclusion,
@@ -139,25 +140,39 @@ _VALIDATION_MANUAL_ACTION_CATEGORIES = frozenset(
 
 RESUME_ATTEMPT_LIMIT = 3
 _BOOTSTRAP_METADATA_DIAGNOSTIC_MARKER = "<!-- devbot-bootstrap-metadata-diagnostic:v1"
+_BOOTSTRAP_METADATA_DIAGNOSTIC_RE = re.compile(
+    r"<!-- devbot-bootstrap-metadata-diagnostic:v1 "
+    r"missing=(?P<missing>[^ ]+) body_sha=(?P<body_sha>[0-9a-f]{64}) -->"
+)
 _RESUME_MARKER_RE = re.compile(
     r"<!-- devbot-resume:v1 issue=(?P<issue>\d+) pr=(?P<pr>\d+|-) "
     r"attempt=(?P<attempt>\d+) branch=(?P<branch>[^ ]+) reason=(?P<reason>[^ ]+) -->"
 )
 
 
-def _bootstrap_metadata_diagnostic_marker(missing_fields: Sequence[str]) -> str:
+def _issue_body_sha(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _bootstrap_metadata_diagnostic_marker(
+    missing_fields: Sequence[str], *, issue_body: str
+) -> str:
     fields = ",".join(missing_fields) if missing_fields else "-"
-    return f"{_BOOTSTRAP_METADATA_DIAGNOSTIC_MARKER} missing={fields} -->"
+    return (
+        f"{_BOOTSTRAP_METADATA_DIAGNOSTIC_MARKER} missing={fields} "
+        f"body_sha={_issue_body_sha(issue_body)} -->"
+    )
 
 
 def _render_bootstrap_metadata_diagnostic(
     *,
     reason: str,
     missing_fields: Sequence[str],
+    issue_body: str,
 ) -> str:
     fields = tuple(missing_fields) or ("unknown",)
     missing_lines = "\n".join(f"- {field}" for field in fields)
-    marker = _bootstrap_metadata_diagnostic_marker(fields)
+    marker = _bootstrap_metadata_diagnostic_marker(fields, issue_body=issue_body)
     return f"""{marker}
 DevBot could not start this task because required Issue metadata is missing or invalid.
 
@@ -182,6 +197,19 @@ Describe what may be changed.
 - Define the commands or checks that must pass.
 
 Keep or reapply `devbot:ready` after updating the Issue so DevBot can retry."""
+
+
+def _has_current_bootstrap_metadata_diagnostic(
+    comments: Sequence[IssueComment | PullRequestComment],
+    *,
+    issue_body: str,
+) -> bool:
+    current_sha = _issue_body_sha(issue_body)
+    return any(
+        match.group("body_sha") == current_sha
+        for comment in comments
+        for match in _BOOTSTRAP_METADATA_DIAGNOSTIC_RE.finditer(comment.body)
+    )
 
 
 def _resume_attempt_from_comments(
@@ -633,6 +661,7 @@ class PollingService:
         selected: IssueTask,
         *,
         job_type: JobType = JobType.IMPLEMENT,
+        extra_labels: tuple[str, ...] = (),
     ) -> PollingResult | None:
         """Attempt to move `issue` back to `to_state` (CP-014-5: undo a
         claim after a preflight failure, before any Agent ran). Returns a
@@ -640,7 +669,12 @@ class PollingService:
         success so the caller keeps returning its own failure status."""
         try:
             self.state_writer.restore(  # type: ignore[union-attr]
-                repository, issue, to_state, job_type=job_type, reason=reason
+                repository,
+                issue,
+                to_state,
+                job_type=job_type,
+                reason=reason,
+                extra_labels=extra_labels,
             )
         except Exception as exc:  # noqa: BLE001 - must not crash the loop
             self.logger.error(
@@ -660,7 +694,7 @@ class PollingService:
         if self.state_writer is None:
             return
         missing_fields = error.missing_metadata_fields
-        marker = _bootstrap_metadata_diagnostic_marker(missing_fields)
+        marker = _bootstrap_metadata_diagnostic_marker(missing_fields, issue_body=issue.body)
         try:
             comments = self.github_client.list_issue_comments(repository, issue.number)
         except Exception as exc:  # noqa: BLE001 - diagnostic comment is best-effort
@@ -676,6 +710,7 @@ class PollingService:
         body = _render_bootstrap_metadata_diagnostic(
             reason=str(error),
             missing_fields=missing_fields,
+            issue_body=issue.body,
         )
         try:
             self.state_writer.comment(repository, issue, body)
@@ -686,6 +721,42 @@ class PollingService:
                 issue.number,
                 exc,
             )
+
+    def _ready_task_is_paused_for_bootstrap_validation(
+        self,
+        repository: RepositoryConfig,
+        task: IssueTask,
+        issue: GitHubIssue,
+        cycle_id: str,
+    ) -> bool:
+        if VALIDATION_PAUSED_LABEL not in issue.labels:
+            return False
+        try:
+            comments = self.github_client.list_issue_comments(repository, issue.number)
+        except Exception as exc:  # noqa: BLE001 - avoid running a known-paused invalid task
+            self.logger.warning(
+                "Bootstrap validation pause 댓글 조회 실패 (%s #%d): %s",
+                task.repository,
+                task.number,
+                exc,
+            )
+            return True
+        if not _has_current_bootstrap_metadata_diagnostic(comments, issue_body=issue.body):
+            return False
+        observability.log_candidate_excluded(
+            self.logger,
+            cycle_id,
+            CandidateExclusion(
+                repository=task.repository,
+                issue_number=task.number,
+                reason=ExclusionReason.VALIDATION_PAUSED,
+                job_type=JobType.IMPLEMENT,
+                detail=(
+                    "bootstrap validation failure diagnostic exists for the current Issue body"
+                ),
+            ),
+        )
+        return True
 
     def _collect(
         self, repositories: Sequence[RepositoryConfig], cycle_id: str
@@ -1098,6 +1169,11 @@ class PollingService:
                 continue
 
             for ready_task in (task for task in repo_tasks if task.state == TaskState.READY):
+                issue = issues_by_key[(ready_task.repository, ready_task.number)]
+                if self._ready_task_is_paused_for_bootstrap_validation(
+                    repository, ready_task, issue, cycle_id
+                ):
+                    continue
                 job = Job(job_type=JobType.IMPLEMENT, task=ready_task)
                 candidates.append(job)
                 observability.log_candidate_found(self.logger, cycle_id, job)
@@ -1745,6 +1821,11 @@ class PollingService:
                     f"워크스페이스 준비 실패({exc.category.value}): {exc}",
                     selected,
                     job_type=JobType.IMPLEMENT,
+                    extra_labels=(
+                        (VALIDATION_PAUSED_LABEL,)
+                        if exc.category is WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED
+                        else ()
+                    ),
                 )
                 safe_end(
                     self.timeline,
