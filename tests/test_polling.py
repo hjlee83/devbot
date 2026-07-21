@@ -1415,7 +1415,12 @@ def test_unexpected_exception_never_leaves_issue_working() -> None:
 
     assert result.status is PollingStatus.BLOCKED
     assert write_client.set_labels.call_args_list[-1].args == (repo, 6, ["devbot:blocked"])
-    assert "delivery crashed" in write_client.create_comment.call_args.args[2]
+    comment = write_client.create_comment.call_args.args[2]
+    assert "devbot-blocked-diagnostic:v1" in comment
+    assert "stage: delivery" in comment
+    assert "exception: RuntimeError" in comment
+    assert "message: delivery crashed" in comment
+    assert "Recovery steps:" in comment
 
 
 def test_approval_required_agent_output_skips_delivery() -> None:

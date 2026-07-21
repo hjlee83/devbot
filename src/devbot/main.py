@@ -35,6 +35,7 @@ from devbot.agent_registry import (
 from devbot.agents import build_agent_runner
 from devbot.agents.base import AgentRunner, AgentSessionLimitError
 from devbot.automerge import AutomergeService
+from devbot.blocked_recovery import validate_blocked_resume
 from devbot.config import ConfigError, load_config
 from devbot.delivery import DeliveryService
 from devbot.doctor import build_doctor_report, render_doctor_report
@@ -73,7 +74,7 @@ from devbot.goal_runtime_adapter import (
 )
 from devbot.issue_state import IssueStateWriter
 from devbot.lock import LockAcquisitionError, ProcessLock
-from devbot.models import AgentOutcome, DevBotConfig, IssueComment, RepositoryConfig
+from devbot.models import AgentOutcome, DevBotConfig, IssueComment, RepositoryConfig, TaskState
 from devbot.observability import (
     LOG_LEVELS,
     install_secret_filter,
@@ -160,7 +161,7 @@ from devbot.startup import (
     run_startup_checks,
     run_startup_self_update,
 )
-from devbot.timeline import TimelineError, TimelineService
+from devbot.timeline import TimelineError, TimelineService, safe_end, safe_start
 from devbot.workspace import build_agent_prompt
 from devbot.worktree import WorkspacePreparationError, WorktreeManager
 
@@ -1588,6 +1589,65 @@ def _run_worktree_command(args: argparse.Namespace, config: DevBotConfig) -> int
     return 0
 
 
+def _run_resume_command(args: argparse.Namespace, config: DevBotConfig) -> int:
+    try:
+        repository = _resolve_repository(config, args.repository)
+    except ConfigError as exc:
+        print(f"resume 실패: {exc}", file=sys.stderr)
+        return 1
+
+    read_client = GitHubClient(config.github_token)
+    write_client = GitHubWriteClient(config.github_token)
+    state_writer = IssueStateWriter(write_client, dry_run=config.dry_run)
+    timeline = TimelineService(
+        read_client=read_client,
+        write_client=write_client,
+        dry_run=config.dry_run,
+    )
+    issue = read_client.get_issue(repository, args.issue_number)
+    manager = WorktreeManager(workspace_root=config.workspace_root, dry_run=config.dry_run)
+    worktree_path = manager.worktree_path(repository, args.issue_number)
+    validation = validate_blocked_resume(
+        repository=repository,
+        issue=issue,
+        worktree_path=worktree_path,
+    )
+    if not validation.ok:
+        print(f"resume 거부: {validation.message}", file=sys.stderr)
+        return 1
+
+    safe_start(
+        timeline,
+        repository,
+        issue.number,
+        phase="dev",
+        actor="operator",
+        logger=logging.getLogger(_LOGGER_NAME),
+    )
+    state_writer.restore(
+        repository,
+        issue,
+        TaskState.READY,
+        reason="manual resume requested after blocked diagnostic",
+    )
+    safe_end(
+        timeline,
+        repository,
+        issue.number,
+        phase="dev",
+        actor="operator",
+        result="resume-ready",
+        logger=logging.getLogger(_LOGGER_NAME),
+    )
+    print(validation.message)
+    print(f"repository: {repository.full_name}")
+    print(f"issue: #{issue.number}")
+    print(f"worktree: {validation.worktree_path}")
+    if validation.branch:
+        print(f"branch: {validation.branch}")
+    return 0
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="devbot")
     parser.add_argument(
@@ -1620,6 +1680,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     _build_specification_parser(subparsers)
     _build_review_parser(subparsers)
     subparsers.add_parser("status", help="runtime scheduler 상태를 조회합니다 (읽기 전용).")
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="blocked Issue를 보존된 worktree 기준으로 안전하게 다시 ready 상태로 전환합니다.",
+    )
+    resume_parser.add_argument("repository", help="대상 저장소 owner/repo")
+    resume_parser.add_argument("issue_number", type=int, help="resume할 GitHub Issue 번호")
 
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -1971,6 +2037,9 @@ def main(
 
     if args.command == "worktree":
         return _run_worktree_command(args, config)
+
+    if args.command == "resume":
+        return _run_resume_command(args, config)
 
     if args.command == "release":
         return _run_release_command(args, config)
