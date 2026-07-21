@@ -30,6 +30,7 @@ it stays out of this module) on top and is the place that decides what
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,8 @@ from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.workspace import inspect_workspace
 
 STARTUP_SELF_UPDATE_ENV = "DEVBOT_STARTUP_SELF_UPDATED"
+OPERATOR_CHECKOUT_ENV = "DEVBOT_OPERATOR_CHECKOUT"
+PROJECT_ROOT_ENV = "DEVBOT_PROJECT_ROOT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +105,18 @@ def _git_text(cwd: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def _operator_checkout_candidates(start_path: Path | None) -> tuple[Path, ...]:
+    if start_path is not None:
+        return (start_path,)
+    candidates: list[Path] = []
+    for env_name in (OPERATOR_CHECKOUT_ENV, PROJECT_ROOT_ENV):
+        raw = os.environ.get(env_name)
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    candidates.append(Path(__file__).resolve())
+    return tuple(candidates)
+
+
 def resolve_operator_checkout(start_path: Path | None = None) -> Path:
     """Resolve the DevBot operator checkout, even when invoked from one of
     its Git worktrees.
@@ -109,18 +124,30 @@ def resolve_operator_checkout(start_path: Path | None = None) -> Path:
     `git rev-parse --git-common-dir` points at the main checkout's `.git`
     directory for both the operator checkout and linked worktrees. Its
     parent is therefore the one checkout Startup Self Update is allowed to
-    mutate.
+    mutate. When no explicit path is supplied, resolution is based on the
+    configured DevBot checkout path or this installed module's location, not
+    on the process runtime directory.
     """
-    cwd = start_path or Path.cwd()
-    completed = _git(cwd, "rev-parse", "--git-common-dir")
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout)
-    common_dir = Path(completed.stdout.strip())
-    if not common_dir.is_absolute():
-        common_dir = (cwd / common_dir).resolve()
-    if common_dir.name != ".git":
-        raise RuntimeError(f"unexpected git common dir: {common_dir}")
-    return common_dir.parent
+    errors: list[str] = []
+    for candidate in _operator_checkout_candidates(start_path):
+        cwd = candidate if candidate.is_dir() else candidate.parent
+        completed = _git(cwd, "rev-parse", "--git-common-dir")
+        if completed.returncode != 0:
+            errors.append(f"{cwd}: {(completed.stderr or completed.stdout).strip()}")
+            continue
+        common_dir = Path(completed.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = (cwd / common_dir).resolve()
+        if common_dir.name != ".git":
+            errors.append(f"{cwd}: unexpected git common dir: {common_dir}")
+            continue
+        return common_dir.parent
+    detail = "; ".join(error for error in errors if error) or "no candidate paths"
+    raise RuntimeError(
+        "cannot resolve DevBot operator checkout. Set "
+        f"{OPERATOR_CHECKOUT_ENV} or {PROJECT_ROOT_ENV} to the DevBot source checkout "
+        f"when running from a non-Git installation. Tried: {detail}"
+    )
 
 
 def startup_self_update_operator(
@@ -128,7 +155,19 @@ def startup_self_update_operator(
     *,
     default_branch: str = "main",
 ) -> StartupSelfUpdateResult:
-    path = operator_checkout or resolve_operator_checkout()
+    try:
+        path = resolve_operator_checkout(operator_checkout)
+    except Exception as exc:  # noqa: BLE001
+        result = StartupSelfUpdateResult(
+            repository=str(operator_checkout or ""),
+            current_sha="",
+            latest_sha="",
+            final_sha="",
+            result="failed",
+            skip_reason=f"operator checkout 확인 실패: {exc}",
+            reason_code="checkout_resolution_failed",
+        )
+        raise StartupSelfUpdateError(result) from exc
     repository_name = str(path)
     try:
         current_sha = _git_text(path, "rev-parse", "HEAD")

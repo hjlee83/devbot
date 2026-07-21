@@ -99,6 +99,10 @@ or process environment provides runtime settings, `DEVBOT_REGISTRY_PATH` (or
 `config/repositories.yaml` source is loaded only when it is explicitly
 configured or exists in the current runtime directory.
 
+Startup self-update resolves the DevBot operator checkout from
+`DEVBOT_OPERATOR_CHECKOUT`, `DEVBOT_PROJECT_ROOT`, or the installed DevBot
+module path. It does not run Git commands against the runtime directory.
+
 ### Legacy: `WORKSPACE_ROOT` + `config/repositories.yaml`
 
 The original, still-supported configuration: set `WORKSPACE_ROOT` (the
