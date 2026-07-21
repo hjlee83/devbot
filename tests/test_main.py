@@ -2760,6 +2760,68 @@ def test_daemon_run_from_unrelated_runtime_dir_uses_registry_without_legacy_conf
     )
 
 
+def test_daemon_dry_run_from_unrelated_runtime_dir_resolves_operator_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    operator_origin = tmp_path / "operator-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(operator_origin)], check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "HEAD", "refs/heads/main"],
+        cwd=str(operator_origin),
+        check=True,
+    )
+    operator_root = _init_git_repo(tmp_path / "operator", remote_url=str(operator_origin))
+    (operator_root / "README.md").write_text("operator\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=operator_root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=operator_root, check=True)
+    subprocess.run(["git", "add", "."], cwd=operator_root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=operator_root, check=True)
+    subprocess.run(["git", "branch", "-m", "main"], cwd=operator_root, check=True)
+    subprocess.run(
+        ["git", "push", "-q", "origin", "HEAD:refs/heads/main"],
+        cwd=operator_root,
+        check=True,
+    )
+    module_dir = operator_root / "src" / "devbot"
+    module_dir.mkdir(parents=True)
+    repo_root = _init_git_repo(
+        tmp_path / "repo", remote_url="git@github.com:someone/myrepo.git"
+    )
+    registry_path = tmp_path / "registry.yaml"
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("DEVBOT_REGISTRY_PATH", str(registry_path))
+    main(["init"])
+
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        f"GITHUB_TOKEN=test-token\nDEVBOT_LOCK_FILE={tmp_path / 'devbot.lock'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.setattr("devbot.startup.__file__", str(module_dir / "startup.py"))
+
+    with (
+        patch("devbot.main.GitHubClient") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="devbot"),
+    ):
+        mock_client_cls.return_value.list_issues.return_value = []
+        exit_code = main(
+            ["--once", "--dry-run", "--verbose"],
+            env_path=env_path,
+            registry_path=registry_path,
+        )
+
+    assert exit_code == 0
+    assert "fatal: not a git repository" not in caplog.text
+    assert str(operator_root) in caplog.text
+
+
 def test_worktree_cleanup_stale_command_is_wired(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

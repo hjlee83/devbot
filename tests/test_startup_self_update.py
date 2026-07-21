@@ -7,6 +7,7 @@ from devbot.models import DevBotConfig, RepositoryConfig
 from devbot.startup import (
     STARTUP_SELF_UPDATE_ENV,
     StartupSelfUpdateError,
+    resolve_operator_checkout,
     run_startup_self_update,
 )
 
@@ -169,6 +170,54 @@ def test_startup_does_not_update_managed_repositories(tmp_path: Path) -> None:
     assert not (managed / "new.txt").exists()
     assert managed_sha_after == managed_sha_before
     assert operator_repo.local_path == operator
+
+
+def test_startup_resolves_operator_checkout_from_module_when_cwd_is_not_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _origin, operator = _repo_with_origin(tmp_path)
+    module_dir = operator / "src" / "devbot"
+    module_dir.mkdir(parents=True)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.setattr("devbot.startup.__file__", str(module_dir / "startup.py"))
+
+    result = run_startup_self_update(_config(repo, tmp_path))[0]
+
+    assert result.repository == str(operator)
+    assert result.result == "already_current"
+
+
+def test_startup_checkout_resolution_failure_is_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _origin, _operator = _repo_with_origin(tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    module_dir = runtime_dir / "site-packages" / "devbot"
+    module_dir.mkdir(parents=True)
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("DEVBOT_OPERATOR_CHECKOUT", raising=False)
+    monkeypatch.delenv("DEVBOT_PROJECT_ROOT", raising=False)
+    monkeypatch.setattr("devbot.startup.__file__", str(module_dir / "startup.py"))
+
+    with pytest.raises(StartupSelfUpdateError) as exc_info:
+        run_startup_self_update(_config(repo, tmp_path))
+
+    assert exc_info.value.result.reason_code == "checkout_resolution_failed"
+    assert "cannot resolve DevBot operator checkout" in exc_info.value.result.skip_reason
+
+
+def test_resolve_operator_checkout_prefers_explicit_env_over_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _repo, _origin, operator = _repo_with_origin(tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.setenv("DEVBOT_OPERATOR_CHECKOUT", str(operator))
+
+    assert resolve_operator_checkout() == operator
 
 
 def test_startup_update_restart_env_constant_is_available() -> None:

@@ -109,6 +109,11 @@ provided `repositories_path` points at a missing or malformed file,
 `load_config()` raises `ConfigError` instead of silently ignoring the
 operator's requested source.
 
+Startup self-update has a separate source-checkout resolution policy. It uses
+`DEVBOT_OPERATOR_CHECKOUT`, `DEVBOT_PROJECT_ROOT`, or the installed DevBot
+module path to find the DevBot Git checkout, so a runtime directory is never
+mistaken for the operator checkout.
+
 ## Diagnostics: never crash on one bad registration
 
 `resolve_registered_repositories()` never raises for a single broken

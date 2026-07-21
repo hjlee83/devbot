@@ -124,6 +124,10 @@ mkdir -p /tmp/devbot-smoke/runtime && cd /tmp/devbot-smoke/runtime
 uv run --project /path/to/devbot devbot doctor
 uv run --project /path/to/devbot devbot --once --dry-run
 
+# Optional but explicit for service managers and unusual launchers:
+export DEVBOT_OPERATOR_CHECKOUT=/path/to/devbot
+uv run --project /path/to/devbot devbot --once --dry-run --verbose
+
 # 2. Legacy fallback: point DevBot at it with WORKSPACE_ROOT + repositories.yaml.
 cd /path/to/devbot
 cat > /tmp/devbot-smoke/.env <<EOF
