@@ -2501,7 +2501,11 @@ def test_bootstrap_metadata_failure_posts_actionable_comment(tmp_path: Path) -> 
     assert "## Acceptance Criteria" in comment
     assert "## Validation" in comment
     assert "devbot:ready" in comment
-    assert write_client.set_labels.call_args_list[-1].args == (repo, 151, ["devbot:ready"])
+    assert write_client.set_labels.call_args_list[-1].args == (
+        repo,
+        151,
+        ["devbot:validation-paused", "devbot:ready"],
+    )
 
 
 def test_bootstrap_metadata_failure_comment_is_not_duplicated(tmp_path: Path) -> None:
@@ -2534,9 +2538,10 @@ def test_bootstrap_metadata_failure_comment_is_not_duplicated(tmp_path: Path) ->
 
     first = service.run_once()
     first_comment = write_client.create_comment.call_args.args[2]
-    github_client._comments_by_issue[(repo.full_name, 151)] = [  # noqa: SLF001
-        _comment(body=first_comment)
+    github_client._issues_by_repo[repo.full_name] = [  # noqa: SLF001
+        replace(issue, labels=("devbot:validation-paused", "devbot:ready"))
     ]
+    github_client._comments_by_issue[(repo.full_name, 151)] = [_comment(body=first_comment)]  # noqa: SLF001
     service.run_once()
 
     assert first.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
@@ -2590,12 +2595,17 @@ def test_corrected_bootstrap_issue_processes_after_metadata_failure(tmp_path: Pa
     )
 
     failed = service.run_once()
-    github_client._issues_by_repo[repo.full_name] = [corrected_issue]  # noqa: SLF001
+    first_comment = write_client.create_comment.call_args.args[2]
+    github_client._issues_by_repo[repo.full_name] = [  # noqa: SLF001
+        replace(corrected_issue, labels=("devbot:validation-paused", "devbot:ready"))
+    ]
+    github_client._comments_by_issue[(repo.full_name, 151)] = [_comment(body=first_comment)]  # noqa: SLF001
     processed = service.run_once()
 
     assert failed.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
     assert processed.status is PollingStatus.AGENT_COMPLETED
     runner.run.assert_called_once()
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 151, ["devbot:working"])
 
 
 def test_bootstrap_metadata_comment_failure_preserves_original_result(tmp_path: Path) -> None:
@@ -2631,7 +2641,144 @@ def test_bootstrap_metadata_comment_failure_preserves_original_result(tmp_path: 
 
     assert result.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
     assert "bootstrap_validation_failed" in result.message
-    assert write_client.set_labels.call_args_list[-1].args == (repo, 151, ["devbot:ready"])
+    assert write_client.set_labels.call_args_list[-1].args == (
+        repo,
+        151,
+        ["devbot:validation-paused", "devbot:ready"],
+    )
+
+
+def test_paused_bootstrap_metadata_failure_is_not_selected_again(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    issue = _issue(repo.full_name, 152, labels=["devbot:ready"], body="## Scope\n\nOnly.")
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    prepare_workspace = MagicMock(
+        side_effect=WorkspacePreparationError(
+            WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED,
+            "missing required Issue metadata: objective",
+            missing_metadata_fields=("objective",),
+        )
+    )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=prepare_workspace,
+        state_writer=state_writer,
+        delivery=MagicMock(),
+    )
+
+    failed = service.run_once()
+    first_comment = write_client.create_comment.call_args.args[2]
+    github_client._issues_by_repo[repo.full_name] = [  # noqa: SLF001
+        replace(issue, labels=("devbot:validation-paused", "devbot:ready"))
+    ]
+    github_client._comments_by_issue[(repo.full_name, 152)] = [_comment(body=first_comment)]  # noqa: SLF001
+    paused = service.run_once()
+
+    assert failed.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
+    assert paused.status is PollingStatus.NO_READY_TASK
+    assert prepare_workspace.call_count == 1
+    write_client.create_comment.assert_called_once()
+
+
+def test_paused_bootstrap_metadata_failure_resumes_when_issue_body_changes(
+    tmp_path: Path,
+) -> None:
+    repo = _operator_repo(tmp_path)
+    invalid_issue = _issue(repo.full_name, 152, labels=["devbot:ready"], body="## Scope\n\nOnly.")
+    corrected_issue = replace(
+        invalid_issue,
+        body=(
+            "## Objective\n\nDo it.\n\n"
+            "## Scope\n\nChange code.\n\n"
+            "## Acceptance Criteria\n\n- Works.\n\n"
+            "## Validation\n\n- pytest.\n"
+        ),
+    )
+    github_client = FakeGitHubClient({repo.full_name: [invalid_issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+    runner = MagicMock()
+    runner.run.return_value = AgentRunResult(executed=True, dry_run=False, message="ok")
+
+    def prepare(
+        repository: RepositoryConfig,
+        issue_arg: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+    ) -> PreparedWorkspace:
+        if "## Objective" not in issue_arg.body:
+            raise WorkspacePreparationError(
+                WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED,
+                "missing required Issue metadata: objective",
+                missing_metadata_fields=("objective",),
+            )
+        return _prepared_workspace(
+            repository,
+            branch="task/152-pause-bootstrap-validation-failures",
+            issue_number=issue_arg.number,
+            pull_request=None,
+        )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=github_client,
+        implementer_runner=runner,
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=prepare,
+        state_writer=state_writer,
+        delivery=MagicMock(),
+    )
+
+    service.run_once()
+    first_comment = write_client.create_comment.call_args.args[2]
+    github_client._issues_by_repo[repo.full_name] = [  # noqa: SLF001
+        replace(corrected_issue, labels=("devbot:validation-paused", "devbot:ready"))
+    ]
+    github_client._comments_by_issue[(repo.full_name, 152)] = [_comment(body=first_comment)]  # noqa: SLF001
+    result = service.run_once()
+
+    assert result.status is PollingStatus.AGENT_COMPLETED
+    runner.run.assert_called_once()
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 152, ["devbot:working"])
+
+
+def test_transient_workspace_preparation_failure_does_not_pause_issue(tmp_path: Path) -> None:
+    repo = _operator_repo(tmp_path)
+    issue = _issue(repo.full_name, 152, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({repo.full_name: [issue]})
+    write_client = MagicMock(spec=GitHubWriteClient)
+    state_writer = IssueStateWriter(client=write_client, dry_run=False)
+
+    def failing_prepare(
+        repository: RepositoryConfig,
+        issue_arg: GitHubIssue,
+        linked_pull_request: PullRequest | None,
+    ) -> PreparedWorkspace:
+        raise WorkspacePreparationError(
+            WorkspacePreparationFailure.REMOTE_SYNC_FAILED,
+            "git fetch failed",
+        )
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        prepare_workspace=failing_prepare,
+        state_writer=state_writer,
+        delivery=MagicMock(),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.WORKSPACE_PREPARATION_FAILED
+    assert write_client.set_labels.call_args_list[-1].args == (repo, 152, ["devbot:ready"])
+    write_client.create_comment.assert_not_called()
 
 
 def test_daemon_job_is_independent_of_operator_checkout_branch(tmp_path: Path) -> None:
