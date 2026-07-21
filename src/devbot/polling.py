@@ -79,6 +79,7 @@ from devbot.models import (
     RepositoryConfig,
     TaskState,
 )
+from devbot.registry_reload import RegistryReloadResult
 from devbot.reliability import (
     build_diagnostic_report,
     render_diagnostic_report,
@@ -419,6 +420,7 @@ class PrepareWorkspaceFn(Protocol):
 
 
 ReviewIntegrationValidationFn = Callable[[PreparedWorkspace], ReviewIntegrationValidation]
+RegistryReloadFn = Callable[[], RegistryReloadResult | None]
 
 IssuesByKey = dict[tuple[str, int], GitHubIssue]
 
@@ -514,6 +516,7 @@ class PollingService:
     # this) is a silent no-op - see `devbot.timeline.safe_start`/`safe_end`.
     timeline: TimelineService | None = None
     runtime_scheduler: RuntimeScheduler | None = None
+    registry_reload: RegistryReloadFn | None = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger(_LOGGER_NAME))
 
     def __post_init__(self) -> None:
@@ -530,6 +533,32 @@ class PollingService:
     def runtime_status(self) -> RuntimeSchedulerSnapshot:
         assert self.runtime_scheduler is not None
         return self.runtime_scheduler.snapshot()
+
+    def _reload_registry_if_changed(self) -> None:
+        if self.registry_reload is None:
+            return
+        try:
+            result = self.registry_reload()
+        except Exception as exc:  # noqa: BLE001 - keep previous valid config
+            self.logger.error(
+                "registry reload failed; keeping previous configuration: %s", exc
+            )
+            return
+        if result is None:
+            return
+        self.config = result.config
+        if self.automerge_service is not None:
+            self.automerge_service.config = result.config
+        self.logger.info(
+            "registry reload succeeded: added=%d removed=%d unchanged=%d",
+            len(result.added),
+            len(result.removed),
+            result.unchanged_count,
+        )
+        if result.added:
+            self.logger.info("registry repositories added: %s", ", ".join(result.added))
+        if result.removed:
+            self.logger.info("registry repositories removed: %s", ", ".join(result.removed))
 
     def _block(
         self,
@@ -1170,6 +1199,7 @@ class PollingService:
         repositories is diagnosed as `NO_MANAGED_REPOSITORIES` - distinct
         from `NO_READY_TASK` - and the cycle is skipped before any GitHub
         call is made (Task 013 동작 규칙 #4)."""
+        self._reload_registry_if_changed()
         repositories = self.config.enabled_repositories
         if not repositories:
             observability.log_no_managed_repositories(self.logger)

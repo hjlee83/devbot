@@ -81,6 +81,7 @@ from devbot.observability import (
     log_startup_validation,
 )
 from devbot.polling import PollingService, PollingStatus, run_forever
+from devbot.registry_reload import RegistryReloadMonitor
 from devbot.release import authoritative_version
 from devbot.release_classification import ReleaseRecommendation
 from devbot.release_ops import (
@@ -2095,6 +2096,12 @@ def main(
                     logger=logger,
                 ),
                 timeline=timeline_service,
+                registry_reload=RegistryReloadMonitor(
+                    initial_config=config,
+                    env_path=env_path,
+                    repositories_path=repositories_path,
+                    registry_path=registry_path,
+                ).check,
                 logger=logger,
             )
 

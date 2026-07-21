@@ -28,6 +28,7 @@ from devbot.polling import (
     _task_state_from_labels,
     find_linked_pull_request,
 )
+from devbot.registry_reload import RegistryReloadResult
 from devbot.review import ReviewService, build_review_marker
 from devbot.rework import ReworkService
 from devbot.timeline import TimelineService, parse_events
@@ -4514,3 +4515,136 @@ def test_implement_job_emits_lifecycle_stage_logs(caplog: pytest.LogCaptureFixtu
         assert stage in finished_by_stage
         assert finished_by_stage[stage].status == "completed"
         assert finished_by_stage[stage].elapsed_ms >= 0
+
+
+def test_polling_cycle_reloads_registry_addition_before_discovery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    initial_repo = _repo("initial")
+    added_repo = _repo("added")
+    issue = _issue(added_repo.full_name, 147, labels=["devbot:ready"])
+    github_client = FakeGitHubClient({added_repo.full_name: [issue]})
+    initial_config = _config([initial_repo])
+    added_config = replace(initial_config, repositories=(initial_repo, added_repo))
+
+    service = PollingService(
+        config=initial_config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        registry_reload=lambda: RegistryReloadResult(
+            config=added_config,
+            added=("someone/added",),
+            removed=(),
+            unchanged_count=1,
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="devbot"):
+        result = service.run_once()
+
+    assert result.task is not None
+    assert result.task.repository == "someone/added"
+    assert "registry reload succeeded: added=1 removed=0 unchanged=1" in caplog.text
+
+
+def test_polling_cycle_removes_repository_after_registry_reload() -> None:
+    removed_repo = _repo("removed")
+    kept_repo = _repo("kept")
+    github_client = FakeGitHubClient(
+        {
+            removed_repo.full_name: [_issue(removed_repo.full_name, 1, labels=["devbot:ready"])],
+            kept_repo.full_name: [_issue(kept_repo.full_name, 2, labels=["devbot:ready"])],
+        }
+    )
+    initial_config = _config([removed_repo, kept_repo])
+    reloaded_config = replace(initial_config, repositories=(kept_repo,))
+
+    service = PollingService(
+        config=initial_config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        registry_reload=lambda: RegistryReloadResult(
+            config=reloaded_config,
+            added=(),
+            removed=("someone/removed",),
+            unchanged_count=1,
+        ),
+    )
+
+    result = service.run_once()
+
+    assert result.task is not None
+    assert result.task.repository == "someone/kept"
+
+
+def test_polling_cycle_unregistered_last_repository_skips_previous_repo() -> None:
+    removed_repo = _repo("removed")
+    github_client = MagicMock()
+    initial_config = _config([removed_repo])
+    reloaded_config = replace(initial_config, repositories=())
+
+    service = PollingService(
+        config=initial_config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        registry_reload=lambda: RegistryReloadResult(
+            config=reloaded_config,
+            added=(),
+            removed=("someone/removed",),
+            unchanged_count=0,
+        ),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.NO_MANAGED_REPOSITORIES
+    assert service.config.enabled_repositories == ()
+    github_client.list_issues.assert_not_called()
+
+
+def test_polling_cycle_does_not_reload_when_registry_unchanged() -> None:
+    repo = _repo("myrepo")
+    reload_calls = 0
+
+    def unchanged() -> RegistryReloadResult | None:
+        nonlocal reload_calls
+        reload_calls += 1
+        return None
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient({repo.full_name: []}),
+        implementer_runner=MagicMock(),
+        registry_reload=unchanged,
+    )
+
+    service.run_once()
+    service.run_once()
+
+    assert reload_calls == 2
+    assert service.config.enabled_repositories == (repo,)
+
+
+def test_polling_cycle_keeps_previous_config_when_registry_reload_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repo = _repo("myrepo")
+
+    def fail_reload() -> RegistryReloadResult | None:
+        raise RuntimeError("invalid registry")
+
+    service = PollingService(
+        config=_config([repo]),
+        github_client=FakeGitHubClient({repo.full_name: []}),
+        implementer_runner=MagicMock(),
+        registry_reload=fail_reload,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="devbot"):
+        service.run_once()
+
+    assert service.config.enabled_repositories == (repo,)
+    assert "registry reload failed; keeping previous configuration" in caplog.text
