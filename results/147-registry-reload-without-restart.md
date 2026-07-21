@@ -9,6 +9,8 @@
 - reload는 기존 `load_config()`를 사용하므로 legacy + registry merge, duplicate
   validation, registry diagnostics를 startup과 동일하게 재사용한다.
 - reload 실패 시 예외를 polling cycle 밖으로 전파하지 않고 이전 valid config를 유지한다.
+- runtime reload에서는 마지막 repository unregister로 인한 빈 repository set을 valid
+  config로 받아들여 다음 cycle이 `NO_MANAGED_REPOSITORIES`로 전환되게 했다.
 - reload 성공 시 added/removed/unchanged repository count와 repository names를
   로그로 남긴다.
 - daemon main wiring에 `RegistryReloadMonitor.check`를 연결했다.
@@ -22,6 +24,8 @@
   `load_config()`를 통해 재구성해 startup과 같은 validation을 적용한다.
 - malformed registry는 monitor에서 state를 관측한 뒤 reload 실패로 기록한다. 다음 파일
   metadata 변경 시 다시 reload를 시도한다.
+- startup config load는 repository 없음 오류를 유지하고, runtime registry reload만 빈
+  repository set을 허용한다.
 
 ## 수정 파일
 
@@ -38,11 +42,13 @@
 
 - Registry monitor:
   `test_registry_reload_monitor_reports_addition_and_removal`,
+  `test_registry_reload_monitor_allows_last_repository_removal`,
   `test_registry_reload_monitor_reuses_legacy_duplicate_validation`,
   `test_registry_reload_monitor_retries_after_malformed_registry_changes`
 - Polling integration:
   `test_polling_cycle_reloads_registry_addition_before_discovery`,
   `test_polling_cycle_removes_repository_after_registry_reload`,
+  `test_polling_cycle_unregistered_last_repository_skips_previous_repo`,
   `test_polling_cycle_does_not_reload_when_registry_unchanged`,
   `test_polling_cycle_keeps_previous_config_when_registry_reload_fails`
 
@@ -50,12 +56,12 @@
 
 - `uv run ruff check src/devbot/registry_reload.py src/devbot/polling.py src/devbot/main.py tests/test_registry_reload.py tests/test_polling.py`
   - PASS
-- `uv run pytest tests/test_registry_reload.py tests/test_polling.py::test_polling_cycle_reloads_registry_addition_before_discovery tests/test_polling.py::test_polling_cycle_removes_repository_after_registry_reload tests/test_polling.py::test_polling_cycle_does_not_reload_when_registry_unchanged tests/test_polling.py::test_polling_cycle_keeps_previous_config_when_registry_reload_fails`
-  - PASS, 7 passed
+- `uv run pytest tests/test_registry_reload.py tests/test_polling.py::test_polling_cycle_reloads_registry_addition_before_discovery tests/test_polling.py::test_polling_cycle_removes_repository_after_registry_reload tests/test_polling.py::test_polling_cycle_unregistered_last_repository_skips_previous_repo tests/test_polling.py::test_polling_cycle_does_not_reload_when_registry_unchanged tests/test_polling.py::test_polling_cycle_keeps_previous_config_when_registry_reload_fails`
+  - PASS, 9 passed
 - `uv run ruff check .`
   - PASS
 - `uv run pytest`
-  - PASS, 1436 passed in 153.27s
+  - PASS, 1438 passed in 253.67s
 - `uv run devbot doctor`
   - FAIL: startup self-update가 dirty operator checkout에서 중단됨
     (`skip_reason=operator checkout dirty`). 현재 Task 변경 파일 때문에 발생한 운영

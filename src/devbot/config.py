@@ -203,6 +203,7 @@ def load_config(
     env_path: Path | str | None = None,
     repositories_path: Path | str | None = None,
     registry_path: Path | str | None = None,
+    allow_empty_repositories: bool = False,
 ) -> DevBotConfig:
     """Load `.env`, `config/repositories.yaml`, and the `devbot init`
     registry into a `DevBotConfig`.
@@ -281,7 +282,7 @@ def load_config(
     repositories = legacy_repositories + registry_resolution.repositories
     _require_no_cross_source_duplicates(legacy_repositories, registry_resolution.repositories)
 
-    if not repositories:
+    if not repositories and not allow_empty_repositories:
         if workspace_root is not None:
             repositories_path_raw = (
                 str(repositories_path)

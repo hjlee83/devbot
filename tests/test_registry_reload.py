@@ -62,6 +62,28 @@ def test_registry_reload_monitor_reports_addition_and_removal(tmp_path: Path) ->
     assert removed.unchanged_count == 1
 
 
+def test_registry_reload_monitor_allows_last_repository_removal(tmp_path: Path) -> None:
+    env_path = _write_env(tmp_path)
+    registry_path = tmp_path / "registry.yaml"
+    repo_path = _repo_root(tmp_path / "only")
+    initialize_repository(repo_path, owner="someone", repo="only", registry_path=registry_path)
+    initial_config = load_config(env_path=env_path, registry_path=registry_path)
+    monitor = RegistryReloadMonitor(
+        initial_config=initial_config,
+        env_path=env_path,
+        registry_path=registry_path,
+    )
+
+    unregister_repository(registry_path, repo_path)
+    reloaded = monitor.check()
+
+    assert reloaded is not None
+    assert reloaded.added == ()
+    assert reloaded.removed == ("someone/only",)
+    assert reloaded.unchanged_count == 0
+    assert reloaded.config.enabled_repositories == ()
+
+
 def test_registry_reload_monitor_reuses_legacy_duplicate_validation(
     tmp_path: Path,
 ) -> None:

@@ -59,6 +59,7 @@ class RegistryReloadMonitor:
             env_path=self._env_path,
             repositories_path=self._repositories_path,
             registry_path=self._registry_path,
+            allow_empty_repositories=True,
         )
         self._last_config = new_config
         old_names = {repository.full_name for repository in old_config.enabled_repositories}

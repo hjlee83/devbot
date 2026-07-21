@@ -4579,6 +4579,32 @@ def test_polling_cycle_removes_repository_after_registry_reload() -> None:
     assert result.task.repository == "someone/kept"
 
 
+def test_polling_cycle_unregistered_last_repository_skips_previous_repo() -> None:
+    removed_repo = _repo("removed")
+    github_client = MagicMock()
+    initial_config = _config([removed_repo])
+    reloaded_config = replace(initial_config, repositories=())
+
+    service = PollingService(
+        config=initial_config,
+        github_client=github_client,
+        implementer_runner=MagicMock(),
+        ensure_workspace_ready=_no_op_workspace_check,
+        registry_reload=lambda: RegistryReloadResult(
+            config=reloaded_config,
+            added=(),
+            removed=("someone/removed",),
+            unchanged_count=0,
+        ),
+    )
+
+    result = service.run_once()
+
+    assert result.status is PollingStatus.NO_MANAGED_REPOSITORIES
+    assert service.config.enabled_repositories == ()
+    github_client.list_issues.assert_not_called()
+
+
 def test_polling_cycle_does_not_reload_when_registry_unchanged() -> None:
     repo = _repo("myrepo")
     reload_calls = 0
