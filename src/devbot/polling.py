@@ -138,10 +138,50 @@ _VALIDATION_MANUAL_ACTION_CATEGORIES = frozenset(
 )
 
 RESUME_ATTEMPT_LIMIT = 3
+_BOOTSTRAP_METADATA_DIAGNOSTIC_MARKER = "<!-- devbot-bootstrap-metadata-diagnostic:v1"
 _RESUME_MARKER_RE = re.compile(
     r"<!-- devbot-resume:v1 issue=(?P<issue>\d+) pr=(?P<pr>\d+|-) "
     r"attempt=(?P<attempt>\d+) branch=(?P<branch>[^ ]+) reason=(?P<reason>[^ ]+) -->"
 )
+
+
+def _bootstrap_metadata_diagnostic_marker(missing_fields: Sequence[str]) -> str:
+    fields = ",".join(missing_fields) if missing_fields else "-"
+    return f"{_BOOTSTRAP_METADATA_DIAGNOSTIC_MARKER} missing={fields} -->"
+
+
+def _render_bootstrap_metadata_diagnostic(
+    *,
+    reason: str,
+    missing_fields: Sequence[str],
+) -> str:
+    fields = tuple(missing_fields) or ("unknown",)
+    missing_lines = "\n".join(f"- {field}" for field in fields)
+    marker = _bootstrap_metadata_diagnostic_marker(fields)
+    return f"""{marker}
+DevBot could not start this task because required Issue metadata is missing or invalid.
+
+Validation failure:
+{reason}
+
+Missing fields:
+{missing_lines}
+
+Add or update the Issue body with at least:
+
+## Objective
+Describe the intended outcome.
+
+## Scope
+Describe what may be changed.
+
+## Acceptance Criteria
+- Define verifiable completion conditions.
+
+## Validation
+- Define the commands or checks that must pass.
+
+Keep or reapply `devbot:ready` after updating the Issue so DevBot can retry."""
 
 
 def _resume_attempt_from_comments(
@@ -610,6 +650,42 @@ class PollingService:
                 status=PollingStatus.ITERATION_ERROR, task=selected, message=str(exc)
             )
         return None
+
+    def _comment_bootstrap_metadata_failure(
+        self,
+        repository: RepositoryConfig,
+        issue: GitHubIssue,
+        error: WorkspacePreparationError,
+    ) -> None:
+        if self.state_writer is None:
+            return
+        missing_fields = error.missing_metadata_fields
+        marker = _bootstrap_metadata_diagnostic_marker(missing_fields)
+        try:
+            comments = self.github_client.list_issue_comments(repository, issue.number)
+        except Exception as exc:  # noqa: BLE001 - diagnostic comment is best-effort
+            self.logger.warning(
+                "Bootstrap metadata diagnostic 댓글 조회 실패 (%s #%d): %s",
+                repository.full_name,
+                issue.number,
+                exc,
+            )
+            return
+        if any(marker in comment.body for comment in comments):
+            return
+        body = _render_bootstrap_metadata_diagnostic(
+            reason=str(error),
+            missing_fields=missing_fields,
+        )
+        try:
+            self.state_writer.comment(repository, issue, body)
+        except Exception as exc:  # noqa: BLE001 - preserve original validation result
+            self.logger.warning(
+                "Bootstrap metadata diagnostic 댓글 작성 실패 (%s #%d): %s",
+                repository.full_name,
+                issue.number,
+                exc,
+            )
 
     def _collect(
         self, repositories: Sequence[RepositoryConfig], cycle_id: str
@@ -1660,6 +1736,8 @@ class PollingService:
                     exc.category.value,
                     exc,
                 )
+                if exc.category is WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED:
+                    self._comment_bootstrap_metadata_failure(repository, issue, exc)
                 restore_failure = self._restore(
                     repository,
                     issue,

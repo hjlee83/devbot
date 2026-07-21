@@ -25,6 +25,10 @@ _MAX_SLUG_LENGTH = 48
 class BootstrapValidationError(RuntimeError):
     """Raised when an Issue is not sufficiently specified for bootstrap."""
 
+    def __init__(self, message: str, *, missing_fields: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.missing_fields = missing_fields
+
 
 @dataclass(frozen=True, slots=True)
 class BootstrapIssueMetadata:
@@ -205,4 +209,7 @@ def _require_section(sections: dict[str, str], *names: str) -> str:
             if title == name or title.startswith(f"{name} "):
                 if content.strip():
                     return content.strip()
-    raise BootstrapValidationError(f"missing required Issue metadata: {' or '.join(names)}")
+    raise BootstrapValidationError(
+        f"missing required Issue metadata: {' or '.join(names)}",
+        missing_fields=(names[0],),
+    )

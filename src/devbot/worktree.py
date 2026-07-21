@@ -66,9 +66,16 @@ class WorkspacePreparationError(RuntimeError):
     that must be resolved before an Agent runs (Scope §9). Always carries an
     explicit `category`."""
 
-    def __init__(self, category: WorkspacePreparationFailure, message: str) -> None:
+    def __init__(
+        self,
+        category: WorkspacePreparationFailure,
+        message: str,
+        *,
+        missing_metadata_fields: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.category = category
+        self.missing_metadata_fields = missing_metadata_fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -605,6 +612,7 @@ class WorktreeManager:
                 raise WorkspacePreparationError(
                     WorkspacePreparationFailure.BOOTSTRAP_VALIDATION_FAILED,
                     str(exc),
+                    missing_metadata_fields=exc.missing_fields,
                 ) from exc
             branch = plan.branch
             create_branch = True
