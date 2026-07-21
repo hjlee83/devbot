@@ -114,6 +114,28 @@ Startup self-update has a separate source-checkout resolution policy. It uses
 module path to find the DevBot Git checkout, so a runtime directory is never
 mistaken for the operator checkout.
 
+## Runtime registry reload
+
+A long-running daemon checks the registry file at polling-cycle boundaries
+using lightweight file metadata (`mtime`, size, inode). When the file changes,
+DevBot reloads the effective repository configuration through the same
+`load_config()` path used at startup. That means legacy repositories,
+registered repositories, duplicate detection, and registry diagnostics keep the
+same semantics during reload.
+
+Reload behavior is fail-safe:
+
+- additions become eligible for queue discovery in the next cycle;
+- removals are excluded from subsequent queue discovery;
+- active jobs continue with the repository snapshot captured when they were
+  scheduled;
+- malformed or temporarily unreadable registry files are logged and the
+  previous valid configuration remains active;
+- when the registry file metadata is unchanged, no config reload work runs.
+
+The daemon logs change detection through the reload result: added repository
+names, removed repository names, and the unchanged repository count.
+
 ## Diagnostics: never crash on one bad registration
 
 `resolve_registered_repositories()` never raises for a single broken
