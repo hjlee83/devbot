@@ -62,6 +62,7 @@ from devbot.agent_execution import AgentExecutionContext, AgentRole
 from devbot.agent_outcome import classify_agent_outcome
 from devbot.agents.base import AgentRunner, is_session_limit_output
 from devbot.automerge import READY_TO_MERGE_LABEL, AutomergeDecision, AutomergeService
+from devbot.blocked_recovery import BlockedDiagnosticContext, render_blocked_diagnostic_comment
 from devbot.delivery import DeliveryService, branch_has_implementation_evidence
 from devbot.github_client import GitHubClient, GitHubIssue, PullRequest, PullRequestComment
 from devbot.github_retry import GitHubTransientError
@@ -1582,10 +1583,24 @@ class PollingService:
                 selected.number,
                 exc,
             )
+            block_reason = render_blocked_diagnostic_comment(
+                BlockedDiagnosticContext(
+                    repository=repository,
+                    issue=issue,
+                    job_type=JobType.IMPLEMENT,
+                    stage="unexpected_exception",
+                    worktree_path=(
+                        repository.local_path
+                        if self.prepare_workspace is None
+                        else None
+                    ),
+                ),
+                exc,
+            )
             block_failure = self._block(
                 repository,
                 issue,
-                f"예상하지 못한 예외로 Job 중단: {exc!r}",
+                block_reason,
                 selected,
                 job_type=JobType.IMPLEMENT,
             )
@@ -2373,10 +2388,21 @@ class PollingService:
             self.logger.error(
                 "Delivery 실패 (%s #%d): %s", selected.repository, selected.number, exc
             )
+            block_reason = render_blocked_diagnostic_comment(
+                BlockedDiagnosticContext(
+                    repository=repository,
+                    issue=issue,
+                    job_type=JobType.IMPLEMENT,
+                    stage="delivery",
+                    branch=branch,
+                    worktree_path=work_repository.local_path,
+                ),
+                exc,
+            )
             block_failure = self._block(
                 repository,
                 issue,
-                f"Delivery 실패: {exc!r}",
+                block_reason,
                 selected,
                 job_type=JobType.IMPLEMENT,
             )

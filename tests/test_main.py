@@ -2866,6 +2866,83 @@ def test_status_command_reports_runtime_scheduler_state(
     assert "worker 1: state=idle" in out
 
 
+def test_resume_command_restores_blocked_issue_when_worktree_is_safe(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    env_path.write_text(env_path.read_text(encoding="utf-8") + "DRY_RUN=false\n", encoding="utf-8")
+    repo_path = tmp_path / "workspace" / "myrepo"
+    worktree = repo_path / ".worktrees" / "issue-155"
+    (worktree / ".git").mkdir(parents=True)
+    (worktree / "tasks").mkdir()
+    (worktree / "tasks" / "155-recovery.md").write_text("contract\n", encoding="utf-8")
+    issue = GitHubIssue(
+        repository="someone/myrepo",
+        number=155,
+        title="Recover blocked job",
+        body=(
+            "- Branch: `task/155-recovery`\n"
+            "- Contract: `tasks/155-recovery.md`\n"
+        ),
+        state="open",
+        labels=("devbot:blocked",),
+        created_at=datetime(2026, 1, 1),
+    )
+
+    with (
+        patch("devbot.main.GitHubClient") as read_client_cls,
+        patch("devbot.main.GitHubWriteClient") as write_client_cls,
+        patch("devbot.main.TimelineService"),
+    ):
+        read_client = read_client_cls.return_value
+        read_client.get_issue.return_value = issue
+        exit_code = main(
+            ["resume", "someone/myrepo", "155"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 0
+    write_client = write_client_cls.return_value
+    write_client.set_labels.assert_called_once()
+    assert write_client.set_labels.call_args.args[1:] == (155, ["devbot:ready"])
+    out = capsys.readouterr().out
+    assert "resume 가능" in out
+    assert str(worktree) in out
+
+
+def test_resume_command_refuses_missing_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_path, repositories_path = _release_env(tmp_path)
+    issue = GitHubIssue(
+        repository="someone/myrepo",
+        number=155,
+        title="Recover blocked job",
+        body="- Branch: `task/155-recovery`\n",
+        state="open",
+        labels=("devbot:blocked",),
+        created_at=datetime(2026, 1, 1),
+    )
+
+    with (
+        patch("devbot.main.GitHubClient") as read_client_cls,
+        patch("devbot.main.GitHubWriteClient") as write_client_cls,
+    ):
+        read_client_cls.return_value.get_issue.return_value = issue
+        exit_code = main(
+            ["resume", "someone/myrepo", "155"],
+            env_path=env_path,
+            repositories_path=repositories_path,
+        )
+
+    assert exit_code == 1
+    write_client_cls.return_value.set_labels.assert_not_called()
+    err = capsys.readouterr().err
+    assert "resume 거부" in err
+    assert "보존된 worktree가 없습니다" in err
+
+
 def test_goal_approved_validate_start_status_resume_commands_are_wired(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
