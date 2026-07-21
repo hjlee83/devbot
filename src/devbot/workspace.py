@@ -8,6 +8,7 @@ access; cloning repositories is out of scope for this Task.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from devbot.github_client import GitHubIssue
 from devbot.models import IssueComment, RepositoryConfig
 
 DEFAULT_PROMPT_TEMPLATE_PATH = Path("prompts/issue-task.md")
+_LOGGER = logging.getLogger("devbot")
+
 
 class WorkspaceValidationError(RuntimeError):
     """Raised when a repository's local path is not usable."""
@@ -61,7 +64,26 @@ def _has_uncommitted_changes(path: Path) -> bool:
         text=True,
         check=True,
     )
-    return bool(result.stdout.strip())
+    return bool(_porcelain_changed_files(result.stdout))
+
+
+def _is_devbot_metadata_path(path: str) -> bool:
+    return path == ".devbot" or path.startswith(".devbot/")
+
+
+def _porcelain_changed_files(output: str) -> tuple[str, ...]:
+    changed_files: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:] if len(line) > 3 else line
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        if _is_devbot_metadata_path(path):
+            _LOGGER.debug("ignored DevBot metadata workspace change: %s", path)
+            continue
+        changed_files.append(path)
+    return tuple(changed_files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +120,7 @@ def inspect_workspace(repository: RepositoryConfig) -> WorkspaceStatus:
     except (subprocess.CalledProcessError, OSError):
         return WorkspaceStatus(exists=True, is_git_repository=True, has_uncommitted_changes=None)
 
-    changed_files = tuple(
-        line[3:] if len(line) > 3 else line for line in result.stdout.splitlines() if line.strip()
-    )
+    changed_files = _porcelain_changed_files(result.stdout)
     return WorkspaceStatus(
         exists=True,
         is_git_repository=True,

@@ -138,6 +138,33 @@ def test_workspace_cleanliness_detects_dirty_workspace(tmp_path: Path) -> None:
     assert check.fatal is False
 
 
+def test_workspace_cleanliness_ignores_devbot_metadata(tmp_path: Path) -> None:
+    repo_path = tmp_path / "myrepo"
+    _init_git_repo(repo_path)
+    (repo_path / ".devbot").mkdir()
+    (repo_path / ".devbot" / "config.yaml").write_text("owner: someone\n", encoding="utf-8")
+
+    check = check_workspace_cleanliness(_repo(repo_path))
+
+    assert check.ok is True
+    assert check.detail == "clean"
+
+
+def test_workspace_cleanliness_still_reports_source_changes_with_devbot_metadata(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "myrepo"
+    _init_git_repo(repo_path)
+    (repo_path / ".devbot").mkdir()
+    (repo_path / ".devbot" / "config.yaml").write_text("owner: someone\n", encoding="utf-8")
+    (repo_path / "app.py").write_text("print('dirty')\n", encoding="utf-8")
+
+    check = check_workspace_cleanliness(_repo(repo_path))
+
+    assert check.ok is False
+    assert "미커밋 변경 1건: app.py" in check.detail
+
+
 def test_current_branch_compatibility_accepts_default_branch(tmp_path: Path) -> None:
     repo_path = tmp_path / "myrepo"
     _init_git_repo(repo_path)
