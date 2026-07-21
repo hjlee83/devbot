@@ -14,6 +14,7 @@ from devbot.workspace import (
     build_agent_prompt,
     ensure_git_workspace_ready,
     generate_branch_name,
+    inspect_workspace,
 )
 
 
@@ -59,6 +60,54 @@ def test_dirty_workspace_is_detected(tmp_path: Path) -> None:
 
     with pytest.raises(DirtyWorkspaceError):
         ensure_git_workspace_ready(repository)
+
+
+def test_devbot_metadata_changes_do_not_dirty_workspace(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    (repo_path / ".devbot").mkdir()
+    (repo_path / ".devbot" / "config.yaml").write_text("owner: someone\n", encoding="utf-8")
+    repository = _repo(repo_path)
+
+    with caplog.at_level("DEBUG", logger="devbot"):
+        status = inspect_workspace(repository)
+        ensure_git_workspace_ready(repository)
+
+    assert status.has_uncommitted_changes is False
+    assert status.changed_files == ()
+    assert "ignored DevBot metadata workspace change: .devbot/" in caplog.text
+
+
+def test_devbot_metadata_filter_preserves_real_source_changes(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    (repo_path / ".devbot").mkdir()
+    (repo_path / ".devbot" / "config.yaml").write_text("owner: someone\n", encoding="utf-8")
+    (repo_path / "src.py").write_text("print('dirty')\n", encoding="utf-8")
+    repository = _repo(repo_path)
+
+    status = inspect_workspace(repository)
+
+    assert status.has_uncommitted_changes is True
+    assert status.changed_files == ("src.py",)
+    with pytest.raises(DirtyWorkspaceError):
+        ensure_git_workspace_ready(repository)
+
+
+def test_workspace_cleanliness_respects_gitignore(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    _init_git_repo(repo_path)
+    (repo_path / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
+    _run_git("add", ".gitignore", cwd=repo_path)
+    _run_git("commit", "-q", "-m", "ignore logs", cwd=repo_path)
+    (repo_path / "ignored.log").write_text("ignored\n", encoding="utf-8")
+
+    status = inspect_workspace(_repo(repo_path))
+
+    assert status.has_uncommitted_changes is False
+    assert status.changed_files == ()
 
 
 def test_clean_workspace_is_accepted(tmp_path: Path) -> None:
