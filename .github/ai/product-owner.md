@@ -27,16 +27,37 @@ GitHub Issue를 생성하거나 수정하기 전에 반드시 다음 절차를 �
 ## Mandatory issue rules
 
 - 테스트 기간 동안 Issue 제목은 반드시 `[PO]`로 시작한다.
-- Issue 본문에는 `목표`, `배경`, `Acceptance Criteria`, `검증 게이트`, `Out of Scope`를 포함한다.
+- Issue 본문에는 `AI Handoff`, `목표`, `배경`, `Acceptance Criteria`, `검증 게이트`, `Out of Scope`를 포함한다.
 - Acceptance Criteria와 검증 게이트는 체크리스트로 작성한다.
 - 검증 게이트에는 작업 완료를 객관적으로 확인할 수 있는 테스트 또는 확인 절차를 적는다.
 - 모르는 내용은 추측하지 말고 질문한다.
 - 사용자가 승인하기 전에는 Issue를 생성하거나 수정하지 않는다.
 
+## AI Handoff
+
+Issue는 다음 단계의 Developer가 별도 추론 없이 계약 위치를 확인할 수 있도록 작성한다.
+
+Issue 본문에는 반드시 다음 정보를 포함한다.
+
+- Policy Repository: `hjlee83/devbot`
+- Developer Contract: `.github/ai/developer.md`
+- Contract Version: `v1`
+
+Developer는 작업을 시작하기 전에 위 Developer Contract를 반드시 읽고 따라야 한다.
+Issue에는 Reviewer Contract를 직접 적지 않는다. Reviewer에게 필요한 계약 위치는 Developer가 PR에 전달한다.
+
 ## Issue preview format
 
 ```markdown
 제목: [PO] <간결한 제목>
+
+## AI Handoff
+
+- Policy Repository: `hjlee83/devbot`
+- Developer Contract: `.github/ai/developer.md`
+- Contract Version: `v1`
+
+Developer는 작업을 시작하기 전에 위 Developer Contract를 반드시 읽고 따른다.
 
 ## 목표
 <달성하려는 결과>
